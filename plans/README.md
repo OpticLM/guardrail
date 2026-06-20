@@ -35,7 +35,7 @@ git; leave changes in the working copy for the operator to review.
 |------|-------|----------|--------|------------|--------|
 | 001  | Workspace + `guardrail-core` API                    | P1 | M | —          | DONE |
 | 002  | `guardrail-linux` skeleton + `setrlimit` + env scrub | P1 | M | 001        | DONE |
-| 003  | Landlock filesystem confinement                     | P1 | M | 002        | TODO |
+| 003  | Landlock filesystem confinement                     | P1 | M | 002        | DONE |
 | 004  | seccomp network confinement                         | P1 | M | 002        | TODO |
 | 005  | seccomp IPC confinement                             | P2 | M | 004        | TODO |
 | 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | TODO |
@@ -100,4 +100,14 @@ locally). Crate choices: `landlock` 0.4, `seccompiler` 0.5, `libc` 0.2,
 - **Architecture coverage** for seccomp is x86_64/aarch64/riscv64 (direct socket
   syscalls; not i386 `socketcall` or SysV `ipc` multiplexers). Plans 004/005
   STOP and report on unsupported arches rather than silently under-confining.
+- **Landlock self-exec requirement** (discovered executing plan 003): once
+  filesystem confinement is active, a sandboxed process cannot `execve` its own
+  binary unless read is granted on the binary's location (or it lives under a
+  default system dir). Plan 003 therefore also added `.allow_read(<probe dir>)`
+  to the pre-existing plan-002 integration tests (`environment.rs`,
+  `resource_limits.rs`) so they still spawn the probe under Landlock — outside
+  plan 003's stated file scope, but required to keep `cargo test` green. Chosen
+  (operator decision) over auto-granting the target binary in `LinuxBackend`,
+  which would change the default security posture and is deferred as a possible
+  follow-up.
 </content>

@@ -9,9 +9,9 @@ license = "Apache-2.0"
 repository = "https://github.com/OpticLM/guardrail"
 
 [workspace.dependencies]
-# Shared dependency versions. guardrail-linux (plan 002) adds libc below;
-# landlock and seccompiler are deferred to plans 003/004/005 — do not add
-# those yet.
+# Shared dependency versions. seccompiler is deferred to plans 004/005 — do
+# not add it yet.
 thiserror = "2"
 guardrail-core = { path = "crates/guardrail-core" }
 libc = "0.2"
+landlock = "0.4"

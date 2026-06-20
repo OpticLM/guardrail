@@ -7,14 +7,16 @@
 //!   3   operation failed because it was denied (the expected sandboxed result)
 //!   2   usage error / unknown command
 //!
-//! Commands (this plan):
+//! Commands:
 //!   echo-env <NAME>   print the value of env var NAME (empty if unset), exit 0
 //!   alloc <MB>        try to allocate and touch <MB> megabytes; exit 0 if it
 //!                     succeeds, exit 3 if allocation fails
 //!   spin              busy-loop forever (for CPU-time-limit tests)
+//!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
+//!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
 //!
-//! Later plans add more commands (read-file, write-file, socket-inet, bind,
-//! shm, ptrace, ...). Keep the dispatch table and exit-code contract stable.
+//! Later plans add more commands (socket-inet, bind, shm, ptrace, ...). Keep
+//! the dispatch table and exit-code contract stable.
 
 use std::process::exit;
 
@@ -51,8 +53,22 @@ fn main() {
         "spin" => loop {
             std::hint::spin_loop();
         },
+        "read-file" => {
+            let path = args.get(2).map(String::as_str).unwrap_or("");
+            match std::fs::read(path) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "write-file" => {
+            let path = args.get(2).map(String::as_str).unwrap_or("");
+            match std::fs::write(path, b"x") {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
         _ => {
-            eprintln!("usage: guardrail-probe <echo-env|alloc|spin> [arg]");
+            eprintln!("usage: guardrail-probe <echo-env|alloc|spin|read-file|write-file> [arg]");
             exit(2);
         }
     }
