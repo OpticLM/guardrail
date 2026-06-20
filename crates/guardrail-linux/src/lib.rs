@@ -10,6 +10,8 @@ use std::process::Command;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
+pub mod diagnostics;
+
 mod fs;
 mod rlimit;
 mod seccomp;
