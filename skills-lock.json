@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "improve": {
+      "source": "shadcn/improve",
+      "sourceType": "github",
+      "skillPath": "skills/improve/SKILL.md",
+      "computedHash": "39a9358732dcff385e9e4d3e60b4547856f834e54a58b35e455aa9bd49928c13"
+    },
+    "jj-vcs": {
+      "source": "OpticLM/jj-skill",
+      "sourceType": "github",
+      "skillPath": "skills/jj-vcs/SKILL.md",
+      "computedHash": "a263e9fdd927e53870ee1916a7b7b6f6c9a5408d78ce7ebf94477593c5ee3b69"
+    }
+  }
+}
