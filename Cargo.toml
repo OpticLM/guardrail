@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/guardrail-core"]
+members = ["crates/guardrail-core", "crates/guardrail-linux"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,7 +9,9 @@ license = "Apache-2.0"
 repository = "https://github.com/OpticLM/guardrail"
 
 [workspace.dependencies]
-# Shared dependency versions. guardrail-linux (plan 002) adds landlock,
-# seccompiler, and libc here; do not add those now.
+# Shared dependency versions. guardrail-linux (plan 002) adds libc below;
+# landlock and seccompiler are deferred to plans 003/004/005 — do not add
+# those yet.
 thiserror = "2"
 guardrail-core = { path = "crates/guardrail-core" }
+libc = "0.2"
