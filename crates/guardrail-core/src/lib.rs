@@ -8,6 +8,7 @@
 mod backend;
 mod builder;
 mod config;
+mod diagnostics;
 mod error;
 mod policy;
 mod process;
@@ -15,6 +16,7 @@ mod process;
 pub use backend::Backend;
 pub use builder::SandboxBuilder;
 pub use config::{ResourceLimits, SandboxConfig};
+pub use diagnostics::{Violation, ViolationKind};
 pub use error::Error;
 pub use policy::{FsAccess, IpcPolicy, NetworkPolicy};
 pub use process::SandboxChild;
