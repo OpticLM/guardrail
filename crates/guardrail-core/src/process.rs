@@ -3,6 +3,8 @@
 use std::process::{Child, ExitStatus};
 
 #[cfg(windows)]
+use std::any::Any;
+#[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 
 /// A handle to a spawned, sandboxed child process.
@@ -22,6 +24,7 @@ enum SandboxChildInner {
         process: OwnedHandle,
         job: OwnedHandle,
         pid: u32,
+        _guards: Vec<Box<dyn Any + Send>>,
     },
 }
 
@@ -84,8 +87,31 @@ impl SandboxChild {
     /// owned handles whose lifetimes are transferred to this `SandboxChild`.
     #[cfg(windows)]
     pub unsafe fn from_windows_handles(process: OwnedHandle, job: OwnedHandle, pid: u32) -> Self {
+        // SAFETY: delegated to from_windows_handles_with_guards with no extra
+        // cleanup guards.
+        unsafe { Self::from_windows_handles_with_guards(process, job, pid, Vec::new()) }
+    }
+
+    /// Construct a Windows child and keep backend cleanup guards alive with it.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`Self::from_windows_handles`]. Each guard must be
+    /// safe to drop after the process and Job Object handles are dropped.
+    #[cfg(windows)]
+    pub unsafe fn from_windows_handles_with_guards(
+        process: OwnedHandle,
+        job: OwnedHandle,
+        pid: u32,
+        guards: Vec<Box<dyn Any + Send>>,
+    ) -> Self {
         Self {
-            inner: SandboxChildInner::WindowsRaw { process, job, pid },
+            inner: SandboxChildInner::WindowsRaw {
+                process,
+                job,
+                pid,
+                _guards: guards,
+            },
         }
     }
 }

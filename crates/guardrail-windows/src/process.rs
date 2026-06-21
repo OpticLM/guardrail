@@ -2,49 +2,77 @@
 
 #![cfg(windows)]
 
+use std::any::Any;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::process::Command;
-use std::{mem, ptr};
+use std::{io, mem, ptr};
 
 use guardrail_core::{Error, SandboxChild};
+use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
+use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION,
-    STARTUPINFOW, TerminateProcess,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTUPINFOEXW,
+    TerminateProcess, UpdateProcThreadAttribute,
 };
 
+use crate::acl::AclGuard;
+use crate::appcontainer::AppContainerProfile;
 use crate::handle::{bool_result, owned_handle_from_raw, resume_then_close_thread};
 
-pub(crate) fn launch(command: Command, job: OwnedHandle) -> Result<SandboxChild, Error> {
+pub(crate) fn launch(
+    command: Command,
+    job: OwnedHandle,
+    mut appcontainer: AppContainerProfile,
+    acl: AclGuard,
+) -> Result<SandboxChild, Error> {
     let mut command_line = command_line_block(&command);
     let environment = environment_block(&command);
+    let application_name = application_name(&command);
+    let application_name_ptr = application_name
+        .as_ref()
+        .map_or(ptr::null(), |wide| wide.as_ptr());
     let cwd = command
         .get_current_dir()
         .map(|path| wide_null(path.as_os_str()));
     let cwd_ptr = cwd.as_ref().map_or(ptr::null(), |wide| wide.as_ptr());
 
-    let startup = STARTUPINFOW {
-        cb: mem::size_of::<STARTUPINFOW>() as u32,
-        ..STARTUPINFOW::default()
+    let mut startup = STARTUPINFOEXW {
+        StartupInfo: windows_sys::Win32::System::Threading::STARTUPINFOW {
+            cb: mem::size_of::<STARTUPINFOEXW>() as u32,
+            ..windows_sys::Win32::System::Threading::STARTUPINFOW::default()
+        },
+        ..STARTUPINFOEXW::default()
     };
+    let mut attributes =
+        AttributeList::new(1).map_err(|err| Error::confinement("appcontainer", err))?;
+    let mut security_capabilities = appcontainer.security_capabilities();
+    attributes
+        .update_security_capabilities(&mut security_capabilities)
+        .map_err(|err| Error::confinement("appcontainer", err))?;
+    startup.lpAttributeList = attributes.as_mut_ptr();
+
     let mut process_info = PROCESS_INFORMATION::default();
 
     // SAFETY: all pointers either are null or point to nul-terminated UTF-16
     // buffers that outlive the call. `command_line` is mutable because
-    // CreateProcessW may rewrite its command-line buffer.
+    // CreateProcessW may rewrite its command-line buffer. The extended startup
+    // attribute list and SECURITY_CAPABILITIES outlive the call.
     let created = unsafe {
         CreateProcessW(
-            ptr::null(),
+            application_name_ptr,
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
             0,
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
             environment.as_ptr().cast(),
             cwd_ptr,
-            &startup,
+            &startup.StartupInfo,
             &mut process_info,
         )
     };
@@ -74,10 +102,70 @@ pub(crate) fn launch(command: Command, job: OwnedHandle) -> Result<SandboxChild,
     }
 
     let pid = process_info.dwProcessId;
+    let guards: Vec<Box<dyn Any + Send>> = vec![Box::new(appcontainer), Box::new(acl)];
     // SAFETY: the owned process handle, owned job handle, and pid all come
     // from the successful CreateProcessW + AssignProcessToJobObject sequence
-    // above and are transferred into SandboxChild.
-    Ok(unsafe { SandboxChild::from_windows_handles(process, job, pid) })
+    // above and are transferred into SandboxChild. The cleanup guards only own
+    // AppContainer/ACL cleanup state and are dropped after the raw handles.
+    Ok(unsafe { SandboxChild::from_windows_handles_with_guards(process, job, pid, guards) })
+}
+
+struct AttributeList {
+    storage: Vec<usize>,
+}
+
+impl AttributeList {
+    fn new(attribute_count: u32) -> io::Result<Self> {
+        let mut bytes = 0usize;
+        unsafe {
+            InitializeProcThreadAttributeList(ptr::null_mut(), attribute_count, 0, &mut bytes);
+        }
+        if bytes == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let words = bytes.div_ceil(mem::size_of::<usize>());
+        let mut list = Self {
+            storage: vec![0usize; words],
+        };
+        let ok = unsafe {
+            InitializeProcThreadAttributeList(list.as_mut_ptr(), attribute_count, 0, &mut bytes)
+        };
+        bool_result(ok)?;
+        Ok(list)
+    }
+
+    fn as_mut_ptr(
+        &mut self,
+    ) -> windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.storage.as_mut_ptr().cast()
+    }
+
+    fn update_security_capabilities(
+        &mut self,
+        security_capabilities: &mut SECURITY_CAPABILITIES,
+    ) -> io::Result<()> {
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                security_capabilities as *mut _ as *const _,
+                mem::size_of::<SECURITY_CAPABILITIES>(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        bool_result(ok)
+    }
+}
+
+impl Drop for AttributeList {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteProcThreadAttributeList(self.as_mut_ptr());
+        }
+    }
 }
 
 fn terminate_process(process: &OwnedHandle) {
@@ -101,6 +189,47 @@ fn command_line_block(command: &Command) -> Vec<u16> {
     }
     out.push(0);
     out
+}
+
+fn application_name(command: &Command) -> Option<Vec<u16>> {
+    let program = command.get_program();
+    if has_path_separator(program) {
+        return Some(wide_null(program));
+    }
+
+    let program_wide = wide_null(program);
+    let extension = wide_null(OsStr::new(".exe"));
+    let mut buffer = vec![0u16; 260];
+
+    loop {
+        let found = unsafe {
+            SearchPathW(
+                ptr::null(),
+                program_wide.as_ptr(),
+                extension.as_ptr(),
+                buffer.len() as u32,
+                buffer.as_mut_ptr(),
+                ptr::null_mut(),
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+
+        let found = found as usize;
+        if found < buffer.len() {
+            buffer.truncate(found + 1);
+            return Some(buffer);
+        }
+
+        buffer.resize(found + 1, 0);
+    }
+}
+
+fn has_path_separator(value: &OsStr) -> bool {
+    value
+        .encode_wide()
+        .any(|ch| ch == b'\\' as u16 || ch == b'/' as u16)
 }
 
 fn quote_arg(arg: &OsStr) -> Vec<u16> {
@@ -157,6 +286,7 @@ fn environment_block(command: &Command) -> Vec<u16> {
     }
     if block.is_empty() {
         block.push(0);
+        return block;
     }
     block.push(0);
     block
@@ -223,10 +353,28 @@ mod tests {
     }
 
     #[test]
-    fn empty_environment_block_is_double_nul_terminated() {
+    fn empty_environment_block_is_nul_terminated() {
         let mut command = Command::new("cmd");
         command.env_clear();
 
-        assert_eq!(environment_block(&command), vec![0, 0]);
+        assert_eq!(environment_block(&command), vec![0]);
+    }
+
+    #[test]
+    fn detects_programs_with_path_separators() {
+        assert!(has_path_separator(OsStr::new(
+            r"C:\Windows\System32\cmd.exe"
+        )));
+        assert!(has_path_separator(OsStr::new("bin/tool.exe")));
+        assert!(!has_path_separator(OsStr::new("cmd")));
+    }
+
+    #[test]
+    fn resolves_bare_program_with_parent_search_path() {
+        let command = Command::new("cmd");
+        let resolved = application_name(&command).expect("cmd resolves");
+        let resolved = wide_to_string(&resolved);
+        assert!(resolved.to_ascii_lowercase().contains(r"\cmd.exe"));
+        assert!(resolved.ends_with('\0'));
     }
 }

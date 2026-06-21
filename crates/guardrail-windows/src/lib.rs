@@ -1,13 +1,19 @@
 //! Windows backend for `guardrail`.
 //!
 //! On Windows this crate launches children suspended, assigns them to a Job
-//! Object, and resumes them only after resource limits are installed. The
-//! AppContainer filesystem/network policy layer is added separately.
+//! Object, places them in a per-run AppContainer for filesystem/network
+//! confinement, and resumes them only after all policy is installed. The core
+//! `IpcPolicy` is currently a documented no-op on Windows; there is no Windows
+//! IPC restriction layer yet.
 
 use std::process::Command;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
+#[cfg(windows)]
+mod acl;
+#[cfg(windows)]
+mod appcontainer;
 #[cfg(windows)]
 mod handle;
 #[cfg(windows)]
@@ -31,8 +37,10 @@ impl WindowsBackend {
 impl Backend for WindowsBackend {
     #[cfg(windows)]
     fn spawn(&self, config: &SandboxConfig, command: Command) -> Result<SandboxChild, Error> {
+        let appcontainer = appcontainer::AppContainerProfile::create(config.network)?;
+        let acl = acl::AclGuard::apply(&config.fs, appcontainer.sid())?;
         let job = job::create(config)?;
-        process::launch(command, job)
+        process::launch(command, job, appcontainer, acl)
     }
 
     #[cfg(not(windows))]
