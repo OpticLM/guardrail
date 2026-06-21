@@ -1,11 +1,19 @@
 //! Windows backend for `guardrail`.
 //!
-//! This crate is a platform backend placeholder until the AppContainer and Job
-//! Object confinement implementation lands.
+//! On Windows this crate launches children suspended, assigns them to a Job
+//! Object, and resumes them only after resource limits are installed. The
+//! AppContainer filesystem/network policy layer is added separately.
 
 use std::process::Command;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+
+#[cfg(windows)]
+mod handle;
+#[cfg(windows)]
+mod job;
+#[cfg(windows)]
+mod process;
 
 /// The Windows sandbox backend.
 #[derive(Debug, Default, Clone)]
@@ -21,9 +29,16 @@ impl WindowsBackend {
 }
 
 impl Backend for WindowsBackend {
+    #[cfg(windows)]
+    fn spawn(&self, config: &SandboxConfig, command: Command) -> Result<SandboxChild, Error> {
+        let job = job::create(config)?;
+        process::launch(command, job)
+    }
+
+    #[cfg(not(windows))]
     fn spawn(&self, _config: &SandboxConfig, _command: Command) -> Result<SandboxChild, Error> {
         Err(Error::Unsupported(
-            "guardrail-windows confinement is not implemented yet; run plans 008-009".into(),
+            "guardrail-windows is only available on Windows".into(),
         ))
     }
 }

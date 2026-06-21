@@ -6,7 +6,7 @@
 > the status row for this plan in `plans/README.md`.
 >
 > **Drift check (run first)**:
-> `jj diff --from 44fcf4e0 -- crates/guardrail-core/src/process.rs crates/guardrail-core/src/backend.rs crates/guardrail-windows Cargo.toml`
+> `jj diff --from 4e4f9327 -- crates/guardrail-core/src/process.rs crates/guardrail-core/src/backend.rs crates/guardrail-windows Cargo.toml`
 > If in-scope code changed since this plan was written, compare the Current
 > state excerpts before proceeding.
 
@@ -17,7 +17,7 @@
 - **Risk**: HIGH (raw Windows process creation and a core process-handle change)
 - **Depends on**: plans/007
 - **Category**: security / migration
-- **Planned at**: commit `44fcf4e0`, 2026-06-21
+- **Planned at**: commit `4e4f9327`, 2026-06-21
 
 ## Why this matters
 
@@ -31,6 +31,8 @@ confinement can reuse, while keeping the Linux `std::process::Child` path intact
 
 ## Current state
 
+- `Cargo.toml:3-7` includes `crates/guardrail-windows` as a workspace member,
+  and `Cargo.toml:21` defines workspace dependency `windows-sys = "0.61"`.
 - `crates/guardrail-core/src/process.rs:12` defines `SandboxChild` as a thin
   wrapper around `std::process::Child`.
 - `crates/guardrail-core/src/process.rs:21-37` exposes `wait`, `kill`,
@@ -39,6 +41,11 @@ confinement can reuse, while keeping the Linux `std::process::Child` path intact
   a `SandboxChild`.
 - `crates/guardrail-linux/src/lib.rs:33` constructs `SandboxChild::from(child)`
   after `std::process::Command::spawn()`.
+- `crates/guardrail-windows/Cargo.toml:9-10` currently depends only on
+  `guardrail-core`.
+- `crates/guardrail-windows/src/lib.rs:23-28` currently returns
+  `Error::Unsupported("guardrail-windows confinement is not implemented yet; run plans 008-009")`
+  from the Windows backend stub.
 - `windows-sys 0.61.2` exposes the needed Job Object APIs in
   `windows_sys::Win32::System::JobObjects`: `CreateJobObjectW`,
   `SetInformationJobObject`, `AssignProcessToJobObject`,

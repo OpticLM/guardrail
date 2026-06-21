@@ -50,7 +50,7 @@ git; leave changes in the working copy for the operator to review.
 | 005  | seccomp IPC confinement                             | P2 | M | 004        | DONE |
 | 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | DONE |
 | 007  | Windows workspace target gates + crate skeleton     | P1 | M | 001        | DONE |
-| 008  | Windows process handles + Job Object resource limits | P1 | L | 007        | TODO |
+| 008  | Windows process handles + Job Object resource limits | P1 | L | 007        | DONE |
 | 009  | AppContainer network and filesystem confinement     | P1 | L | 008        | TODO |
 | 010  | Windows probe tests and diagnostics                 | P2 | M | 008,009    | TODO |
 
