@@ -4,6 +4,7 @@ members = [
     "crates/guardrail-core",
     "crates/guardrail-linux",
     "crates/guardrail-macos",
+    "crates/guardrail-windows",
 ]
 
 [workspace.package]
@@ -18,3 +19,4 @@ guardrail-core = { path = "crates/guardrail-core" }
 libc = "0.2"
 landlock = "0.4"
 seccompiler = "0.5"
+windows-sys = "0.61"

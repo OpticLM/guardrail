@@ -37,6 +37,10 @@ real Job Object/AppContainer plans land.
   `seccompiler`) as normal workspace dependencies.
 - `crates/guardrail-linux/Cargo.toml:10-13` pulls those dependencies
   unconditionally.
+- `crates/guardrail-linux/Cargo.toml` also declares the deterministic
+  `guardrail-probe` test helper binary at `src/bin/guardrail-probe.rs`; that
+  binary uses Linux-only `libc` APIs and must be target-gated alongside the
+  Linux integration tests.
 - `crates/guardrail-linux/src/lib.rs:9-17` imports
   `std::os::unix::process::CommandExt`, `libc`, Landlock, and seccomp modules
   without `cfg(target_os = "linux")`.
@@ -61,9 +65,11 @@ real Job Object/AppContainer plans land.
 ## Scope
 
 **In scope**:
+- `Cargo.lock`
 - `Cargo.toml`
 - `crates/guardrail-linux/Cargo.toml`
 - `crates/guardrail-linux/src/lib.rs`
+- `crates/guardrail-linux/src/bin/guardrail-probe.rs`
 - `crates/guardrail-linux/tests/*.rs`
 - `crates/guardrail-windows/Cargo.toml` (create)
 - `crates/guardrail-windows/src/lib.rs` (create)
@@ -132,6 +138,15 @@ In `crates/guardrail-linux/src/lib.rs`:
   returning `Error::Unsupported("guardrail-linux is only available on Linux".into())`.
 - Preserve the Linux implementation exactly under `cfg(target_os = "linux")`.
 
+In `crates/guardrail-linux/src/bin/guardrail-probe.rs`:
+- Preserve the existing Linux helper behavior exactly under
+  `#[cfg(target_os = "linux")]`.
+- Add a non-Linux `main()` stub that prints a short unsupported message to
+  stderr and exits with code `2` (usage/helper unavailable), without importing
+  or referencing `libc`.
+- Prefer a minimal split such as a Linux-only `linux_main()` containing the
+  current body and a Linux `main()` that calls it, plus the non-Linux stub.
+
 **Verify**: `cargo build -p guardrail-linux` -> exit 0 on Windows, without
 compiling `seccompiler`.
 
@@ -174,6 +189,8 @@ Run:
 - [ ] `guardrail-windows::WindowsBackend::new()` exists and `spawn` returns
       `Error::Unsupported`.
 - [ ] Linux confinement code remains unchanged except for `cfg` gates.
+- [ ] `guardrail-probe` keeps the same behavior on Linux and compiles as an
+      unsupported helper stub on non-Linux targets without `libc`.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - [ ] `cargo fmt --check` exits 0.
 - [ ] `plans/README.md` row 007 is updated to DONE.

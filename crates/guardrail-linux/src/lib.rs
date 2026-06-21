@@ -5,15 +5,21 @@
 //! rules and a seccomp-BPF filter for network and IPC. No external sandboxing
 //! binary is used.
 
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
+#[cfg(target_os = "linux")]
 pub mod diagnostics;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
+#[cfg(target_os = "linux")]
 mod fs;
+#[cfg(target_os = "linux")]
 mod rlimit;
+#[cfg(target_os = "linux")]
 mod seccomp;
 
 /// The Linux sandbox backend.
@@ -30,6 +36,7 @@ impl LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
+    #[cfg(target_os = "linux")]
     fn spawn(&self, config: &SandboxConfig, mut command: Command) -> Result<SandboxChild, Error> {
         // Clone only the data the child closure needs. The closure runs in the
         // forked child, so it must own its inputs (no borrows of `config`).
@@ -72,9 +79,17 @@ impl Backend for LinuxBackend {
         let child = command.spawn().map_err(Error::Spawn)?;
         Ok(SandboxChild::from(child))
     }
+
+    #[cfg(not(target_os = "linux"))]
+    fn spawn(&self, _config: &SandboxConfig, _command: Command) -> Result<SandboxChild, Error> {
+        Err(Error::Unsupported(
+            "guardrail-linux is only available on Linux".into(),
+        ))
+    }
 }
 
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`. Async-signal-safe.
+#[cfg(target_os = "linux")]
 fn set_no_new_privs() -> std::io::Result<()> {
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes scalar args only.
     let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };

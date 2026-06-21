@@ -1,0 +1,10 @@
+[package]
+name = "guardrail-windows"
+description = "Windows backend for the guardrail sandbox (AppContainer + Job Objects)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+guardrail-core.workspace = true

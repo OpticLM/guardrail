@@ -1,4 +1,6 @@
-use std::process::Command;
+#![cfg(target_os = "linux")]
+
+use std::process::{Command, Stdio};
 
 use guardrail_core::{NetworkPolicy, SandboxConfig};
 use guardrail_linux::LinuxBackend;

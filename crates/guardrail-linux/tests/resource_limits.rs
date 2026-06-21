@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Verifies that resource limits actually constrain the child (intent-level):
 //! with a small memory cap a large allocation fails; with a CPU
 //! cap a busy loop is killed within a bounded time.

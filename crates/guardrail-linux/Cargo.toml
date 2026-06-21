@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 guardrail-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 landlock.workspace = true
 seccompiler.workspace = true
