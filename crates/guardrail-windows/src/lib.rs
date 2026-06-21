@@ -14,6 +14,7 @@ use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 mod acl;
 #[cfg(windows)]
 mod appcontainer;
+pub mod diagnostics;
 #[cfg(windows)]
 mod handle;
 #[cfg(windows)]

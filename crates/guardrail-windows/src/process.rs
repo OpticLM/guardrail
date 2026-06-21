@@ -286,6 +286,7 @@ fn environment_block(command: &Command) -> Vec<u16> {
     }
     if block.is_empty() {
         block.push(0);
+        block.push(0);
         return block;
     }
     block.push(0);
@@ -357,7 +358,7 @@ mod tests {
         let mut command = Command::new("cmd");
         command.env_clear();
 
-        assert_eq!(environment_block(&command), vec![0]);
+        assert_eq!(environment_block(&command), vec![0, 0]);
     }
 
     #[test]
