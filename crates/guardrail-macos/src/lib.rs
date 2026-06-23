@@ -3,6 +3,7 @@
 //! Profile generation is platform-independent and tested on Linux. Native
 //! Seatbelt application is available on macOS.
 
+pub mod diagnostics;
 #[allow(dead_code)]
 mod profile;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

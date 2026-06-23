@@ -13,7 +13,7 @@ pub(crate) fn build_with_imports(
     config: &SandboxConfig,
     imports: &[std::path::PathBuf],
 ) -> SeatbeltProfile {
-    let mut source = String::from("(version 1)\n");
+    let mut source = String::from("(version 1)\n(debug deny)\n");
 
     for path in imports {
         let path = sbpl_string(path);
@@ -87,7 +87,10 @@ mod tests {
     fn default_config_denies_by_default() {
         let profile = build(&SandboxBuilder::new().build());
 
-        assert_eq!(profile.source, "(version 1)\n(deny default)\n");
+        assert_eq!(
+            profile.source,
+            "(version 1)\n(debug deny)\n(deny default)\n"
+        );
     }
 
     #[test]
@@ -103,6 +106,7 @@ mod tests {
         assert_eq!(
             profile.source,
             "(version 1)\n\
+             (debug deny)\n\
              (import \"/tmp/base-one.sb\")\n\
              (import \"/tmp/base-two.sb\")\n\
              (deny default)\n\

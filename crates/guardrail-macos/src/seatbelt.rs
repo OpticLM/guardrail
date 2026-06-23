@@ -85,6 +85,7 @@ mod tests {
             profile.source,
             format!(
                 "(version 1)\n\
+                 (debug deny)\n\
                  (import \"{first_import}\")\n\
                  (import \"{second_import}\")\n\
                  (deny default)\n\
