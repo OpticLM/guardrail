@@ -17,9 +17,9 @@
 //!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
-//!   shm               create a SysV shared-memory segment; exit 0 if allowed,
-//!                     3 if denied
-//!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
+//!
+//! Later plans add more commands (shm, ptrace, ...). Keep the dispatch table
+//! and exit-code contract stable.
 
 use std::process::exit;
 
@@ -84,36 +84,10 @@ fn main() {
             Ok(_) => exit(0),
             Err(_) => exit(3),
         },
-        "shm" => {
-            // SAFETY: shmget with scalar args. IPC_PRIVATE creates a new segment.
-            let id = unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) };
-            if id < 0 {
-                exit(3);
-            }
-            // SAFETY: id was created above; cleanup is best effort.
-            unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
-            exit(0);
-        }
-        "ptrace-self" => {
-            // SAFETY: ptrace TRACEME takes no pointer args.
-            let rc = unsafe {
-                libc::ptrace(
-                    libc::PTRACE_TRACEME,
-                    0,
-                    std::ptr::null_mut::<libc::c_void>(),
-                    std::ptr::null_mut::<libc::c_void>(),
-                )
-            };
-            if rc < 0 {
-                exit(3);
-            } else {
-                exit(0);
-            }
-        }
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind|shm|ptrace-self> [arg]"
+                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind> [arg]"
             );
             exit(2);
         }
