@@ -3,13 +3,22 @@
 
 use std::process::Command;
 
+use guardrail_core::SandboxBuilder;
 use guardrail_linux::LinuxBackend;
 
 fn probe() -> Command {
-    common::probe_command()
+    Command::new(env!("CARGO_BIN_EXE_guardrail-probe"))
 }
 
-mod common;
+/// Directory containing the probe binary. Landlock filesystem confinement
+/// denies executing un-granted binaries, so these env-scrub tests must grant
+/// read (= read+execute) on the probe's own location for it to run.
+fn probe_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_guardrail-probe"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
 
 #[test]
 fn inherited_env_is_cleared() {
@@ -17,7 +26,7 @@ fn inherited_env_is_cleared() {
     // SAFETY: single-threaded test setup before any spawn.
     unsafe { std::env::set_var("GUARDRAIL_SECRET", "leaked") };
 
-    let config = common::base().build();
+    let config = SandboxBuilder::new().allow_read(probe_dir()).build();
     let mut cmd = probe();
     cmd.arg("echo-env").arg("GUARDRAIL_SECRET");
     cmd.stdout(std::process::Stdio::piped());
@@ -34,7 +43,10 @@ fn inherited_env_is_cleared() {
 
 #[test]
 fn explicitly_added_env_reaches_child() {
-    let config = common::base().env("GREETING", "hello").build();
+    let config = SandboxBuilder::new()
+        .allow_read(probe_dir())
+        .env("GREETING", "hello")
+        .build();
     let mut cmd = probe();
     cmd.arg("echo-env").arg("GREETING");
     cmd.stdout(std::process::Stdio::piped());

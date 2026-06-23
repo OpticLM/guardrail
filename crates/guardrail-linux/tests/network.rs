@@ -1,12 +1,12 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use guardrail_core::{NetworkPolicy, SandboxConfig};
+use guardrail_core::{NetworkPolicy, SandboxBuilder, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
-mod common;
-
 fn probe(args: &[&str]) -> Command {
-    common::probe(args)
+    let mut c = Command::new(env!("CARGO_BIN_EXE_guardrail-probe"));
+    c.args(args).stdout(Stdio::null()).stderr(Stdio::null());
+    c
 }
 
 fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
@@ -16,9 +16,16 @@ fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
     child.wait().expect("wait").success()
 }
 
+/// Grant read on the binary's dir so it loads under any Landlock rules that may
+/// also be active; network tests should not be coupled to FS confinement.
+fn base() -> SandboxBuilder {
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_guardrail-probe"));
+    SandboxBuilder::new().allow_read(exe.parent().unwrap().to_path_buf())
+}
+
 #[test]
 fn deny_blocks_inet_socket_creation() {
-    let config = common::base().network(NetworkPolicy::Deny).build();
+    let config = base().network(NetworkPolicy::Deny).build();
     assert!(
         !allowed(&config, &["socket-inet"]),
         "creating an AF_INET socket must be blocked under Deny"
@@ -27,7 +34,7 @@ fn deny_blocks_inet_socket_creation() {
 
 #[test]
 fn outbound_only_allows_socket_but_blocks_bind() {
-    let config = common::base().network(NetworkPolicy::OutboundOnly).build();
+    let config = base().network(NetworkPolicy::OutboundOnly).build();
     assert!(
         allowed(&config, &["socket-inet"]),
         "AF_INET socket creation must be allowed under OutboundOnly"
@@ -40,7 +47,7 @@ fn outbound_only_allows_socket_but_blocks_bind() {
 
 #[test]
 fn full_allows_socket_and_bind() {
-    let config = common::base().network(NetworkPolicy::Full).build();
+    let config = base().network(NetworkPolicy::Full).build();
     assert!(
         allowed(&config, &["socket-inet"]),
         "socket creation must be allowed under Full"

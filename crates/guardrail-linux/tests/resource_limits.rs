@@ -2,17 +2,36 @@
 //! with a small memory cap a large allocation fails; with a CPU
 //! cap a busy loop is killed within a bounded time.
 
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use guardrail_core::SandboxBuilder;
 use guardrail_linux::LinuxBackend;
 
-mod common;
+fn probe() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_guardrail-probe"));
+    c.stdout(Stdio::null()).stderr(Stdio::null());
+    c
+}
+
+/// Directory containing the probe binary. Landlock confinement denies
+/// executing un-granted binaries, so these resource-limit tests grant
+/// read (= read+execute) on the probe's own location for it to run.
+fn probe_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_guardrail-probe"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
 
 #[test]
 fn memory_limit_blocks_large_allocation() {
     // 64 MiB address-space cap; ask the child to grab 512 MiB.
-    let config = common::base().memory_limit_mb(64).build();
-    let mut cmd = common::probe(&[]);
+    let config = SandboxBuilder::new()
+        .allow_read(probe_dir())
+        .memory_limit_mb(64)
+        .build();
+    let mut cmd = probe();
     cmd.arg("alloc").arg("512");
     let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
     let status = child.wait().expect("wait");
@@ -26,8 +45,8 @@ fn memory_limit_blocks_large_allocation() {
 fn without_limit_the_same_allocation_succeeds() {
     // Control: no cap → the 512 MiB allocation succeeds. Guards against the
     // probe being broken in a way that makes the test above pass spuriously.
-    let config = common::base().build();
-    let mut cmd = common::probe(&[]);
+    let config = SandboxBuilder::new().allow_read(probe_dir()).build();
+    let mut cmd = probe();
     cmd.arg("alloc").arg("512");
     let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
     let status = child.wait().expect("wait");
@@ -40,8 +59,11 @@ fn without_limit_the_same_allocation_succeeds() {
 #[test]
 fn cpu_time_limit_kills_busy_loop() {
     // 1s CPU cap on an infinite spin. RLIMIT_CPU soft→SIGXCPU, hard→SIGKILL.
-    let config = common::base().cpu_time_limit_secs(1).build();
-    let mut cmd = common::probe(&[]);
+    let config = SandboxBuilder::new()
+        .allow_read(probe_dir())
+        .cpu_time_limit_secs(1)
+        .build();
+    let mut cmd = probe();
     cmd.arg("spin");
     let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
 
@@ -65,8 +87,11 @@ fn process_limit_is_applied() {
     // Best-effort: with max_processes(1) the child cannot fork a helper.
     // Left ignored because RLIMIT_NPROC depends on the ambient process count of
     // the running user. Run manually with `--ignored` on a quiet machine.
-    let config = common::base().max_processes(1).build();
-    let mut cmd = common::probe_command();
+    let config = SandboxBuilder::new()
+        .allow_read(probe_dir())
+        .max_processes(1)
+        .build();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_guardrail-probe"));
     cmd.arg("spin");
     let res = config.spawn_with(&LinuxBackend::new(), cmd);
     // The assertion is intentionally loose; document-only.

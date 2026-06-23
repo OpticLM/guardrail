@@ -7,18 +7,17 @@ use std::path::PathBuf;
 
 /// A single filesystem grant. Everything beneath `path` is covered.
 ///
-/// By default the sandbox grants no filesystem access at all. Backends must
-/// apply exactly the filesystem grants declared here; callers that need to run
-/// a binary or load shared libraries must grant the required read and execute
-/// access explicitly.
+/// By default the sandbox grants no filesystem access at all. A backend may
+/// additionally grant read+execute on standard system directories so the
+/// target binary can actually be loaded and run; that is a backend
+/// implementation detail, not part of this declarative model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsAccess {
-    /// Grant read access to `path` and everything beneath it.
+    /// Grant read (and, for the contained binaries/libraries, execute) access
+    /// to `path` and everything beneath it.
     Read(PathBuf),
-    /// Grant read and write access to `path` and everything beneath it.
+    /// Grant read **and** write access to `path` and everything beneath it.
     Write(PathBuf),
-    /// Grant execute access to `path` and everything beneath it.
-    Execute(PathBuf),
 }
 
 /// Network confinement level.
