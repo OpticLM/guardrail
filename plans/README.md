@@ -38,7 +38,7 @@ git; leave changes in the working copy for the operator to review.
 | 003  | Landlock filesystem confinement                     | P1 | M | 002        | DONE |
 | 004  | seccomp network confinement                         | P1 | M | 002        | DONE |
 | 005  | seccomp IPC confinement                             | P2 | M | 004        | DONE |
-| 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | DONE |
+| 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | TODO |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (one-line reason) |
 `REJECTED` (one-line rationale).
