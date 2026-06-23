@@ -1,0 +1,141 @@
+use std::io;
+
+use guardrail_core::{Error, SandboxConfig};
+
+use crate::profile::SeatbeltProfile;
+
+pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile, Error> {
+    let profile = if config.darwin_sandbox_profiles.is_empty() {
+        crate::profile::build(config)
+    } else {
+        let mut imports = Vec::with_capacity(config.darwin_sandbox_profiles.len());
+        for path in &config.darwin_sandbox_profiles {
+            let canonical_path = std::fs::canonicalize(path)
+                .map_err(|err| Error::confinement("seatbelt-profile", err))?;
+            let profile_source = std::fs::read_to_string(&canonical_path)
+                .map_err(|err| Error::confinement("seatbelt-profile", err))?;
+            validate(&profile_source)?;
+
+            imports.push(canonical_path);
+        }
+        crate::profile::build_with_imports(config, &imports)
+    };
+
+    validate(&profile.source)?;
+    Ok(profile)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn apply(profile: &SeatbeltProfile) -> Result<(), Error> {
+    painless_belt::ffi::sandbox_init(&profile.source, 0)
+        .map_err(|err| Error::confinement("seatbelt", io::Error::other(err.to_string())))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply(_profile: &SeatbeltProfile) -> Result<(), Error> {
+    Err(Error::Unsupported(
+        "Seatbelt is only available on macOS".into(),
+    ))
+}
+
+fn validate(source: &str) -> Result<(), Error> {
+    if source.contains('\0') {
+        return Err(Error::confinement(
+            "seatbelt-profile",
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Seatbelt profile contains an interior NUL byte",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use guardrail_core::SandboxBuilder;
+
+    use super::*;
+
+    #[test]
+    fn custom_profile_paths_are_imported_before_generated_policy() {
+        let first = std::env::temp_dir().join(format!(
+            "guardrail-seatbelt-{}-{}.sb",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let second = std::env::temp_dir().join(format!(
+            "guardrail-seatbelt-{}-{}.sb",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::write(&first, "(version 1)\n(allow file-read*)\n").unwrap();
+        std::fs::write(&second, "(version 1)\n(allow process*)\n").unwrap();
+
+        let config = SandboxBuilder::new()
+            .darwin_sandbox_profile(&first)
+            .allow_read("/generated-read")
+            .darwin_sandbox_profile(&second)
+            .build();
+        let profile = resolve(&config).unwrap();
+
+        let first_import = crate::profile::sbpl_string(&first.canonicalize().unwrap());
+        let second_import = crate::profile::sbpl_string(&second.canonicalize().unwrap());
+        assert_eq!(
+            profile.source,
+            format!(
+                "(version 1)\n\
+                 (import \"{first_import}\")\n\
+                 (import \"{second_import}\")\n\
+                 (deny default)\n\
+                 (allow file-read* (subpath \"/generated-read\"))\n"
+            )
+        );
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn rejects_generated_profile_with_interior_nul_byte() {
+        let config = SandboxBuilder::new().allow_read("/tmp/has\0nul").build();
+
+        let err = resolve(&config).unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_custom_profile_with_interior_nul_byte() {
+        let path = std::env::temp_dir().join(format!(
+            "guardrail-seatbelt-nul-{}-{}.sb",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::write(&path, "(version 1)\n\0\n").unwrap();
+
+        let config = SandboxBuilder::new().darwin_sandbox_profile(&path).build();
+        let err = resolve(&config).unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            }
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn unique_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    }
+}
