@@ -14,12 +14,9 @@
 //!   spin              busy-loop forever (for CPU-time-limit tests)
 //!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
-//!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
-//!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
-//!                     3 if denied
 //!
-//! Later plans add more commands (shm, ptrace, ...). Keep the dispatch table
-//! and exit-code contract stable.
+//! Later plans add more commands (socket-inet, bind, shm, ptrace, ...). Keep
+//! the dispatch table and exit-code contract stable.
 
 use std::process::exit;
 
@@ -70,25 +67,8 @@ fn main() {
                 Err(_) => exit(3),
             }
         }
-        "socket-inet" => {
-            // SAFETY: socket() takes scalar args; close the fd if created.
-            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-            if fd < 0 {
-                exit(3);
-            }
-            // SAFETY: fd was returned by socket() above and is owned here.
-            unsafe { libc::close(fd) };
-            exit(0);
-        }
-        "tcp-bind" => match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(_) => exit(0),
-            Err(_) => exit(3),
-        },
         _ => {
-            eprintln!(
-                "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind> [arg]"
-            );
+            eprintln!("usage: guardrail-probe <echo-env|alloc|spin|read-file|write-file> [arg]");
             exit(2);
         }
     }

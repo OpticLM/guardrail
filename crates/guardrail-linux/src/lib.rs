@@ -12,7 +12,6 @@ use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
 mod fs;
 mod rlimit;
-mod seccomp;
 
 /// The Linux sandbox backend.
 #[derive(Debug, Default, Clone)]
@@ -33,7 +32,6 @@ impl Backend for LinuxBackend {
         // forked child, so it must own its inputs (no borrows of `config`).
         let limits = config.limits;
         let fs_rules = config.fs.clone();
-        let seccomp_program = seccomp::build(config)?;
 
         // SAFETY: the closure runs after fork() and before execvp() in the
         // child. NO_NEW_PRIVS and the rlimit calls are async-signal-safe; the
@@ -55,13 +53,11 @@ impl Backend for LinuxBackend {
                 //     `pre_exec` closures must return `io::Result`.
                 fs::apply(&fs_rules).map_err(std::io::Error::other)?;
 
-                // (4) Seccomp is applied LAST so its filter does not interfere
-                //     with Landlock's own setup syscalls.
-                //     The BPF program was built in the parent;
-                //     only install it here.
-                if let Some(program) = &seccomp_program {
-                    seccomp::apply(program).map_err(std::io::Error::other)?;
-                }
+                // (4) INSERTION POINT — seccomp is applied LAST (plans 004/005)
+                //     so its filter does not interfere with Landlock's own
+                //     setup syscalls:
+                //       seccomp::apply(&filter)?;
+                //     Build the BPF program in the parent; only apply it here.
 
                 Ok(())
             });

@@ -149,7 +149,6 @@ seccompiler::apply_filter(&filter).unwrap();   // installs on current thread
 
 **In scope** (create/modify only these):
 - `Cargo.toml` (root) — add `seccompiler` to `[workspace.dependencies]`
-- `Cargo.lock` — expected lockfile update from resolving `seccompiler`
 - `crates/guardrail-linux/Cargo.toml` — depend on `seccompiler`
 - `crates/guardrail-linux/src/seccomp.rs` (create — filter assembly + apply;
   **structured so plan 005 adds IPC rules**)
@@ -456,8 +455,7 @@ Machine-checkable. ALL must hold:
 - [ ] `seccomp.rs` exposes `build(&SandboxConfig)` and a private
       `add_network_rules` (so plan 005 can add `add_ipc_rules` to the same map)
 - [ ] `guardrail-core` unchanged; no IPC syscalls referenced yet
-- [ ] No files outside the in-scope list are modified; `Cargo.lock` changes only
-      to lock `seccompiler` and its direct dependency metadata
+- [ ] No files outside the in-scope list are modified
 - [ ] `plans/README.md` status row for 004 set to DONE
 
 ## STOP conditions
