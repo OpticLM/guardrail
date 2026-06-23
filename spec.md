@@ -15,7 +15,7 @@ This sandbox is designed specifically for executing untrusted Bash commands and 
 
 LLM-generated code is typically not malicious malware in the traditional sense, but it carries significant risks of privilege escalation, data leakage, and resource exhaustion. Our sandbox enforces comprehensive confinement across the following dimensions:
 
-*   **File System (FS)**: Read-only access to base system libraries by default; access to sensitive directories is strictly prohibited.
+*   **File System (FS)**: No filesystem paths are granted by default. Read, write, and execute access must each be declared explicitly; access to sensitive directories is strictly prohibited unless the caller knowingly grants it.
 *   **Network**: Disconnected from the network by default to prevent reverse shells or the downloading of malicious payloads.
 *   **Inter-Process Communication (IPC)**: Cuts off DBus, shared memory, COM, and other channels to prevent the manipulation of other host processes.
 *   **Resource Limits**: Restricts CPU time, maximum memory, and the maximum number of child processes to prevent infinite loops and fork bombs.
@@ -35,6 +35,7 @@ use std::process::Command;
 pub enum Policy {
     Read(PathBuf),
     Write(PathBuf),
+    Execute(PathBuf),
     AllowNetwork,
     /// Enable strict IPC isolation (disables shared memory, etc.)
     StrictIpc,
@@ -57,6 +58,11 @@ impl SandboxBuilder {
     
     pub fn allow_read(mut self, path: impl Into<PathBuf>) -> Self {
         self.policies.push(Policy::Read(path.into()));
+        self
+    }
+
+    pub fn allow_execute(mut self, path: impl Into<PathBuf>) -> Self {
+        self.policies.push(Policy::Execute(path.into()));
         self
     }
     
@@ -110,6 +116,7 @@ We firmly avoid Windows Sandbox, instead achieving lightweight isolation by comb
 *   No directories can be read or written by default.
 *   Grant read permissions to a specific directory or file.
 *   Grant write permissions to a specific directory or file.
+*   Grant execute permissions to a specific directory or file.
 
 ### 5.2 Network
 *   No network connections allowed by default.

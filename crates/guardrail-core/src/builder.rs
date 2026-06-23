@@ -17,7 +17,8 @@ use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy};
 /// use guardrail_core::{SandboxBuilder, NetworkPolicy};
 ///
 /// let config = SandboxBuilder::new()
-///     .allow_read("/usr")
+///     .allow_read("/tmp/input")
+///     .allow_execute("/tmp/tools")
 ///     .allow_write("/tmp/work")
 ///     .network(NetworkPolicy::OutboundOnly)
 ///     .memory_limit_mb(256)
@@ -40,15 +41,21 @@ impl SandboxBuilder {
         Self::default()
     }
 
-    /// Grant read (and execute) access to `path` and everything beneath it.
+    /// Grant read access to `path` and everything beneath it.
     pub fn allow_read(mut self, path: impl Into<PathBuf>) -> Self {
         self.fs.push(FsAccess::Read(path.into()));
         self
     }
 
-    /// Grant read+write access to `path` and everything beneath it.
+    /// Grant read and write access to `path` and everything beneath it.
     pub fn allow_write(mut self, path: impl Into<PathBuf>) -> Self {
         self.fs.push(FsAccess::Write(path.into()));
+        self
+    }
+
+    /// Grant execute access to `path` and everything beneath it.
+    pub fn allow_execute(mut self, path: impl Into<PathBuf>) -> Self {
+        self.fs.push(FsAccess::Execute(path.into()));
         self
     }
 
@@ -141,12 +148,14 @@ mod tests {
         let config = SandboxBuilder::new()
             .allow_read("/a")
             .allow_write("/b")
+            .allow_execute("/c")
             .build();
         assert_eq!(
             config.fs,
             vec![
                 FsAccess::Read(PathBuf::from("/a")),
                 FsAccess::Write(PathBuf::from("/b")),
+                FsAccess::Execute(PathBuf::from("/c")),
             ]
         );
     }
