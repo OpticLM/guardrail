@@ -39,7 +39,7 @@ git; leave changes in the working copy for the operator to review.
 | 004  | seccomp network confinement                         | P1 | M | 002        | DONE |
 | 005  | seccomp IPC confinement                             | P2 | M | 004        | DONE |
 | 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | DONE |
-| 007  | Core Darwin Seatbelt profile permission             | P1 | S | 001        | TODO |
+| 007  | Core Darwin Seatbelt profile permission             | P1 | S | 001        | DONE |
 | 008  | macOS Seatbelt profile generation                   | P1 | M | 007        | TODO |
 | 009  | `guardrail-macos` Backend with Seatbelt + rlimits   | P1 | M | 007,008    | TODO |
 | 010  | macOS runtime validation and repair                 | P2 | M | 007,008,009 | TODO |

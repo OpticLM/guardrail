@@ -3,6 +3,7 @@
 //! [`Backend`]: crate::Backend
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crate::backend::Backend;
 use crate::error::Error;
@@ -41,6 +42,11 @@ pub struct SandboxConfig {
     /// inherited environment is unconditionally cleared before these are
     /// applied (see [`SandboxConfig::spawn_with`]).
     pub env: BTreeMap<String, String>,
+    /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
+    ///
+    /// When set, the macOS backend imports these `.sb` profiles before appending
+    /// the generated profile from the portable `fs`/`network`/`ipc` policies.
+    pub darwin_sandbox_profiles: Vec<PathBuf>,
 }
 
 impl SandboxConfig {
