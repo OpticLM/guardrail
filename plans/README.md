@@ -39,6 +39,10 @@ git; leave changes in the working copy for the operator to review.
 | 004  | seccomp network confinement                         | P1 | M | 002        | DONE |
 | 005  | seccomp IPC confinement                             | P2 | M | 004        | DONE |
 | 006  | Violation diagnostics (observability)               | P2 | M | 002,004,005 (uses 003) | DONE |
+| 007  | Core Darwin Seatbelt profile permission             | P1 | S | 001        | TODO |
+| 008  | macOS Seatbelt profile generation                   | P1 | M | 007        | TODO |
+| 009  | `guardrail-macos` Backend with Seatbelt + rlimits   | P1 | M | 007,008    | TODO |
+| 010  | macOS runtime validation and repair                 | P2 | M | 007,008,009 | TODO |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (one-line reason) |
 `REJECTED` (one-line rationale).
@@ -66,6 +70,20 @@ Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (one-line reason) |
   produce and the silent FS denials from 003; its tests need real confinement.
 
 A reasonable single-threaded order is simply **001 → 002 → 003 → 004 → 005 → 006**.
+
+For the macOS backend extension generated on 2026-06-23, continue with
+**007 → 008 → 009 → 010**:
+
+- **007** extends the core API with the Darwin Seatbelt `.sb` profile path. It
+  is a no-op for Linux because Linux does not read the new field.
+- **008** creates the `guardrail-macos` crate and adds pure Rust Seatbelt profile
+  generation that can be built and tested on this Linux host.
+- **009** implements `MacosBackend` with `setrlimit` and `painless-belt`.
+  It still has Linux-host verification because non-macOS builds return
+  `Error::Unsupported`.
+- **010** must run last on a real macOS host. It adds runtime tests and fixes any
+  Seatbelt syntax/API issues discovered there; it is not expected to be fully
+  verifiable on this Linux host.
 
 ## Verification gates (every plan)
 
@@ -106,4 +124,9 @@ locally). Crate choices: `landlock` 0.4, `seccompiler` 0.5, `libc` 0.2,
   programs also need explicit read/execute grants for their loader and shared
   libraries. Tests now grant these paths explicitly through their helper rather
   than relying on hidden `LinuxBackend` defaults.
-</content>
+- **macOS crate choice** (plans 008-010): use `painless-belt = 0.2.3`. It is
+  MIT-licensed and exposes a direct Rust wrapper around Apple's `sandbox_init`.
+  `macos-sandbox-sys` was considered technically strong but rejected due to its
+  `EUPL-1.2` license. Wrapper crates centered on `sandbox-exec` were rejected
+  because this repo's backend style applies confinement in-process before
+  `exec`.
