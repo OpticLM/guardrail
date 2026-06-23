@@ -10,7 +10,6 @@ use std::process::Command;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
-mod fs;
 mod rlimit;
 
 /// The Linux sandbox backend.
@@ -31,14 +30,10 @@ impl Backend for LinuxBackend {
         // Clone only the data the child closure needs. The closure runs in the
         // forked child, so it must own its inputs (no borrows of `config`).
         let limits = config.limits;
-        let fs_rules = config.fs.clone();
 
         // SAFETY: the closure runs after fork() and before execvp() in the
-        // child. NO_NEW_PRIVS and the rlimit calls are async-signal-safe; the
-        // Landlock ruleset construction allocates, which is acceptable in this
-        // single-threaded post-fork child (glibc releases the malloc arena
-        // locks across fork) and matches established in-process sandbox crates.
-        // It returns an io::Error instead of panicking.
+        // child. It performs only async-signal-safe syscalls (prctl, setrlimit)
+        // and returns an io::Error instead of panicking.
         unsafe {
             command.pre_exec(move || {
                 // (1) NO_NEW_PRIVS first: required for seccomp later, and a
@@ -48,16 +43,11 @@ impl Backend for LinuxBackend {
                 // (2) Resource limits.
                 rlimit::apply(&limits)?;
 
-                // (3) Filesystem confinement via Landlock. `fs::apply` returns
-                //     our structured Error; bridge it to io::Error because
-                //     `pre_exec` closures must return `io::Result`.
-                fs::apply(&fs_rules).map_err(std::io::Error::other)?;
-
-                // (4) INSERTION POINT — seccomp is applied LAST (plans 004/005)
-                //     so its filter does not interfere with Landlock's own
-                //     setup syscalls:
-                //       seccomp::apply(&filter)?;
-                //     Build the BPF program in the parent; only apply it here.
+                // (3) INSERTION POINT — later plans add, in this order:
+                //       fs::apply(&fs_rules)?;        // plan 003 (Landlock)
+                //       seccomp::apply(&filter)?;     // plans 004/005 (last)
+                //     Apply seccomp LAST so its filter does not interfere with
+                //     Landlock's own setup syscalls.
 
                 Ok(())
             });

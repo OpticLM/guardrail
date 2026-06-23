@@ -9,7 +9,6 @@ repository.workspace = true
 [dependencies]
 guardrail-core.workspace = true
 libc.workspace = true
-landlock.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
