@@ -5,6 +5,25 @@ pub(crate) struct SeatbeltProfile {
     pub(crate) source: String,
 }
 
+pub(crate) const RUNTIME_STARTUP_RULES: &str = "\
+(allow file-read-data (literal \"/\"))
+(allow file-read-metadata (literal \"/\"))
+(allow file-read-metadata (literal \"/var\"))
+(allow file-read-metadata (literal \"/System/Cryptexes/OS\"))
+(allow file-read-data (literal \"/System/Volumes/Preboot/Cryptexes/OS\"))
+(allow file-read-metadata (literal \"/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld\"))
+(allow file-read-data (literal \"/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld\"))
+(allow file-read-data (literal \"/dev/dtracehelper\"))
+(allow file-write-data (literal \"/dev/dtracehelper\"))
+(allow file-ioctl (literal \"/dev/dtracehelper\"))
+(allow sysctl-read (sysctl-name \"kern.bootargs\"))
+(allow sysctl-read (sysctl-name \"kern.osvariant_status\"))
+(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\"))
+(allow sysctl-read (sysctl-name \"hw.ephemeral_storage\"))
+(allow sysctl-read (sysctl-name \"hw.pagesize_compat\"))
+(allow sysctl-read (sysctl-name \"machdep.ptrauth_enabled\"))
+";
+
 pub(crate) fn build(config: &SandboxConfig) -> SeatbeltProfile {
     build_with_imports(config, &[])
 }
@@ -13,7 +32,7 @@ pub(crate) fn build_with_imports(
     config: &SandboxConfig,
     imports: &[std::path::PathBuf],
 ) -> SeatbeltProfile {
-    let mut source = String::from("(version 1)\n(debug deny)\n");
+    let mut source = String::from("(version 1)\n");
 
     for path in imports {
         let path = sbpl_string(path);
@@ -26,6 +45,7 @@ pub(crate) fn build_with_imports(
 
 pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
     let mut source = String::from("(deny default)\n");
+    add_runtime_startup_rules(&mut source);
 
     for rule in &config.fs {
         match rule {
@@ -35,15 +55,16 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
             }
             FsAccess::Write(path) => {
                 let path = sbpl_string(path);
-                source.push_str(&format!(
-                    "(allow file-read* file-write* (subpath \"{path}\"))\n"
-                ));
+                source.push_str(&format!("(allow file-read* (subpath \"{path}\"))\n"));
+                source.push_str(&format!("(allow file-write* (subpath \"{path}\"))\n"));
             }
             FsAccess::Execute(path) => {
                 let path = sbpl_string(path);
+                source.push_str(&format!("(allow file-read* (subpath \"{path}\"))\n"));
                 source.push_str(&format!(
-                    "(allow file-read* process-exec (subpath \"{path}\"))\n"
+                    "(allow file-map-executable (subpath \"{path}\"))\n"
                 ));
+                source.push_str(&format!("(allow process-exec* (subpath \"{path}\"))\n"));
             }
         }
     }
@@ -52,9 +73,11 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
         NetworkPolicy::Deny => {}
         NetworkPolicy::OutboundOnly => {
             source.push_str("(allow network-outbound)\n");
+            source.push_str("(allow system-socket)\n");
         }
         NetworkPolicy::Full => {
             source.push_str("(allow network*)\n");
+            source.push_str("(allow system-socket)\n");
         }
     }
 
@@ -68,6 +91,13 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
     }
 
     source
+}
+
+fn add_runtime_startup_rules(source: &mut String) {
+    // Narrow macOS runtime allowances observed during native Seatbelt
+    // validation. These avoid broad filesystem grants: callers still need
+    // explicit read/execute grants for binaries and dylibs.
+    source.push_str(RUNTIME_STARTUP_RULES);
 }
 
 pub(crate) fn sbpl_string(path: &std::path::Path) -> String {
@@ -89,7 +119,7 @@ mod tests {
 
         assert_eq!(
             profile.source,
-            "(version 1)\n(debug deny)\n(deny default)\n"
+            format!("(version 1)\n(deny default)\n{RUNTIME_STARTUP_RULES}")
         );
     }
 
@@ -105,12 +135,14 @@ mod tests {
 
         assert_eq!(
             profile.source,
-            "(version 1)\n\
-             (debug deny)\n\
-             (import \"/tmp/base-one.sb\")\n\
-             (import \"/tmp/base-two.sb\")\n\
-             (deny default)\n\
-             (allow file-read* (subpath \"/tmp/in\"))\n"
+            format!(
+                "(version 1)\n\
+                 (import \"/tmp/base-one.sb\")\n\
+                 (import \"/tmp/base-two.sb\")\n\
+                 (deny default)\n\
+                 {RUNTIME_STARTUP_RULES}\
+                 (allow file-read* (subpath \"/tmp/in\"))\n"
+            )
         );
     }
 
@@ -147,7 +179,12 @@ mod tests {
         assert!(
             profile
                 .source
-                .contains("(allow file-read* file-write* (subpath \"/tmp/work\"))\n")
+                .contains("(allow file-read* (subpath \"/tmp/work\"))\n")
+        );
+        assert!(
+            profile
+                .source
+                .contains("(allow file-write* (subpath \"/tmp/work\"))\n")
         );
     }
 
@@ -158,7 +195,17 @@ mod tests {
         assert!(
             profile
                 .source
-                .contains("(allow file-read* process-exec (subpath \"/tmp/bin\"))\n")
+                .contains("(allow file-read* (subpath \"/tmp/bin\"))\n")
+        );
+        assert!(
+            profile
+                .source
+                .contains("(allow file-map-executable (subpath \"/tmp/bin\"))\n")
+        );
+        assert!(
+            profile
+                .source
+                .contains("(allow process-exec* (subpath \"/tmp/bin\"))\n")
         );
     }
 
@@ -178,6 +225,7 @@ mod tests {
         );
 
         assert!(profile.source.contains("(allow network-outbound)\n"));
+        assert!(profile.source.contains("(allow system-socket)\n"));
     }
 
     #[test]
@@ -185,6 +233,7 @@ mod tests {
         let profile = build(&SandboxBuilder::new().network(NetworkPolicy::Full).build());
 
         assert!(profile.source.contains("(allow network*)\n"));
+        assert!(profile.source.contains("(allow system-socket)\n"));
     }
 
     #[test]

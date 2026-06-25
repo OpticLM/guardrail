@@ -42,7 +42,7 @@ git; leave changes in the working copy for the operator to review.
 | 007  | Core Darwin Seatbelt profile permission             | P1 | S | 001        | DONE |
 | 008  | macOS Seatbelt profile generation                   | P1 | M | 007        | DONE |
 | 009  | `guardrail-macos` Backend with Seatbelt + rlimits   | P1 | M | 007,008    | DONE |
-| 010  | macOS runtime validation and repair                 | P2 | M | 007,008,009 | TODO |
+| 010  | macOS runtime validation and repair                 | P2 | M | 007,008,009 | DONE |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (one-line reason) |
 `REJECTED` (one-line rationale).
@@ -130,3 +130,9 @@ locally). Crate choices: `landlock` 0.4, `seccompiler` 0.5, `libc` 0.2,
   `EUPL-1.2` license. Wrapper crates centered on `sandbox-exec` were rejected
   because this repo's backend style applies confinement in-process before
   `exec`.
+- **macOS workspace gates** (discovered executing plan 010): `guardrail-core`
+  and `guardrail-macos` pass tests, clippy, and formatting on macOS. Full
+  `cargo test --workspace` / `cargo clippy --workspace --all-targets` still try
+  to compile `guardrail-linux` and fail on Darwin because `landlock` and
+  `seccompiler` require Linux-only `libc` constants; this is outside plan 010's
+  macOS backend scope.

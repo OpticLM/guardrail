@@ -212,7 +212,7 @@ fn suggestions_for_denial(
         )];
     }
 
-    if operation == "process-exec" {
+    if operation.starts_with("process-exec") {
         return vec![format!(
             "grant execute access: .allow_execute(\"{}\")",
             builder_arg(subject, "<path>")
@@ -247,7 +247,7 @@ fn suggestions_for_denial(
 }
 
 fn kind_for_operation(operation: &str) -> ViolationKind {
-    if operation.starts_with("file-") || operation == "process-exec" {
+    if operation.starts_with("file-") || operation.starts_with("process-exec") {
         ViolationKind::Filesystem
     } else {
         ViolationKind::Unknown

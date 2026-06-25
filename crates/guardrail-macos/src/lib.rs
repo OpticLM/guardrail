@@ -61,7 +61,9 @@ impl Backend for MacosBackend {
 
 #[cfg(test)]
 mod tests {
-    use guardrail_core::{Backend, Error, SandboxBuilder};
+    use guardrail_core::SandboxBuilder;
+    #[cfg(not(target_os = "macos"))]
+    use guardrail_core::{Backend, Error};
 
     #[test]
     fn crate_smoke_test_builds_a_default_config() {
