@@ -4,6 +4,7 @@ members = [
     "crates/guardrail-core",
     "crates/guardrail-linux",
     "crates/guardrail-macos",
+    "crates/guardrail-napi",
     "crates/guardrail-windows",
 ]
 
@@ -16,7 +17,17 @@ repository = "https://github.com/OpticLM/guardrail"
 [workspace.dependencies]
 thiserror = "2"
 guardrail-core = { path = "crates/guardrail-core" }
+guardrail-linux = { path = "crates/guardrail-linux" }
+guardrail-macos = { path = "crates/guardrail-macos" }
+guardrail-windows = { path = "crates/guardrail-windows" }
 libc = "0.2"
 landlock = "0.4"
 seccompiler = "0.5"
 windows-sys = "0.61"
+
+# Release profile for the napi native addon (small binary, stripped symbols).
+# Workspace-wide; applies to all crates but is most relevant to guardrail-napi.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
