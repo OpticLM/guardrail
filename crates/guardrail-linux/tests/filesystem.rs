@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Filesystem-confinement intent tests: read, write, and execute grants are
 //! separate, no system paths are granted by default, and reads/writes are denied
 //! unless explicitly granted. Modeled after `tests/resource_limits.rs`.

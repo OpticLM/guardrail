@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Verifies the §3 "unconditional env scrub": the child sees ONLY the env vars
 //! added to the builder, never the parent's inherited ones.
 

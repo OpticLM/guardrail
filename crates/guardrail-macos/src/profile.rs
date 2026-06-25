@@ -90,10 +90,7 @@ mod tests {
     fn default_config_denies_by_default() {
         let profile = build(&SandboxBuilder::new().build());
 
-        assert_eq!(
-            profile.source,
-            "(version 1)\n(deny default)\n"
-        );
+        assert_eq!(profile.source, "(version 1)\n(deny default)\n");
     }
 
     #[test]

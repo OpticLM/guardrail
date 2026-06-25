@@ -21,9 +21,15 @@
 //!                     3 if denied
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
 
-use std::process::exit;
-
+#[cfg(target_os = "linux")]
 fn main() {
+    linux_main();
+}
+
+#[cfg(target_os = "linux")]
+fn linux_main() {
+    use std::process::exit;
+
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
     match cmd {
@@ -118,4 +124,10 @@ fn main() {
             exit(2);
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("guardrail-probe is only available on Linux");
+    std::process::exit(2);
 }
