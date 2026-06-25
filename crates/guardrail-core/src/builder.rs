@@ -33,6 +33,7 @@ pub struct SandboxBuilder {
     ipc: IpcPolicy,
     limits: ResourceLimits,
     env: BTreeMap<String, String>,
+    darwin_sandbox_profiles: Vec<PathBuf>,
 }
 
 impl SandboxBuilder {
@@ -68,6 +69,15 @@ impl SandboxBuilder {
     /// Set the IPC confinement level (last call wins).
     pub fn ipc(mut self, policy: IpcPolicy) -> Self {
         self.ipc = policy;
+        self
+    }
+
+    /// Add a macOS Seatbelt `.sb` profile path.
+    ///
+    /// This is ignored by non-Darwin backends. On macOS each call adds one
+    /// profile import before the generated Seatbelt profile rules.
+    pub fn darwin_sandbox_profile(mut self, path: impl Into<PathBuf>) -> Self {
+        self.darwin_sandbox_profiles.push(path.into());
         self
     }
 
@@ -116,6 +126,7 @@ impl SandboxBuilder {
             ipc: self.ipc,
             limits: self.limits,
             env: self.env,
+            darwin_sandbox_profiles: self.darwin_sandbox_profiles,
         }
     }
 }
@@ -135,6 +146,7 @@ mod tests {
         assert_eq!(config.limits.memory_bytes, None);
         assert_eq!(config.limits.cpu_time_secs, None);
         assert_eq!(config.limits.max_processes, None);
+        assert!(config.darwin_sandbox_profiles.is_empty());
     }
 
     #[test]
@@ -167,5 +179,20 @@ mod tests {
             .network(NetworkPolicy::Deny)
             .build();
         assert_eq!(config.network, NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn darwin_sandbox_profiles_preserve_declaration_order() {
+        let config = SandboxBuilder::new()
+            .darwin_sandbox_profile("/tmp/first.sb")
+            .darwin_sandbox_profile("/tmp/second.sb")
+            .build();
+        assert_eq!(
+            config.darwin_sandbox_profiles,
+            vec![
+                PathBuf::from("/tmp/first.sb"),
+                PathBuf::from("/tmp/second.sb"),
+            ]
+        );
     }
 }

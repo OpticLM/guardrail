@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/guardrail-core", "crates/guardrail-linux"]
+members = [
+    "crates/guardrail-core",
+    "crates/guardrail-linux",
+    "crates/guardrail-macos",
+]
 
 [workspace.package]
 version = "0.1.0"
