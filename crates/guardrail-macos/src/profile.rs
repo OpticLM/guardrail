@@ -5,25 +5,6 @@ pub(crate) struct SeatbeltProfile {
     pub(crate) source: String,
 }
 
-pub(crate) const RUNTIME_STARTUP_RULES: &str = "\
-(allow file-read-data (literal \"/\"))
-(allow file-read-metadata (literal \"/\"))
-(allow file-read-metadata (literal \"/var\"))
-(allow file-read-metadata (literal \"/System/Cryptexes/OS\"))
-(allow file-read-data (literal \"/System/Volumes/Preboot/Cryptexes/OS\"))
-(allow file-read-metadata (literal \"/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld\"))
-(allow file-read-data (literal \"/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld\"))
-(allow file-read-data (literal \"/dev/dtracehelper\"))
-(allow file-write-data (literal \"/dev/dtracehelper\"))
-(allow file-ioctl (literal \"/dev/dtracehelper\"))
-(allow sysctl-read (sysctl-name \"kern.bootargs\"))
-(allow sysctl-read (sysctl-name \"kern.osvariant_status\"))
-(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\"))
-(allow sysctl-read (sysctl-name \"hw.ephemeral_storage\"))
-(allow sysctl-read (sysctl-name \"hw.pagesize_compat\"))
-(allow sysctl-read (sysctl-name \"machdep.ptrauth_enabled\"))
-";
-
 pub(crate) fn build(config: &SandboxConfig) -> SeatbeltProfile {
     build_with_imports(config, &[])
 }
@@ -45,7 +26,6 @@ pub(crate) fn build_with_imports(
 
 pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
     let mut source = String::from("(deny default)\n");
-    add_runtime_startup_rules(&mut source);
 
     for rule in &config.fs {
         match rule {
@@ -93,13 +73,6 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
     source
 }
 
-fn add_runtime_startup_rules(source: &mut String) {
-    // Narrow macOS runtime allowances observed during native Seatbelt
-    // validation. These avoid broad filesystem grants: callers still need
-    // explicit read/execute grants for binaries and dylibs.
-    source.push_str(RUNTIME_STARTUP_RULES);
-}
-
 pub(crate) fn sbpl_string(path: &std::path::Path) -> String {
     path.display()
         .to_string()
@@ -119,7 +92,7 @@ mod tests {
 
         assert_eq!(
             profile.source,
-            format!("(version 1)\n(deny default)\n{RUNTIME_STARTUP_RULES}")
+            "(version 1)\n(deny default)\n"
         );
     }
 
@@ -140,7 +113,6 @@ mod tests {
                  (import \"/tmp/base-one.sb\")\n\
                  (import \"/tmp/base-two.sb\")\n\
                  (deny default)\n\
-                 {RUNTIME_STARTUP_RULES}\
                  (allow file-read* (subpath \"/tmp/in\"))\n"
             )
         );

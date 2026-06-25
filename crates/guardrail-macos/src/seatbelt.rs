@@ -88,9 +88,7 @@ mod tests {
                  (import \"{first_import}\")\n\
                  (import \"{second_import}\")\n\
                  (deny default)\n\
-                 {}\
                  (allow file-read* (subpath \"/generated-read\"))\n",
-                crate::profile::RUNTIME_STARTUP_RULES
             )
         );
         let _ = std::fs::remove_file(first);
