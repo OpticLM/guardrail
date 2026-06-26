@@ -494,6 +494,7 @@ dependencies = [
 name = "guardrail-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "thiserror",
 ]
 
@@ -525,7 +526,6 @@ dependencies = [
  "guardrail-linux",
  "guardrail-macos",
  "guardrail-windows",
- "libc",
  "napi",
  "napi-build",
  "napi-derive",

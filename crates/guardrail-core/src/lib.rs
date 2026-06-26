@@ -19,4 +19,4 @@ pub use config::{ResourceLimits, SandboxConfig};
 pub use diagnostics::{Violation, ViolationKind};
 pub use error::Error;
 pub use policy::{FsAccess, IpcPolicy, NetworkPolicy};
-pub use process::SandboxChild;
+pub use process::{SandboxChild, SharedSandboxChild};

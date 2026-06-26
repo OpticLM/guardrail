@@ -8,15 +8,14 @@
 
 use std::collections::HashMap;
 use std::process::{Command, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use napi::Task;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail_core::{
-    IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxChild as CoreChild, SandboxConfig,
-    ViolationKind,
+    IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig, SharedSandboxChild, ViolationKind,
 };
 
 // Compile-time backend + diagnostics selection: each published binary targets
@@ -239,11 +238,9 @@ pub fn spawn(
 
     let backend = PlatformBackend::new();
     let child = config.spawn_with(&backend, cmd).map_err(to_napi_err)?;
-    let pid = child.id();
 
     Ok(SandboxChild {
-        pid,
-        inner: Arc::new(Mutex::new(Some(child))),
+        inner: SharedSandboxChild::new(child),
         config: Arc::new(config),
     })
 }
@@ -251,10 +248,9 @@ pub fn spawn(
 /// Handle to a spawned, sandboxed child process.
 #[napi]
 pub struct SandboxChild {
-    pid: u32,
-    // `Option` so `wait()` can take ownership of the child for the duration of
-    // the blocking wait without holding the mutex (which would deadlock kill()).
-    inner: Arc<Mutex<Option<CoreChild>>>,
+    inner: SharedSandboxChild,
+    // Kept so `build_exit_result` can call `explain(config, status)` to attach a
+    // policy-violation diagnostic to the exit result.
     config: Arc<SandboxConfig>,
 }
 
@@ -263,7 +259,7 @@ impl SandboxChild {
     /// OS process id of the child.
     #[napi(getter)]
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.inner.pid()
     }
 
     /// Wait for the child to exit. Resolves with its [`ExitResult`]. Calling
@@ -281,38 +277,15 @@ impl SandboxChild {
     /// Windows (see the package README).
     #[napi]
     pub fn kill(&self) -> Result<()> {
-        let mut guard = self.inner.lock().unwrap();
-        match guard.as_mut() {
-            Some(child) => child.kill().map_err(|e| {
-                Error::new(Status::GenericFailure, format!("failed to kill child: {e}"))
-            }),
-            None => {
-                // wait() owns the child and is blocking on it.
-                #[cfg(unix)]
-                {
-                    // SAFETY: kill() with a pid and a signal takes scalar args.
-                    // The child is still alive (wait has not returned), so the
-                    // pid has not been reaped/reused yet.
-                    unsafe {
-                        libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
-                    }
-                    Ok(())
-                }
-                #[cfg(not(unix))]
-                {
-                    Err(Error::new(
-                        Status::GenericFailure,
-                        "kill() after wait() has started is not supported on this platform",
-                    ))
-                }
-            }
-        }
+        self.inner
+            .kill()
+            .map_err(|e| Error::new(Status::GenericFailure, format!("failed to kill child: {e}")))
     }
 }
 
 /// libuv-threadpool task backing the async `wait()`.
 pub struct WaitTask {
-    inner: Arc<Mutex<Option<CoreChild>>>,
+    inner: SharedSandboxChild,
     config: Arc<SandboxConfig>,
 }
 
@@ -321,19 +294,10 @@ impl Task for WaitTask {
     type JsValue = ExitResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        // Take the child OUT of the mutex so the blocking wait does not hold the
-        // lock (kill() needs to acquire it). If it is already gone, wait() was
-        // called twice.
-        let mut child = {
-            let mut guard = self.inner.lock().unwrap();
-            guard.take().ok_or_else(|| {
-                Error::new(
-                    Status::GenericFailure,
-                    "wait() has already been called on this child",
-                )
-            })?
-        };
-        let status = child.wait().map_err(|e| {
+        // The wait/kill coordination (take-out-for-wait, reaped guard, raw
+        // signal fallback) lives in `SharedSandboxChild`; this just blocks until
+        // the child exits and shapes the result for JS.
+        let status = self.inner.wait().map_err(|e| {
             Error::new(
                 Status::GenericFailure,
                 format!("failed to wait for child: {e}"),
