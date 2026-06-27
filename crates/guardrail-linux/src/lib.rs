@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, ExplainCtx, SandboxChild, SandboxConfig, Violation};
 
 #[cfg(target_os = "linux")]
 pub mod diagnostics;
@@ -85,6 +85,11 @@ impl Backend for LinuxBackend {
         Err(Error::Unsupported(
             "guardrail-linux is only available on Linux".into(),
         ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn explain(&self, ctx: &ExplainCtx<'_>) -> Option<Violation> {
+        diagnostics::explain(ctx)
     }
 }
 

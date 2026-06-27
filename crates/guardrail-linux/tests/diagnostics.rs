@@ -1,12 +1,17 @@
 #![cfg(target_os = "linux")]
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-use guardrail_core::{IpcPolicy, NetworkPolicy, SandboxConfig, ViolationKind};
+use guardrail_core::{
+    Backend, ExplainCtx, IpcPolicy, NetworkPolicy, SandboxConfig, Violation, ViolationKind,
+};
 use guardrail_linux::LinuxBackend;
-use guardrail_linux::diagnostics::explain;
 
 mod common;
+
+fn explain(config: &SandboxConfig, status: std::process::ExitStatus) -> Option<Violation> {
+    LinuxBackend::new().explain(&ExplainCtx::new(config, status))
+}
 
 fn probe(args: &[&str]) -> Command {
     common::probe(args)

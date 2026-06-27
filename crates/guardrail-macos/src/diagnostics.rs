@@ -1,75 +1,47 @@
-//! Best-effort diagnostics for macOS Seatbelt denials.
+//! macOS override of [`Backend::explain`](guardrail_core::Backend::explain).
 //!
 //! Seatbelt does not give the parent a synchronous violation notification.
 //! Generated profiles enable `(debug deny)`, which can produce sandbox denial
-//! lines in stderr or the macOS unified log. These helpers classify those lines
-//! when callers capture them, and otherwise fall back to exit-status heuristics.
+//! lines in stderr or the macOS unified log. When a caller captures that text
+//! and passes it via [`ExplainCtx::captured`], these helpers classify the
+//! denial lines; otherwise the override falls back to exit-status heuristics.
+//!
+//! The shared success-check and resource-signal logic lives in
+//! `guardrail_core::diagnostics`; this module adds only the Seatbelt-specific
+//! denial-line parsing and the macOS-flavoured fallback. The explanation is
+//! pure text/exit-status logic, so the override is not `cfg`-gated and the
+//! Seatbelt parsing stays unit-testable on Linux.
 
-use std::process::{ExitStatus, Output};
+use std::process::ExitStatus;
 
-use guardrail_core::{NetworkPolicy, SandboxConfig, Violation, ViolationKind};
+use guardrail_core::{ExplainCtx, NetworkPolicy, SandboxConfig, Violation, ViolationKind};
 
-/// Explain why `status` likely indicates a macOS sandbox policy violation.
+/// The macOS [`Backend::explain`](guardrail_core::Backend::explain) override.
 ///
-/// This mirrors `guardrail_linux::diagnostics::explain`: it returns `None` for
-/// success, reports resource-limit signals when visible, and otherwise returns a
+/// Uses `ctx.captured` (if present) to parse Seatbelt `(debug deny)` lines for
+/// specific suggestions, then falls back to a resource-signal check and a
 /// conservative filesystem/Seatbelt fallback.
-pub fn explain(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
-    explain_impl(config, status, None)
-}
-
-/// Explain a failed run using both exit status and captured stdout/stderr.
-///
-/// Use this when the command was spawned with piped stdio and consumed through
-/// `wait_with_output()`. Captured Seatbelt `(debug deny)` lines allow more
-/// specific suggestions than exit status alone.
-pub fn explain_with_output(config: &SandboxConfig, output: &Output) -> Option<Violation> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = if stdout.is_empty() {
-        stderr.into_owned()
-    } else if stderr.is_empty() {
-        stdout.into_owned()
-    } else {
-        format!("{stderr}\n{stdout}")
-    };
-
-    explain_impl(config, output.status, Some(combined.as_str()))
-}
-
-/// Explain a failed run using exit status and captured diagnostic text.
-///
-/// `diagnostics` can be the child's stderr, merged stdout/stderr, or relevant
-/// `log stream` / `log show` output containing Seatbelt denial lines.
-pub fn explain_with_diagnostics(
-    config: &SandboxConfig,
-    status: ExitStatus,
-    diagnostics: &str,
-) -> Option<Violation> {
-    explain_impl(config, status, Some(diagnostics))
-}
-
-fn explain_impl(
-    config: &SandboxConfig,
-    status: ExitStatus,
-    diagnostics: Option<&str>,
-) -> Option<Violation> {
-    if status.success() {
+pub(crate) fn explain(ctx: &ExplainCtx<'_>) -> Option<Violation> {
+    if ctx.status.success() {
         return None;
     }
 
-    if let Some(text) = diagnostics
-        && let Some(violation) = explain_seatbelt_denial(config, status, text)
+    if let Some(text) = ctx.captured
+        && let Some(violation) = explain_seatbelt_denial(ctx.config, ctx.status, text)
     {
         return Some(violation);
     }
 
-    if let Some(violation) = resource_violation(config, status) {
+    #[cfg(unix)]
+    if let Some(violation) = guardrail_core::diagnostics::resource_signal_violation(
+        ctx.config,
+        ctx.status,
+    ) {
         return Some(violation);
     }
 
-    if let Some(text) = diagnostics
-        && let Some(violation) = explain_permission_text(status, text)
+    if let Some(text) = ctx.captured
+        && let Some(violation) = explain_permission_text(ctx.status, text)
     {
         return Some(violation);
     }
@@ -77,7 +49,8 @@ fn explain_impl(
     Some(Violation {
         kind: ViolationKind::Filesystem,
         summary: format!(
-            "process exited unsuccessfully ({status}); on macOS this is often a Seatbelt denial"
+            "process exited unsuccessfully ({}); on macOS this is often a Seatbelt denial",
+            ctx.status
         ),
         suggestions: vec![
             "grant read access: .allow_read(\"<path>\")".to_string(),
@@ -86,32 +59,6 @@ fn explain_impl(
              .darwin_sandbox_profile(\"<profile.sb>\")"
                 .to_string(),
         ],
-    })
-}
-
-fn resource_violation(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
-    use std::os::unix::process::ExitStatusExt;
-
-    let signal = status.signal()?;
-    if signal != libc::SIGXCPU && signal != libc::SIGKILL {
-        return None;
-    }
-
-    let mut suggestions = Vec::new();
-    if config.limits.cpu_time_secs.is_some() {
-        suggestions.push("raise the CPU cap: .cpu_time_limit_secs(<larger>)".to_string());
-    }
-    if config.limits.memory_bytes.is_some() {
-        suggestions.push("raise the memory cap: .memory_limit_mb(<larger>)".to_string());
-    }
-    if suggestions.is_empty() {
-        return None;
-    }
-
-    Some(Violation {
-        kind: ViolationKind::ResourceLimit,
-        summary: "process was killed by a resource limit (CPU time or memory)".to_string(),
-        suggestions,
     })
 }
 
@@ -289,7 +236,7 @@ fn escape_builder_string(value: &str) -> String {
 mod tests {
     use std::os::unix::process::ExitStatusExt;
 
-    use guardrail_core::{NetworkPolicy, SandboxBuilder, ViolationKind};
+    use guardrail_core::{ExplainCtx, NetworkPolicy, SandboxBuilder, ViolationKind};
 
     use super::*;
 
@@ -299,6 +246,18 @@ mod tests {
 
     fn signaled_status(signal: i32) -> ExitStatus {
         ExitStatus::from_raw(signal)
+    }
+
+    fn explain(config: &guardrail_core::SandboxConfig, status: ExitStatus) -> Option<Violation> {
+        super::explain(&ExplainCtx::new(config, status))
+    }
+
+    fn explain_with_text(
+        config: &guardrail_core::SandboxConfig,
+        status: ExitStatus,
+        text: &str,
+    ) -> Option<Violation> {
+        super::explain(&ExplainCtx::new(config, status).with_captured(text))
     }
 
     #[test]
@@ -313,7 +272,7 @@ mod tests {
         let config = SandboxBuilder::new().build();
         let text = "Sandbox: cat(123) deny(1) file-read-data /private/tmp/input.txt";
 
-        let violation = explain_with_diagnostics(&config, exit_status(1), text).expect("violation");
+        let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
 
         assert_eq!(violation.kind, ViolationKind::Filesystem);
         assert!(violation.summary.contains("file-read-data"));
@@ -328,7 +287,7 @@ mod tests {
         let config = SandboxBuilder::new().build();
         let text = "Sandbox: touch(123) deny(1) file-write-create /private/tmp/out.txt";
 
-        let violation = explain_with_diagnostics(&config, exit_status(1), text).expect("violation");
+        let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
 
         assert_eq!(
             violation.suggestions,
@@ -341,7 +300,7 @@ mod tests {
         let config = SandboxBuilder::new().network(NetworkPolicy::Deny).build();
         let text = "Sandbox: curl(123) deny(1) network-outbound 93.184.216.34:443";
 
-        let violation = explain_with_diagnostics(&config, exit_status(1), text).expect("violation");
+        let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
 
         assert_eq!(violation.kind, ViolationKind::Unknown);
         assert!(
@@ -357,7 +316,7 @@ mod tests {
         let config = SandboxBuilder::new().build();
         let text = "cat: /Users/me/secret.txt: Permission denied";
 
-        let violation = explain_with_diagnostics(&config, exit_status(1), text).expect("violation");
+        let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
 
         assert_eq!(violation.kind, ViolationKind::Filesystem);
         assert!(
@@ -371,8 +330,7 @@ mod tests {
     fn cpu_signal_is_diagnosed_as_resource_limit_when_configured() {
         let config = SandboxBuilder::new().cpu_time_limit_secs(1).build();
 
-        let violation =
-            explain(&config, signaled_status(libc::SIGXCPU)).expect("resource violation");
+        let violation = explain(&config, signaled_status(libc::SIGXCPU)).expect("resource violation");
 
         assert_eq!(violation.kind, ViolationKind::ResourceLimit);
         assert!(

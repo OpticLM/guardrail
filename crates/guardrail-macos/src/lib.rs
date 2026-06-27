@@ -41,7 +41,7 @@ mod seatbelt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, ExplainCtx, SandboxChild, SandboxConfig, Violation};
 
 /// The macOS sandbox backend.
 #[derive(Debug, Default, Clone)]
@@ -82,6 +82,13 @@ impl Backend for MacosBackend {
         Err(Error::Unsupported(
             "guardrail-macos backend only supports target_os = \"macos\"".into(),
         ))
+    }
+
+    // Not cfg-gated: the explanation is pure text/exit-status logic (the Unix
+    // signal handling is delegated to core's cfg(unix) helper), so it compiles
+    // everywhere and the Seatbelt denial parsing stays unit-testable on Linux.
+    fn explain(&self, ctx: &ExplainCtx<'_>) -> Option<Violation> {
+        diagnostics::explain(ctx)
     }
 }
 

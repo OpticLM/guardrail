@@ -1,25 +1,30 @@
-//! Maps a Windows sandboxed child's exit status to a best-effort violation.
+//! Windows override of [`Backend::explain`](guardrail_core::Backend::explain).
 //!
 //! Windows does not expose an AppContainer filesystem or network denial to the
 //! parent as a precise signal. These explanations therefore stay heuristic and
 //! name likely builder calls without claiming exact attribution.
+//!
+//! The shared success-check lives in `guardrail_core::diagnostics`; this module
+//! adds the Windows-specific resource-limit and policy fallbacks. Windows Job
+//! Object kills are not surfaced to the parent as a Unix-style signal, so
+//! resource attribution here is driven by which caps the `config` actually set
+//! rather than by an exit signal.
 
 use std::process::ExitStatus;
 
-use guardrail_core::{NetworkPolicy, SandboxConfig, Violation, ViolationKind};
+use guardrail_core::{ExplainCtx, NetworkPolicy, SandboxConfig, Violation, ViolationKind};
 
-/// Explain why `status` likely indicates a policy violation, given the `config`
-/// the child ran under. Returns `None` if the child exited successfully.
-pub fn explain(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
-    if status.success() {
+/// The Windows [`Backend::explain`](guardrail_core::Backend::explain) override.
+pub(crate) fn explain(ctx: &ExplainCtx<'_>) -> Option<Violation> {
+    if ctx.status.success() {
         return None;
     }
 
-    if let Some(violation) = resource_violation(config, status) {
+    if let Some(violation) = resource_violation(ctx.config, ctx.status) {
         return Some(violation);
     }
 
-    Some(policy_violation(config, status))
+    Some(policy_violation(ctx.config, ctx.status))
 }
 
 fn resource_violation(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {

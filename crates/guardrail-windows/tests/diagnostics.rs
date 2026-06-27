@@ -10,9 +10,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use guardrail_core::{NetworkPolicy, SandboxBuilder, SandboxConfig, ViolationKind};
+use guardrail_core::{
+    Backend, ExplainCtx, NetworkPolicy, SandboxBuilder, SandboxConfig, Violation, ViolationKind,
+};
 use guardrail_windows::WindowsBackend;
-use guardrail_windows::diagnostics::explain;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
@@ -38,6 +39,10 @@ fn run(config: &SandboxConfig, command: Command) -> ExitStatus {
         .spawn_with(&WindowsBackend::new(), command)
         .expect("spawn probe");
     child.wait().expect("wait")
+}
+
+fn explain(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
+    WindowsBackend::new().explain(&ExplainCtx::new(config, status))
 }
 
 #[test]

@@ -15,17 +15,20 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail_core::{
-    IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig, SharedSandboxChild, ViolationKind,
+    Backend, ExplainCtx, IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig,
+    SharedSandboxChild, ViolationKind,
 };
 
-// Compile-time backend + diagnostics selection: each published binary targets
-// exactly one OS, so the correct backend is chosen at build time.
+// Compile-time backend selection: each published binary targets exactly one OS,
+// so the correct backend is chosen at build time. Diagnostics come from the
+// backend's `Backend::explain` override, so there is no separate `explain`
+// import to keep in sync with the backend ladder.
 #[cfg(target_os = "linux")]
-use guardrail_linux::{LinuxBackend as PlatformBackend, diagnostics::explain};
+use guardrail_linux::LinuxBackend as PlatformBackend;
 #[cfg(target_os = "macos")]
-use guardrail_macos::{MacosBackend as PlatformBackend, diagnostics::explain};
+use guardrail_macos::MacosBackend as PlatformBackend;
 #[cfg(target_os = "windows")]
-use guardrail_windows::{WindowsBackend as PlatformBackend, diagnostics::explain};
+use guardrail_windows::WindowsBackend as PlatformBackend;
 
 /// Network confinement level for the child: `"deny"` | `"outbound-only"` |
 /// `"full"`. Mirrors `guardrail_core::NetworkPolicy`; the string values are the
@@ -201,11 +204,13 @@ fn build_exit_result(config: &SandboxConfig, status: ExitStatus) -> ExitResult {
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
 
-    let violation = explain(config, status).map(|v| JsViolation {
-        kind: violation_kind_str(v.kind).to_string(),
-        summary: v.summary,
-        suggestions: v.suggestions,
-    });
+    let violation = PlatformBackend::new()
+        .explain(&ExplainCtx::new(config, status))
+        .map(|v| JsViolation {
+            kind: v.kind.into(),
+            summary: v.summary,
+            suggestions: v.suggestions,
+        });
 
     ExitResult {
         code: status.code(),

@@ -14,6 +14,7 @@ use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 mod acl;
 #[cfg(windows)]
 mod appcontainer;
+#[cfg(windows)]
 pub mod diagnostics;
 #[cfg(windows)]
 mod handle;
@@ -49,5 +50,10 @@ impl Backend for WindowsBackend {
         Err(Error::Unsupported(
             "guardrail-windows is only available on Windows".into(),
         ))
+    }
+
+    #[cfg(windows)]
+    fn explain(&self, ctx: &guardrail_core::ExplainCtx<'_>) -> Option<guardrail_core::Violation> {
+        diagnostics::explain(ctx)
     }
 }
