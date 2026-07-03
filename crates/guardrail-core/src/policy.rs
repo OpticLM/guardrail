@@ -1,24 +1,32 @@
 //! Declarative sandbox policies.
 //!
-//! Policies are plain data. They describe *what is allowed*; everything not
-//! granted is denied by default.
+//! Policies are plain data. Filesystem access starts denied by default. Rules
+//! are evaluated in declaration order, and for each independent right the last
+//! matching rule wins. Write access does not imply read access, and execute
+//! access does not imply read access.
 
 use std::path::PathBuf;
 
-/// A single filesystem grant. Everything beneath `path` is covered.
+/// A single filesystem rule. Everything beneath `path` is covered.
 ///
 /// By default the sandbox grants no filesystem access at all. Backends must
-/// apply exactly the filesystem grants declared here; callers that need to run
-/// a binary or load shared libraries must grant the required read and execute
-/// access explicitly.
+/// apply exactly the filesystem rules declared here. For each independent
+/// right (read, write, execute), rules are evaluated in declaration order and
+/// the last matching rule wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsAccess {
     /// Grant read access to `path` and everything beneath it.
-    Read(PathBuf),
-    /// Grant read and write access to `path` and everything beneath it.
-    Write(PathBuf),
+    ReadAllow(PathBuf),
+    /// Deny read access to `path` and everything beneath it.
+    ReadDeny(PathBuf),
+    /// Grant write access to `path` and everything beneath it.
+    WriteAllow(PathBuf),
+    /// Deny write access to `path` and everything beneath it.
+    WriteDeny(PathBuf),
     /// Grant execute access to `path` and everything beneath it.
-    Execute(PathBuf),
+    ExecuteAllow(PathBuf),
+    /// Deny execute access to `path` and everything beneath it.
+    ExecuteDeny(PathBuf),
 }
 
 /// Network confinement level.

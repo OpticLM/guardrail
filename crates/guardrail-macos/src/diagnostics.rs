@@ -52,10 +52,10 @@ pub(crate) fn explain(ctx: &ExplainCtx<'_>) -> Option<Violation> {
             ctx.status
         ),
         suggestions: vec![
-            "grant read access: .allow_read(\"<path>\")".to_string(),
-            "grant write access: .allow_write(\"<path>\")".to_string(),
+            "grant read access: .fs([FsAccess::ReadAllow(\"<path>\".into())])".to_string(),
+            "grant write access: .fs([FsAccess::WriteAllow(\"<path>\".into())])".to_string(),
             "for macOS-specific operations, import a Seatbelt profile: \
-             .darwin_sandbox_profile(\"<profile.sb>\")"
+             .darwin_sandbox_profiles([\"<profile.sb>\".into()])"
                 .to_string(),
         ],
     })
@@ -94,11 +94,11 @@ fn explain_permission_text(status: ExitStatus, diagnostics: &str) -> Option<Viol
         ),
         suggestions: vec![
             format!(
-                "grant read access: .allow_read(\"{}\")",
+                "grant read access: .fs([FsAccess::ReadAllow(\"{}\".into())])",
                 escape_builder_string(path)
             ),
             format!(
-                "grant write access: .allow_write(\"{}\")",
+                "grant write access: .fs([FsAccess::WriteAllow(\"{}\".into())])",
                 escape_builder_string(path)
             ),
         ],
@@ -144,23 +144,23 @@ fn suggestions_for_denial(
     operation: &str,
     subject: Option<&str>,
 ) -> Vec<String> {
-    if operation.starts_with("file-read") || operation == "file-map-executable" {
+    if operation.starts_with("file-read") {
         return vec![format!(
-            "grant read access: .allow_read(\"{}\")",
+            "grant read access: .fs([FsAccess::ReadAllow(\"{}\".into())])",
             builder_arg(subject, "<path>")
         )];
     }
 
     if operation.starts_with("file-write") {
         return vec![format!(
-            "grant write access: .allow_write(\"{}\")",
+            "grant write access: .fs([FsAccess::WriteAllow(\"{}\".into())])",
             builder_arg(subject, "<path>")
         )];
     }
 
-    if operation.starts_with("process-exec") {
+    if operation == "file-map-executable" || operation.starts_with("process-exec") {
         return vec![format!(
-            "grant execute access: .allow_execute(\"{}\")",
+            "grant execute access: .fs([FsAccess::ExecuteAllow(\"{}\".into())])",
             builder_arg(subject, "<path>")
         )];
     }
@@ -188,7 +188,7 @@ fn suggestions_for_denial(
 
     vec![format!(
         "allow the macOS-specific Seatbelt operation with an imported profile: \
-         .darwin_sandbox_profile(\"<profile.sb>\") for operation {operation}"
+         .darwin_sandbox_profiles([\"<profile.sb>\".into()]) for operation {operation}"
     )]
 }
 
@@ -277,7 +277,10 @@ mod tests {
         assert!(violation.summary.contains("file-read-data"));
         assert_eq!(
             violation.suggestions,
-            vec!["grant read access: .allow_read(\"/private/tmp/input.txt\")"]
+            vec![
+                "grant read access: \
+                 .fs([FsAccess::ReadAllow(\"/private/tmp/input.txt\".into())])"
+            ]
         );
     }
 
@@ -290,7 +293,10 @@ mod tests {
 
         assert_eq!(
             violation.suggestions,
-            vec!["grant write access: .allow_write(\"/private/tmp/out.txt\")"]
+            vec![
+                "grant write access: \
+                 .fs([FsAccess::WriteAllow(\"/private/tmp/out.txt\".into())])"
+            ]
         );
     }
 
@@ -319,9 +325,11 @@ mod tests {
 
         assert_eq!(violation.kind, ViolationKind::Filesystem);
         assert!(
-            violation
-                .suggestions
-                .contains(&"grant read access: .allow_read(\"/Users/me/secret.txt\")".to_string())
+            violation.suggestions.contains(
+                &"grant read access: \
+                    .fs([FsAccess::ReadAllow(\"/Users/me/secret.txt\".into())])"
+                    .to_string()
+            )
         );
     }
 

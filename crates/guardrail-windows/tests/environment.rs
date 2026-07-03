@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use guardrail_core::SandboxBuilder;
+use guardrail_core::{FsAccess, SandboxBuilder};
 use guardrail_windows::WindowsBackend;
 
 fn probe() -> Command {
@@ -24,7 +24,7 @@ fn inherited_env_is_cleared() {
     unsafe { std::env::set_var("GUARDRAIL_SECRET", "leaked") };
 
     let config = builder_with_windows_runtime_env()
-        .allow_read(probe_dir())
+        .fs([FsAccess::ReadAllow(probe_dir())])
         .build();
     let mut command = probe();
     command.args(["check-env", "GUARDRAIL_SECRET", "leaked"]);
@@ -43,7 +43,7 @@ fn inherited_env_is_cleared() {
 #[test]
 fn explicitly_added_env_reaches_child() {
     let config = builder_with_windows_runtime_env()
-        .allow_read(probe_dir())
+        .fs([FsAccess::ReadAllow(probe_dir())])
         .env("GREETING", "hello")
         .build();
     let mut command = probe();

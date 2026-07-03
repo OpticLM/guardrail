@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use guardrail_core::FsAccess;
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -23,8 +24,8 @@ fn custom_profile_is_loaded_and_applied() {
     .unwrap();
 
     let config = common::base()
-        .allow_read(temp_dir.path())
-        .darwin_sandbox_profile(&profile_path)
+        .fs([FsAccess::ReadAllow(temp_dir.path().into())])
+        .darwin_sandbox_profiles([profile_path])
         .build();
     let mut child = config
         .spawn_with(

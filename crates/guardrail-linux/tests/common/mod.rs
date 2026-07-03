@@ -27,7 +27,10 @@ pub fn probe(args: &[&str]) -> Command {
 pub fn base() -> SandboxBuilder {
     let mut builder = SandboxBuilder::new();
     for dir in runtime_dirs() {
-        builder = builder.fs([FsAccess::Read(dir.clone()), FsAccess::Execute(dir)]);
+        builder = builder.fs([
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::ExecuteAllow(dir),
+        ]);
     }
     builder
 }
@@ -35,7 +38,7 @@ pub fn base() -> SandboxBuilder {
 pub fn read_only_base() -> SandboxBuilder {
     let mut builder = SandboxBuilder::new();
     for dir in runtime_dirs() {
-        builder = builder.fs([FsAccess::Read(dir)]);
+        builder = builder.fs([FsAccess::ReadAllow(dir)]);
     }
     builder
 }

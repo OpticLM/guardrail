@@ -55,8 +55,12 @@ fn resource_violation(config: &SandboxConfig, status: ExitStatus) -> Option<Viol
 
 fn policy_violation(config: &SandboxConfig, status: ExitStatus) -> Violation {
     let mut suggestions = vec![
-        "if it likely needs file reads, grant them: .allow_read(\"<path>\")".to_string(),
-        "if it may write files, grant the output directory: .allow_write(\"<path>\")".to_string(),
+        "if it likely needs file reads, grant them: \
+         FsAccess::ReadAllow(\"<path>\")"
+            .to_string(),
+        "if it may write files, grant the output directory: \
+         FsAccess::WriteAllow(\"<path>\")"
+            .to_string(),
     ];
 
     match config.network {

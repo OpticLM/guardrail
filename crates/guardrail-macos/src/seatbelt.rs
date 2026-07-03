@@ -77,7 +77,7 @@ mod tests {
 
         let config = SandboxBuilder::new()
             .darwin_sandbox_profiles([first.clone(), second.clone()])
-            .fs([FsAccess::Read("/generated-read".into())])
+            .fs([FsAccess::ReadAllow("/generated-read".into())])
             .build();
         let profile = resolve(&config).unwrap();
 
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn rejects_generated_profile_with_interior_nul_byte() {
         let config = SandboxBuilder::new()
-            .fs([FsAccess::Read("/tmp/has\0nul".into())])
+            .fs([FsAccess::ReadAllow("/tmp/has\0nul".into())])
             .build();
 
         let err = resolve(&config).unwrap_err();

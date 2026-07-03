@@ -18,8 +18,8 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   // Landlock/Seatbelt precision test, so broad grants are appropriate here.
   const child = guardrail.spawn('/usr/bin/true', [], {
     fs: [
-      { kind: 'read', path: '/' },
-      { kind: 'execute', path: '/' },
+      { kind: 'read-allow', path: '/' },
+      { kind: 'execute-allow', path: '/' },
     ],
     network: 'full',
   })
@@ -44,18 +44,16 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
 test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: process.platform !== 'win32' }, async () => {
   // `cmd /c exit 0` is the canonical clean-exit probe on Windows. Two Rust
   // integration tests prove it exits 0 under this backend's AppContainer +
-  // Job Object confinement with no filesystem grants and default (deny)
+  // Job Object confinement with no filesystem rules and default (deny)
   // network: `default_network_deny_still_launches_process_in_appcontainer`
   // (crates/guardrail-windows/tests/policy.rs) and
   // `default_config_runs_command_under_job_object`
   // (crates/guardrail-windows/tests/resource_limits.rs).
   //
-  // No `fs` grants are needed: guardrail's ACL grants are additive on the
-  // per-run AppContainer SID (guardrail-windows/src/acl.rs applies them
-  // via SetNamedSecurityInfoW, only ever appending ACEs), and Windows already
-  // grants `ALL APPLICATION PACKAGES` read+execute on C:\Windows\System32, so
+  // No `fs` rules are needed: Windows already grants `ALL APPLICATION PACKAGES`
+  // read+execute on C:\Windows\System32, so
   // the AppContainer child can load cmd.exe and its system DLLs without any
-  // explicit guardrail grant. `cmd` is resolved to C:\Windows\System32\cmd.exe
+  // explicit guardrail rule. `cmd` is resolved to C:\Windows\System32\cmd.exe
   // by SearchPathW in the parent process (guardrail-windows/src/process.rs),
   // independent of the child's cleared environment.
   //

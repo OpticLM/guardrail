@@ -11,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use guardrail_core::{
-    Backend, ExplainCtx, NetworkPolicy, SandboxBuilder, SandboxConfig, Violation, ViolationKind,
+    Backend, ExplainCtx, FsAccess, NetworkPolicy, SandboxBuilder, SandboxConfig, Violation,
+    ViolationKind,
 };
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -31,7 +32,7 @@ fn probe_dir() -> PathBuf {
 }
 
 fn base_builder() -> SandboxBuilder {
-    builder_with_windows_runtime_env().allow_read(probe_dir())
+    builder_with_windows_runtime_env().fs([FsAccess::ReadAllow(probe_dir())])
 }
 
 fn run(config: &SandboxConfig, command: Command) -> ExitStatus {
@@ -108,9 +109,9 @@ fn filesystem_denial_suggests_file_grants() {
     let violation = explain(&config, status).expect("should diagnose policy failure");
 
     assert_eq!(violation.kind, ViolationKind::Filesystem);
-    assert!(violation.suggestions.iter().any(
-        |suggestion| suggestion.contains(".allow_read") || suggestion.contains(".allow_write")
-    ));
+    assert!(violation.suggestions.iter().any(|suggestion| {
+        suggestion.contains("FsAccess::ReadAllow") || suggestion.contains("FsAccess::WriteAllow")
+    }));
 }
 
 #[test]

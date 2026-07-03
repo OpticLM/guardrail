@@ -1,4 +1,4 @@
-//! Temporary filesystem ACL grants for the AppContainer SID.
+//! Temporary filesystem ACL rules for the AppContainer SID.
 
 #![cfg(windows)]
 
@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use guardrail_core::{Error, FsAccess};
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+use windows_sys::core::PWSTR;
+use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
-    TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    SetEntriesInAclW, SetNamedSecurityInfoW, ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W,
+    GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
@@ -20,7 +21,6 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
-use windows_sys::core::PWSTR;
 
 #[derive(Debug)]
 pub(crate) struct AclGuard {
@@ -35,23 +35,29 @@ impl AclGuard {
             originals: Vec::new(),
         };
 
-        for access in fs {
-            let (path, rights) = match access {
-                FsAccess::Read(path) => (path, read_rights()),
-                FsAccess::Write(path) => (path, write_rights()),
-                FsAccess::Execute(path) => (path, execute_rights()),
-            };
+        for entry in compile_entries(fs).map_err(|err| Error::confinement("acl", err))? {
             guard
-                .grant_path(path, sid, rights)
+                .apply_path(
+                    &entry.path,
+                    sid,
+                    rights_for(entry.right),
+                    access_mode(entry.effect),
+                )
                 .map_err(|err| Error::confinement("acl", err))?;
         }
 
         Ok(guard)
     }
 
-    fn grant_path(&mut self, path: &Path, sid: PSID, rights: u32) -> io::Result<()> {
+    fn apply_path(
+        &mut self,
+        path: &Path,
+        sid: PSID,
+        rights: u32,
+        mode: ACCESS_MODE,
+    ) -> io::Result<()> {
         let original = OriginalDacl::capture(path)?;
-        let explicit = explicit_access(sid, rights);
+        let explicit = explicit_access(sid, rights, mode);
         let mut new_acl = ptr::null_mut();
         let status =
             unsafe { SetEntriesInAclW(1, &explicit, original.dacl.cast_const(), &mut new_acl) };
@@ -76,6 +82,98 @@ impl AclGuard {
 
         self.originals.push(original);
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsRight {
+    Read,
+    Write,
+    Execute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleEffect {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AclEntry {
+    path: PathBuf,
+    right: FsRight,
+    effect: RuleEffect,
+}
+
+fn compile_entries(fs: &[FsAccess]) -> io::Result<Vec<AclEntry>> {
+    let rules = normalize_rules(fs)?;
+    Ok(compile_normalized_entries(&rules))
+}
+
+fn normalize_rules(fs: &[FsAccess]) -> io::Result<Vec<AclEntry>> {
+    fs.iter()
+        .map(|rule| {
+            let (path, right, effect) = split_rule(rule);
+            Ok(AclEntry {
+                path: normalize_path(path)?,
+                right,
+                effect,
+            })
+        })
+        .collect()
+}
+
+fn normalize_path(path: &Path) -> io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+fn compile_normalized_entries(rules: &[AclEntry]) -> Vec<AclEntry> {
+    let mut entries = Vec::new();
+    for rule in rules {
+        if final_effect(rules, rule.right, &rule.path) == rule.effect
+            && !entries.iter().any(|entry: &AclEntry| {
+                entry.path == rule.path && entry.right == rule.right && entry.effect == rule.effect
+            })
+        {
+            entries.push(rule.clone());
+        }
+    }
+    entries
+}
+
+fn final_effect(rules: &[AclEntry], right: FsRight, path: &Path) -> RuleEffect {
+    let mut effect = RuleEffect::Deny;
+    for rule in rules {
+        if rule.right == right && path.starts_with(&rule.path) {
+            effect = rule.effect;
+        }
+    }
+    effect
+}
+
+fn split_rule(rule: &FsAccess) -> (&Path, FsRight, RuleEffect) {
+    match rule {
+        FsAccess::ReadAllow(path) => (path, FsRight::Read, RuleEffect::Allow),
+        FsAccess::ReadDeny(path) => (path, FsRight::Read, RuleEffect::Deny),
+        FsAccess::WriteAllow(path) => (path, FsRight::Write, RuleEffect::Allow),
+        FsAccess::WriteDeny(path) => (path, FsRight::Write, RuleEffect::Deny),
+        FsAccess::ExecuteAllow(path) => (path, FsRight::Execute, RuleEffect::Allow),
+        FsAccess::ExecuteDeny(path) => (path, FsRight::Execute, RuleEffect::Deny),
+    }
+}
+
+fn rights_for(right: FsRight) -> u32 {
+    match right {
+        FsRight::Read => read_rights(),
+        FsRight::Write => write_rights(),
+        FsRight::Execute => execute_rights(),
+    }
+}
+
+fn access_mode(effect: RuleEffect) -> ACCESS_MODE {
+    match effect {
+        RuleEffect::Allow => GRANT_ACCESS,
+        RuleEffect::Deny => DENY_ACCESS,
     }
 }
 
@@ -153,10 +251,10 @@ impl Drop for OriginalDacl {
     }
 }
 
-fn explicit_access(sid: PSID, rights: u32) -> EXPLICIT_ACCESS_W {
+fn explicit_access(sid: PSID, rights: u32, mode: ACCESS_MODE) -> EXPLICIT_ACCESS_W {
     EXPLICIT_ACCESS_W {
         grfAccessPermissions: rights,
-        grfAccessMode: GRANT_ACCESS,
+        grfAccessMode: mode,
         grfInheritance: OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: ptr::null_mut(),
@@ -173,7 +271,7 @@ fn read_rights() -> u32 {
 }
 
 fn write_rights() -> u32 {
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE
+    FILE_GENERIC_WRITE
 }
 
 fn execute_rights() -> u32 {
@@ -205,10 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn write_access_includes_read_write_but_not_execute() {
+    fn write_access_is_pure_write_without_read_or_execute() {
         let rights = write_rights();
-        assert_ne!(rights & FILE_GENERIC_READ, 0);
-        assert_ne!(rights & FILE_GENERIC_WRITE, 0);
+        assert_eq!(rights, FILE_GENERIC_WRITE);
+        assert_eq!(rights & FILE_GENERIC_READ, 0);
         assert_eq!(rights & FILE_GENERIC_EXECUTE, 0);
     }
 
@@ -221,9 +319,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_access_targets_sid_and_inherits_to_children() {
+    fn explicit_allow_access_targets_sid_and_inherits_to_children() {
         let sid = 1usize as PSID;
-        let access = explicit_access(sid, read_rights());
+        let access = explicit_access(sid, read_rights(), GRANT_ACCESS);
         assert_eq!(access.grfAccessMode, GRANT_ACCESS);
         assert_eq!(access.Trustee.TrusteeForm, TRUSTEE_IS_SID);
         assert_eq!(
@@ -231,5 +329,119 @@ mod tests {
             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
         );
         assert_eq!(access.Trustee.ptstrName as usize, sid as usize);
+    }
+
+    #[test]
+    fn explicit_deny_access_uses_deny_mode() {
+        let sid = 1usize as PSID;
+        let access = explicit_access(sid, read_rights(), DENY_ACCESS);
+
+        assert_eq!(access.grfAccessMode, DENY_ACCESS);
+        assert_eq!(access.grfAccessPermissions, FILE_GENERIC_READ);
+    }
+
+    #[test]
+    fn compile_entries_uses_final_same_path_effect() {
+        let entries = compile_normalized_entries(&[
+            AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Read,
+                effect: RuleEffect::Allow,
+            },
+            AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Read,
+                effect: RuleEffect::Deny,
+            },
+            AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Read,
+                effect: RuleEffect::Allow,
+            },
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Read,
+                effect: RuleEffect::Allow,
+            }]
+        );
+    }
+
+    #[test]
+    fn compile_entries_keeps_independent_write_deny() {
+        let entries = compile_normalized_entries(&[
+            AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Read,
+                effect: RuleEffect::Allow,
+            },
+            AclEntry {
+                path: PathBuf::from("C:\\work"),
+                right: FsRight::Write,
+                effect: RuleEffect::Deny,
+            },
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![
+                AclEntry {
+                    path: PathBuf::from("C:\\work"),
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+                AclEntry {
+                    path: PathBuf::from("C:\\work"),
+                    right: FsRight::Write,
+                    effect: RuleEffect::Deny,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_entries_normalizes_windows_path_identity() {
+        let dir = temp_dir("case-folding");
+        let lower = PathBuf::from(dir.display().to_string().to_ascii_lowercase());
+        let upper = PathBuf::from(dir.display().to_string().to_ascii_uppercase());
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(lower),
+            FsAccess::ReadDeny(upper),
+            FsAccess::ReadAllow(dir.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![AclEntry {
+                path: canonical,
+                right: FsRight::Read,
+                effect: RuleEffect::Allow,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "guardrail-acl-{label}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn unique_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }

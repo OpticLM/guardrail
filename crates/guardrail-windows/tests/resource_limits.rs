@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use guardrail_core::SandboxBuilder;
+use guardrail_core::{FsAccess, SandboxBuilder};
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
@@ -41,7 +41,7 @@ fn default_config_runs_command_under_job_object() {
 #[test]
 fn memory_limit_blocks_large_allocation() {
     let config = builder_with_windows_runtime_env()
-        .allow_read(probe_dir())
+        .fs([FsAccess::ReadAllow(probe_dir())])
         .memory_limit_mb(64)
         .build();
     let mut command = probe();
@@ -61,7 +61,7 @@ fn memory_limit_blocks_large_allocation() {
 #[test]
 fn without_limit_the_same_allocation_succeeds() {
     let config = builder_with_windows_runtime_env()
-        .allow_read(probe_dir())
+        .fs([FsAccess::ReadAllow(probe_dir())])
         .build();
     let mut command = probe();
     command.args(["alloc", "512"]);
@@ -80,7 +80,7 @@ fn without_limit_the_same_allocation_succeeds() {
 #[test]
 fn cpu_time_limit_kills_busy_loop() {
     let config = builder_with_windows_runtime_env()
-        .allow_read(probe_dir())
+        .fs([FsAccess::ReadAllow(probe_dir())])
         .cpu_time_limit_secs(1)
         .build();
     let mut command = probe();

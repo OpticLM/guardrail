@@ -33,15 +33,21 @@ export interface ExitResult {
 }
 
 export interface FsAccess {
-  /** `"read"` | `"write"` | `"execute"`. */
+  /**
+   * `"read-allow"` | `"read-deny"` | `"write-allow"` | `"write-deny"` |
+   * `"execute-allow"` | `"execute-deny"`.
+   */
   kind: FsAccessKind
-  /** Path granted access (recursive). */
+  /** Path the rule covers recursively. */
   path: string
 }
 
-export type FsAccessKind =  'read'|
-'write'|
-'execute';
+export type FsAccessKind =  'read-allow'|
+'read-deny'|
+'write-allow'|
+'write-deny'|
+'execute-allow'|
+'execute-deny';
 
 /**
  * IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
@@ -72,9 +78,9 @@ export declare function spawn(command: string, args?: Array<string> | undefined 
  */
 export interface SpawnOptions {
   /**
-   * Filesystem grants, in declaration order. Grants are applied in the order
-   * given. Note: `"execute"` does NOT imply read — add a `"read"` grant for
-   * the binary and its libraries too.
+   * Filesystem rules, in declaration order. Later matching rules override
+   * earlier rules for the same right. Note: `"execute-allow"` does NOT imply
+   * read — add a `"read-allow"` rule for the binary and its libraries too.
    */
   fs?: Array<FsAccess>
   /** Network confinement level; `"deny"` (default) if omitted. */

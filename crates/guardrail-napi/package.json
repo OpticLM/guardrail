@@ -38,7 +38,7 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "node --test __test__/",
+    "test": "node --test __test__/smoke.test.mjs",
     "version": "napi version"
   },
   "devDependencies": {

@@ -23,11 +23,11 @@
 //!   by the runtime and well-known libraries.
 //! - `security.mac.lockdown_mode_state` is read by some system frameworks.
 //!
-//! Use `allow_read` and `allow_execute` for binary and dylib paths, and
-//! grant sysctl access via a custom `.sb` profile import or a manual
-//! `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule in your profile.
-//! See [`SandboxBuilder::darwin_sandbox_profile`] for the custom-profile
-//! escape hatch.
+//! Use `.fs([FsAccess::ReadAllow(...), FsAccess::ExecuteAllow(...)])` for
+//! binary and dylib paths, and grant sysctl access via a custom `.sb` profile
+//! import or a manual `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule
+//! in your profile. See [`SandboxBuilder::darwin_sandbox_profiles`] for the
+//! custom-profile escape hatch.
 
 pub mod diagnostics;
 #[allow(dead_code)]

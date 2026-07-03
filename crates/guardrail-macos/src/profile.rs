@@ -29,22 +29,35 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
 
     for rule in &config.fs {
         match rule {
-            FsAccess::Read(path) => {
+            FsAccess::ReadAllow(path) => {
                 let path = sbpl_string(path);
                 source.push_str(&format!("(allow file-read* (subpath \"{path}\"))\n"));
             }
-            FsAccess::Write(path) => {
+            FsAccess::ReadDeny(path) => {
                 let path = sbpl_string(path);
-                source.push_str(&format!("(allow file-read* (subpath \"{path}\"))\n"));
+                source.push_str(&format!("(deny file-read* (subpath \"{path}\"))\n"));
+            }
+            FsAccess::WriteAllow(path) => {
+                let path = sbpl_string(path);
                 source.push_str(&format!("(allow file-write* (subpath \"{path}\"))\n"));
             }
-            FsAccess::Execute(path) => {
+            FsAccess::WriteDeny(path) => {
                 let path = sbpl_string(path);
-                source.push_str(&format!("(allow file-read* (subpath \"{path}\"))\n"));
+                source.push_str(&format!("(deny file-write* (subpath \"{path}\"))\n"));
+            }
+            FsAccess::ExecuteAllow(path) => {
+                let path = sbpl_string(path);
                 source.push_str(&format!(
                     "(allow file-map-executable (subpath \"{path}\"))\n"
                 ));
                 source.push_str(&format!("(allow process-exec* (subpath \"{path}\"))\n"));
+            }
+            FsAccess::ExecuteDeny(path) => {
+                let path = sbpl_string(path);
+                source.push_str(&format!(
+                    "(deny file-map-executable (subpath \"{path}\"))\n"
+                ));
+                source.push_str(&format!("(deny process-exec* (subpath \"{path}\"))\n"));
             }
         }
     }
@@ -97,7 +110,7 @@ mod tests {
     fn imported_profiles_are_emitted_before_generated_rules() {
         let profile = build_with_imports(
             &SandboxBuilder::new()
-                .fs([FsAccess::Read("/tmp/in".into())])
+                .fs([FsAccess::ReadAllow("/tmp/in".into())])
                 .build(),
             &[
                 std::path::PathBuf::from("/tmp/base-one.sb"),
@@ -135,7 +148,7 @@ mod tests {
     fn read_access_emits_file_read_subpath_rule() {
         let profile = build(
             &SandboxBuilder::new()
-                .fs([FsAccess::Read("/tmp/in".into())])
+                .fs([FsAccess::ReadAllow("/tmp/in".into())])
                 .build(),
         );
 
@@ -148,18 +161,29 @@ mod tests {
     }
 
     #[test]
-    fn write_access_emits_read_and_write_subpath_rule() {
+    fn read_deny_emits_file_read_deny_rule() {
         let profile = build(
             &SandboxBuilder::new()
-                .fs([FsAccess::Write("/tmp/work".into())])
+                .fs([FsAccess::ReadDeny("/tmp/secret".into())])
                 .build(),
         );
 
         assert!(
             profile
                 .source
-                .contains("(allow file-read* (subpath \"/tmp/work\"))\n")
+                .contains("(deny file-read* (subpath \"/tmp/secret\"))\n")
         );
+    }
+
+    #[test]
+    fn write_access_emits_only_file_write_subpath_rule() {
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::WriteAllow("/tmp/work".into())])
+                .build(),
+        );
+
+        assert!(!profile.source.contains("(allow file-read*"));
         assert!(
             profile
                 .source
@@ -168,18 +192,30 @@ mod tests {
     }
 
     #[test]
-    fn execute_access_emits_process_exec_rule() {
+    fn write_deny_emits_only_file_write_deny_rule() {
         let profile = build(
             &SandboxBuilder::new()
-                .fs([FsAccess::Execute("/tmp/bin".into())])
+                .fs([FsAccess::WriteDeny("/tmp/work".into())])
                 .build(),
         );
 
+        assert!(!profile.source.contains("(deny file-read*"));
         assert!(
             profile
                 .source
-                .contains("(allow file-read* (subpath \"/tmp/bin\"))\n")
+                .contains("(deny file-write* (subpath \"/tmp/work\"))\n")
         );
+    }
+
+    #[test]
+    fn execute_access_emits_only_executable_rules() {
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::ExecuteAllow("/tmp/bin".into())])
+                .build(),
+        );
+
+        assert!(!profile.source.contains("(allow file-read*"));
         assert!(
             profile
                 .source
@@ -189,6 +225,51 @@ mod tests {
             profile
                 .source
                 .contains("(allow process-exec* (subpath \"/tmp/bin\"))\n")
+        );
+    }
+
+    #[test]
+    fn execute_deny_emits_only_executable_deny_rules() {
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::ExecuteDeny("/tmp/bin".into())])
+                .build(),
+        );
+
+        assert!(!profile.source.contains("(deny file-read*"));
+        assert!(
+            profile
+                .source
+                .contains("(deny file-map-executable (subpath \"/tmp/bin\"))\n")
+        );
+        assert!(
+            profile
+                .source
+                .contains("(deny process-exec* (subpath \"/tmp/bin\"))\n")
+        );
+    }
+
+    #[test]
+    fn mixed_filesystem_rules_preserve_declaration_order() {
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([
+                    FsAccess::ReadAllow("/tmp".into()),
+                    FsAccess::ReadDeny("/tmp/secret".into()),
+                    FsAccess::ReadAllow("/tmp/secret/public.txt".into()),
+                    FsAccess::WriteAllow("/tmp/out".into()),
+                ])
+                .build(),
+        );
+
+        assert_eq!(
+            profile.source,
+            "(version 1)\n\
+             (deny default)\n\
+             (allow file-read* (subpath \"/tmp\"))\n\
+             (deny file-read* (subpath \"/tmp/secret\"))\n\
+             (allow file-read* (subpath \"/tmp/secret/public.txt\"))\n\
+             (allow file-write* (subpath \"/tmp/out\"))\n"
         );
     }
 
@@ -223,7 +304,7 @@ mod tests {
     fn double_quotes_in_paths_are_escaped() {
         let profile = build(
             &SandboxBuilder::new()
-                .fs([FsAccess::Read(r#"/tmp/name"with-quote"#.into())])
+                .fs([FsAccess::ReadAllow(r#"/tmp/name"with-quote"#.into())])
                 .build(),
         );
 
@@ -238,7 +319,7 @@ mod tests {
     fn backslashes_in_paths_are_escaped() {
         let profile = build(
             &SandboxBuilder::new()
-                .fs([FsAccess::Read(r"/tmp/name\with-slash".into())])
+                .fs([FsAccess::ReadAllow(r"/tmp/name\with-slash".into())])
                 .build(),
         );
 

@@ -18,9 +18,10 @@ use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy};
 ///
 /// let config = SandboxBuilder::new()
 ///     .fs([
-///         FsAccess::Read("/tmp/input".into()),
-///         FsAccess::Execute("/tmp/tools".into()),
-///         FsAccess::Write("/tmp/work".into()),
+///         FsAccess::ReadAllow("/tmp/input".into()),
+///         FsAccess::ReadDeny("/tmp/input/secrets".into()),
+///         FsAccess::ExecuteAllow("/tmp/tools".into()),
+///         FsAccess::WriteAllow("/tmp/work".into()),
 ///     ])
 ///     .network(NetworkPolicy::OutboundOnly)
 ///     .memory_limit_mb(256)
@@ -44,9 +45,9 @@ impl SandboxBuilder {
         Self::default()
     }
 
-    /// Set or extend the filesystem grants, in declaration order.
-    pub fn fs(mut self, grants: impl IntoIterator<Item = FsAccess>) -> Self {
-        self.fs.extend(grants);
+    /// Set or extend the filesystem rules, in declaration order.
+    pub fn fs(mut self, rules: impl IntoIterator<Item = FsAccess>) -> Self {
+        self.fs.extend(rules);
         self
     }
 
@@ -143,20 +144,26 @@ mod tests {
     }
 
     #[test]
-    fn fs_grants_preserve_declaration_order() {
+    fn fs_rules_preserve_declaration_order() {
         let config = SandboxBuilder::new()
             .fs(vec![
-                FsAccess::Read("/a".into()),
-                FsAccess::Write("/b".into()),
-                FsAccess::Execute("/c".into()),
+                FsAccess::ReadAllow("/a".into()),
+                FsAccess::ReadDeny("/b".into()),
+                FsAccess::WriteAllow("/c".into()),
+                FsAccess::WriteDeny("/d".into()),
+                FsAccess::ExecuteAllow("/e".into()),
+                FsAccess::ExecuteDeny("/f".into()),
             ])
             .build();
         assert_eq!(
             config.fs,
             vec![
-                FsAccess::Read(PathBuf::from("/a")),
-                FsAccess::Write(PathBuf::from("/b")),
-                FsAccess::Execute(PathBuf::from("/c")),
+                FsAccess::ReadAllow(PathBuf::from("/a")),
+                FsAccess::ReadDeny(PathBuf::from("/b")),
+                FsAccess::WriteAllow(PathBuf::from("/c")),
+                FsAccess::WriteDeny(PathBuf::from("/d")),
+                FsAccess::ExecuteAllow(PathBuf::from("/e")),
+                FsAccess::ExecuteDeny(PathBuf::from("/f")),
             ]
         );
     }

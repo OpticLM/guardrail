@@ -107,8 +107,8 @@ pub(crate) fn portable_explain(ctx: &ExplainCtx<'_>) -> Option<Violation> {
         kind: ViolationKind::Filesystem,
         summary: format!("process exited unsuccessfully ({})", ctx.status),
         suggestions: vec![
-            "grant read access: .allow_read(\"<path>\")".to_string(),
-            "grant write access: .allow_write(\"<path>\")".to_string(),
+            "grant read access: FsAccess::ReadAllow(\"<path>\")".to_string(),
+            "grant write access: FsAccess::WriteAllow(\"<path>\")".to_string(),
         ],
     })
 }

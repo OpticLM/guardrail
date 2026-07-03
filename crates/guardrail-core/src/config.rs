@@ -30,7 +30,7 @@ pub struct ResourceLimits {
 /// are public so platform backend crates can read them directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxConfig {
-    /// Filesystem grants, in the order they were declared.
+    /// Filesystem rules, in the order they were declared.
     pub fs: Vec<FsAccess>,
     /// Network confinement level.
     pub network: NetworkPolicy,

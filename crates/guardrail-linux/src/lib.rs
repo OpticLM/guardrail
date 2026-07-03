@@ -41,7 +41,7 @@ impl Backend for LinuxBackend {
         // Clone only the data the child closure needs. The closure runs in the
         // forked child, so it must own its inputs (no borrows of `config`).
         let limits = config.limits;
-        let fs_rules = config.fs.clone();
+        let fs_rules = fs::compile(&config.fs)?;
         let seccomp_program = seccomp::build(config)?;
 
         // SAFETY: the closure runs after fork() and before execvp() in the

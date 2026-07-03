@@ -102,19 +102,26 @@ impl From<ViolationKind> for JsViolationKind {
 
 #[napi(string_enum, js_name = "FsAccessKind")]
 pub enum JsFsAccessKind {
-    #[napi(value = "read")]
-    Read,
-    #[napi(value = "write")]
-    Write,
-    #[napi(value = "execute")]
-    Execute,
+    #[napi(value = "read-allow")]
+    ReadAllow,
+    #[napi(value = "read-deny")]
+    ReadDeny,
+    #[napi(value = "write-allow")]
+    WriteAllow,
+    #[napi(value = "write-deny")]
+    WriteDeny,
+    #[napi(value = "execute-allow")]
+    ExecuteAllow,
+    #[napi(value = "execute-deny")]
+    ExecuteDeny,
 }
 
 #[napi(object, js_name = "FsAccess")]
 pub struct JsFsAccess {
-    /// `"read"` | `"write"` | `"execute"`.
+    /// `"read-allow"` | `"read-deny"` | `"write-allow"` | `"write-deny"` |
+    /// `"execute-allow"` | `"execute-deny"`.
     pub kind: JsFsAccessKind,
-    /// Path granted access (recursive).
+    /// Path the rule covers recursively.
     pub path: String,
 }
 
@@ -124,9 +131,9 @@ pub struct JsFsAccess {
 #[napi(object)]
 #[derive(Default)]
 pub struct SpawnOptions {
-    /// Filesystem grants, in declaration order. Grants are applied in the order
-    /// given. Note: `"execute"` does NOT imply read — add a `"read"` grant for
-    /// the binary and its libraries too.
+    /// Filesystem rules, in declaration order. Later matching rules override
+    /// earlier rules for the same right. Note: `"execute-allow"` does NOT imply
+    /// read — add a `"read-allow"` rule for the binary and its libraries too.
     pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
@@ -178,9 +185,12 @@ fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
         .into_iter()
         .flatten()
         .map(|g| match g.kind {
-            JsFsAccessKind::Read => FsAccess::Read(g.path.into()),
-            JsFsAccessKind::Write => FsAccess::Write(g.path.into()),
-            JsFsAccessKind::Execute => FsAccess::Execute(g.path.into()),
+            JsFsAccessKind::ReadAllow => FsAccess::ReadAllow(g.path.into()),
+            JsFsAccessKind::ReadDeny => FsAccess::ReadDeny(g.path.into()),
+            JsFsAccessKind::WriteAllow => FsAccess::WriteAllow(g.path.into()),
+            JsFsAccessKind::WriteDeny => FsAccess::WriteDeny(g.path.into()),
+            JsFsAccessKind::ExecuteAllow => FsAccess::ExecuteAllow(g.path.into()),
+            JsFsAccessKind::ExecuteDeny => FsAccess::ExecuteDeny(g.path.into()),
         })
         .collect::<Vec<_>>();
 

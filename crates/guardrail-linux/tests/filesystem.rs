@@ -39,7 +39,7 @@ fn target_binary_runs_with_explicit_runtime_grants() {
 }
 
 #[test]
-fn read_grant_does_not_allow_execute() {
+fn read_rule_does_not_grant_execute() {
     if !common::landlock_enforced() {
         eprintln!("skipping: Landlock not enforced on this kernel");
         return;
@@ -47,7 +47,7 @@ fn read_grant_does_not_allow_execute() {
 
     let exe_dir = common::probe_path().parent().unwrap().to_path_buf();
     let config = common::read_only_base()
-        .fs([FsAccess::Read(exe_dir)])
+        .fs([FsAccess::ReadAllow(exe_dir)])
         .build();
     let result = config.spawn_with(&LinuxBackend::new(), probe(&["echo-env", "PATH"]));
 
@@ -62,7 +62,7 @@ fn read_grant_does_not_allow_execute() {
 }
 
 #[test]
-fn write_grant_does_not_allow_execute() {
+fn write_rule_does_not_grant_execute() {
     if !common::landlock_enforced() {
         eprintln!("skipping: Landlock not enforced on this kernel");
         return;
@@ -77,7 +77,7 @@ fn write_grant_does_not_allow_execute() {
     std::fs::set_permissions(&copied_probe, permissions).unwrap();
 
     let config = common::base()
-        .fs([FsAccess::Write(tmp.path().into())])
+        .fs([FsAccess::WriteAllow(tmp.path().into())])
         .build();
     let result = config.spawn_with(&LinuxBackend::new(), Command::new(&copied_probe));
 
@@ -92,7 +92,7 @@ fn write_grant_does_not_allow_execute() {
 }
 
 #[test]
-fn execute_grant_does_not_allow_read() {
+fn execute_rule_does_not_grant_read() {
     if !common::landlock_enforced() {
         eprintln!("skipping: Landlock not enforced on this kernel");
         return;
@@ -104,7 +104,7 @@ fn execute_grant_does_not_allow_read() {
     let secret_s = secret.to_str().unwrap();
 
     let config = common::base()
-        .fs([FsAccess::Execute(tmp.path().into())])
+        .fs([FsAccess::ExecuteAllow(tmp.path().into())])
         .build();
     assert!(
         !allowed(&config, &["read-file", secret_s]),
@@ -150,12 +150,82 @@ fn read_is_denied_without_grant_and_allowed_with_grant() {
 
     // Allowed: grant read on the temp dir.
     let granted = common::base()
-        .fs([FsAccess::Read(tmp.path().into())])
+        .fs([FsAccess::ReadAllow(tmp.path().into())])
         .build();
     assert!(
         allowed(&granted, &["read-file", secret_s]),
         "reading a granted path must succeed"
     );
+}
+
+#[test]
+fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let public = tmp.path().join("public.txt");
+    let secret = tmp.path().join("secret.txt");
+    std::fs::write(&public, b"public").unwrap();
+    std::fs::write(&secret, b"secret").unwrap();
+
+    let config = common::base()
+        .fs([
+            FsAccess::ReadAllow(tmp.path().into()),
+            FsAccess::ReadDeny(secret.clone()),
+        ])
+        .build();
+
+    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
+    assert!(!allowed(&config, &["read-file", secret.to_str().unwrap()]));
+}
+
+#[test]
+fn read_deny_then_read_allow_reopens_child_only() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let public = tmp.path().join("public.txt");
+    let other = tmp.path().join("other.txt");
+    std::fs::write(&public, b"public").unwrap();
+    std::fs::write(&other, b"other").unwrap();
+
+    let config = common::base()
+        .fs([
+            FsAccess::ReadDeny(tmp.path().into()),
+            FsAccess::ReadAllow(public.clone()),
+        ])
+        .build();
+
+    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
+    assert!(!allowed(&config, &["read-file", other.to_str().unwrap()]));
+}
+
+#[test]
+fn later_read_allow_overrides_same_path_deny() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let public = tmp.path().join("public.txt");
+    std::fs::write(&public, b"public").unwrap();
+
+    let config = common::base()
+        .fs([
+            FsAccess::ReadAllow(tmp.path().into()),
+            FsAccess::ReadDeny(tmp.path().into()),
+            FsAccess::ReadAllow(tmp.path().into()),
+        ])
+        .build();
+
+    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
 }
 
 #[test]
@@ -171,7 +241,7 @@ fn write_is_denied_without_grant_and_allowed_with_write_grant() {
 
     // Read-only grant on the temp dir → write denied.
     let ro = common::base()
-        .fs([FsAccess::Read(tmp.path().into())])
+        .fs([FsAccess::ReadAllow(tmp.path().into())])
         .build();
     assert!(
         !allowed(&ro, &["write-file", target_s]),
@@ -180,10 +250,53 @@ fn write_is_denied_without_grant_and_allowed_with_write_grant() {
 
     // Write grant → allowed.
     let rw = common::base()
-        .fs([FsAccess::Write(tmp.path().into())])
+        .fs([FsAccess::WriteAllow(tmp.path().into())])
         .build();
     assert!(
         allowed(&rw, &["write-file", target_s]),
         "writing under a write grant must succeed"
     );
+}
+
+#[test]
+fn write_rule_does_not_grant_read() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("out.txt");
+    let secret = tmp.path().join("secret.txt");
+    std::fs::write(&secret, b"secret").unwrap();
+
+    let config = common::base()
+        .fs([FsAccess::WriteAllow(tmp.path().into())])
+        .build();
+
+    assert!(allowed(&config, &["write-file", target.to_str().unwrap()]));
+    assert!(!allowed(&config, &["read-file", secret.to_str().unwrap()]));
+}
+
+#[test]
+fn missing_deny_descendant_inside_allow_fails_before_spawn() {
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp.path().join("future-secret");
+
+    let config = common::base()
+        .fs([
+            FsAccess::ReadAllow(tmp.path().into()),
+            FsAccess::ReadDeny(missing),
+        ])
+        .build();
+
+    let result = config.spawn_with(&LinuxBackend::new(), probe(&["echo-env", "PATH"]));
+
+    assert!(matches!(
+        result,
+        Err(Error::Confinement {
+            stage: "landlock",
+            ..
+        })
+    ));
 }
