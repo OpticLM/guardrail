@@ -233,16 +233,27 @@ fn escape_builder_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
 
     use guardrail_core::{ExplainCtx, NetworkPolicy, SandboxBuilder, ViolationKind};
 
     use super::*;
 
     fn exit_status(code: i32) -> ExitStatus {
-        ExitStatus::from_raw(code << 8)
+        #[cfg(unix)]
+        {
+            ExitStatus::from_raw(code << 8)
+        }
+        #[cfg(windows)]
+        {
+            ExitStatus::from_raw(code as u32)
+        }
     }
 
+    #[cfg(unix)]
     fn signaled_status(signal: i32) -> ExitStatus {
         ExitStatus::from_raw(signal)
     }
@@ -333,6 +344,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cpu_signal_is_diagnosed_as_resource_limit_when_configured() {
         let config = SandboxBuilder::new().cpu_time_limit_secs(1).build();

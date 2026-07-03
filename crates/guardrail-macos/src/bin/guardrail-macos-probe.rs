@@ -20,6 +20,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
         "socket-inet" => {
             // SAFETY: socket() takes scalar args; close the fd if created.
             let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };

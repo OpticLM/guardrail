@@ -7,7 +7,9 @@
 
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, ExplainCtx, SandboxChild, SandboxConfig, Violation};
+use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+#[cfg(target_os = "linux")]
+use guardrail_core::{ExplainCtx, Violation};
 
 #[cfg(target_os = "linux")]
 pub mod diagnostics;

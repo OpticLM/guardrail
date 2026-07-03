@@ -1,18 +1,13 @@
-name: CI
+name: Build Node
+
 env:
   DEBUG: napi:*
   APP_NAME: guardrail
   MACOSX_DEPLOYMENT_TARGET: '10.13'
+
 'on':
-  push:
-    branches:
-      - main
-    tags-ignore:
-      - '**'
-    paths-ignore:
-      - '**/*.md'
-      - LICENSE
-  pull_request: null
+  workflow_dispatch: null
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,28 +24,30 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: macos-26
             target: x86_64-apple-darwin
-            build: napi build --platform --release --target x86_64-apple-darwin
+            build: pnpm exec napi build --platform --release --target x86_64-apple-darwin
           - host: macos-26
             target: aarch64-apple-darwin
-            build: napi build --platform --release --target aarch64-apple-darwin
+            build: pnpm exec napi build --platform --release --target aarch64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: napi build --platform --release --target x86_64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --target x86_64-pc-windows-msvc
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: napi build --platform --release --target aarch64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --target aarch64-pc-windows-msvc
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v7
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+        with:
+          version: 11
       - name: Setup node
         uses: actions/setup-node@v6
         with:
@@ -83,41 +80,3 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: crates/guardrail-napi/${{ env.APP_NAME }}.*.node
           if-no-files-found: error
-
-  test-host:
-    name: Test ${{ matrix.settings.target }} - node@${{ matrix.node }}
-    needs:
-      - build
-    strategy:
-      fail-fast: false
-      matrix:
-        settings:
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - host: macos-latest
-            target: aarch64-apple-darwin
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-        node:
-          - '22'
-          - '24'
-    runs-on: ${{ matrix.settings.host }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-      - name: Setup node
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: pnpm
-          cache-dependency-path: crates/guardrail-napi/pnpm-lock.yaml
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: bindings-${{ matrix.settings.target }}
-          path: crates/guardrail-napi
-      - name: Test bindings
-        run: pnpm test

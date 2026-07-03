@@ -32,7 +32,7 @@
 pub mod diagnostics;
 #[allow(dead_code)]
 mod profile;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "macos")]
 mod rlimit;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod seatbelt;
