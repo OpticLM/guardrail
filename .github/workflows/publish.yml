@@ -1,4 +1,4 @@
-name: Build Node
+name: Publish Node
 
 env:
   DEBUG: napi:*
@@ -9,8 +9,11 @@ env:
   workflow_dispatch: null
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 defaults:
   run:
@@ -47,7 +50,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: "11.9.0"
       - name: Setup node
         uses: actions/setup-node@v6
         with:
@@ -70,7 +73,7 @@ jobs:
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
@@ -80,3 +83,52 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: crates/guardrail-napi/${{ env.APP_NAME }}.*.node
           if-no-files-found: error
+
+  publish:
+    name: Publish npm packages
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/guardrail-napi/pnpm-lock.yaml
+          registry-url: https://registry.npmjs.org/
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Download native artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bindings-*
+          path: crates/guardrail-napi
+          merge-multiple: true
+      - name: Verify native artifacts
+        run: |
+          node_count="$(find . -maxdepth 1 -type f -name "${APP_NAME}.*.node" | wc -l | tr -d ' ')"
+          test "$node_count" = "6"
+      - name: Create platform package directories
+        run: pnpm create-npm-dirs
+      - name: Move artifacts into platform packages
+        run: pnpm artifacts
+      - name: Verify platform package directories
+        run: |
+          package_count="$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+          test "$package_count" = "6"
+      - name: Publish main package
+        run: pnpm publish --access public --no-git-checks
+      - name: Publish platform packages
+        run: |
+          for package_dir in npm/*; do
+            [ -d "$package_dir" ] || continue
+            (cd "$package_dir" && pnpm publish --access public --no-git-checks)
+          done

@@ -49,13 +49,13 @@
   "devDependencies": {
     "@napi-rs/cli": "^3.2.0"
   },
-  "packageManager": "pnpm@11.5.1",
+  "packageManager": "pnpm@11.9.0",
   "optionalDependencies": {
-    "@opticlm/guardrail-win32-x64-msvc": "0.0.2",
-    "@opticlm/guardrail-win32-arm64-msvc": "0.0.2",
-    "@opticlm/guardrail-darwin-x64": "0.0.2",
     "@opticlm/guardrail-darwin-arm64": "0.0.2",
+    "@opticlm/guardrail-darwin-x64": "0.0.2",
+    "@opticlm/guardrail-linux-arm64-gnu": "0.0.2",
     "@opticlm/guardrail-linux-x64-gnu": "0.0.2",
-    "@opticlm/guardrail-linux-arm64-gnu": "0.0.2"
+    "@opticlm/guardrail-win32-arm64-msvc": "0.0.2",
+    "@opticlm/guardrail-win32-x64-msvc": "0.0.2"
   }
 }
