@@ -109,7 +109,7 @@ mod tests {
     fn backend_returns_unsupported_on_non_macos() {
         let backend = super::MacosBackend::new();
         let config = SandboxBuilder::new()
-            .darwin_sandbox_profile("/definitely/missing/profile.sb")
+            .darwin_sandbox_profiles(["/definitely/missing/profile.sb".into()])
             .build();
 
         let err = backend

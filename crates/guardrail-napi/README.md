@@ -6,9 +6,13 @@ Native Node.js bindings for the `guardrail` cross-platform process sandbox.
 const { spawn } = require('@opticlm/guardrail')
 
 const child = spawn('/usr/bin/mytool', ['--flag'], {
-  readPaths: ['/usr', '/lib', '/etc/ssl'],
-  executePaths: ['/usr/bin'],
-  writePaths: ['/tmp/work'],
+  fs: [
+    { kind: 'read', path: '/usr' },
+    { kind: 'read', path: '/lib' },
+    { kind: 'read', path: '/etc/ssl' },
+    { kind: 'execute', path: '/usr/bin' },
+    { kind: 'write', path: '/tmp/work' },
+  ],
   network: 'outbound-only',   // 'deny' | 'outbound-only' | 'full'
   ipc: 'strict',              // 'strict' | 'relaxed'
   memoryLimitMb: 256,
@@ -25,8 +29,8 @@ if (!result.success && result.violation) {
 
 ## Notes
 - The sandbox denies everything by default; grant exactly the access the child
-  needs. `executePaths` does not imply read — grant `readPaths` for the binary
-  and its shared libraries too.
+  needs. `fs` grants are applied in array order. An `"execute"` grant does not
+  imply read — add a `"read"` grant for the binary and its shared libraries too.
 - stdio is inherited from the parent process. Output capture (piping) is not yet
   supported.
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on

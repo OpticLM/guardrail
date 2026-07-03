@@ -11,7 +11,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use guardrail_core::Error;
+use guardrail_core::{Error, FsAccess};
 use guardrail_linux::LinuxBackend;
 use tempfile::TempDir;
 
@@ -46,7 +46,9 @@ fn read_grant_does_not_allow_execute() {
     }
 
     let exe_dir = common::probe_path().parent().unwrap().to_path_buf();
-    let config = common::read_only_base().allow_read(exe_dir).build();
+    let config = common::read_only_base()
+        .fs([FsAccess::Read(exe_dir)])
+        .build();
     let result = config.spawn_with(&LinuxBackend::new(), probe(&["echo-env", "PATH"]));
 
     match result {
@@ -74,7 +76,9 @@ fn write_grant_does_not_allow_execute() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&copied_probe, permissions).unwrap();
 
-    let config = common::base().allow_write(tmp.path()).build();
+    let config = common::base()
+        .fs([FsAccess::Write(tmp.path().into())])
+        .build();
     let result = config.spawn_with(&LinuxBackend::new(), Command::new(&copied_probe));
 
     match result {
@@ -99,7 +103,9 @@ fn execute_grant_does_not_allow_read() {
     std::fs::write(&secret, b"top secret").unwrap();
     let secret_s = secret.to_str().unwrap();
 
-    let config = common::base().allow_execute(tmp.path()).build();
+    let config = common::base()
+        .fs([FsAccess::Execute(tmp.path().into())])
+        .build();
     assert!(
         !allowed(&config, &["read-file", secret_s]),
         "execute grants must not imply read access"
@@ -143,7 +149,9 @@ fn read_is_denied_without_grant_and_allowed_with_grant() {
     );
 
     // Allowed: grant read on the temp dir.
-    let granted = common::base().allow_read(tmp.path()).build();
+    let granted = common::base()
+        .fs([FsAccess::Read(tmp.path().into())])
+        .build();
     assert!(
         allowed(&granted, &["read-file", secret_s]),
         "reading a granted path must succeed"
@@ -162,14 +170,18 @@ fn write_is_denied_without_grant_and_allowed_with_write_grant() {
     let target_s = target.to_str().unwrap();
 
     // Read-only grant on the temp dir → write denied.
-    let ro = common::base().allow_read(tmp.path()).build();
+    let ro = common::base()
+        .fs([FsAccess::Read(tmp.path().into())])
+        .build();
     assert!(
         !allowed(&ro, &["write-file", target_s]),
         "writing under a read-only grant must be denied"
     );
 
     // Write grant → allowed.
-    let rw = common::base().allow_write(tmp.path()).build();
+    let rw = common::base()
+        .fs([FsAccess::Write(tmp.path().into())])
+        .build();
     assert!(
         allowed(&rw, &["write-file", target_s]),
         "writing under a write grant must succeed"

@@ -53,7 +53,7 @@ fn validate(source: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use guardrail_core::SandboxBuilder;
+    use guardrail_core::{FsAccess, SandboxBuilder};
 
     use super::*;
 
@@ -72,15 +72,17 @@ mod tests {
         std::fs::write(&first, "(version 1)\n(allow file-read*)\n").unwrap();
         std::fs::write(&second, "(version 1)\n(allow process*)\n").unwrap();
 
+        let first = first.canonicalize().unwrap();
+        let second = second.canonicalize().unwrap();
+
         let config = SandboxBuilder::new()
-            .darwin_sandbox_profile(&first)
-            .allow_read("/generated-read")
-            .darwin_sandbox_profile(&second)
+            .darwin_sandbox_profiles([first.clone(), second.clone()])
+            .fs([FsAccess::Read("/generated-read".into())])
             .build();
         let profile = resolve(&config).unwrap();
 
-        let first_import = crate::profile::sbpl_string(&first.canonicalize().unwrap());
-        let second_import = crate::profile::sbpl_string(&second.canonicalize().unwrap());
+        let first_import = crate::profile::sbpl_string(&first);
+        let second_import = crate::profile::sbpl_string(&second);
         assert_eq!(
             profile.source,
             format!(
@@ -97,7 +99,9 @@ mod tests {
 
     #[test]
     fn rejects_generated_profile_with_interior_nul_byte() {
-        let config = SandboxBuilder::new().allow_read("/tmp/has\0nul").build();
+        let config = SandboxBuilder::new()
+            .fs([FsAccess::Read("/tmp/has\0nul".into())])
+            .build();
 
         let err = resolve(&config).unwrap_err();
 
@@ -119,7 +123,9 @@ mod tests {
         ));
         std::fs::write(&path, "(version 1)\n\0\n").unwrap();
 
-        let config = SandboxBuilder::new().darwin_sandbox_profile(&path).build();
+        let config = SandboxBuilder::new()
+            .darwin_sandbox_profiles([path.clone()])
+            .build();
         let err = resolve(&config).unwrap_err();
 
         assert!(matches!(

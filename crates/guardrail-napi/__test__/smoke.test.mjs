@@ -17,8 +17,10 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   // smoke test — spawn(), async wait(), exit result, diagnostics — not a
   // Landlock/Seatbelt precision test, so broad grants are appropriate here.
   const child = guardrail.spawn('/usr/bin/true', [], {
-    readPaths: ['/'],
-    executePaths: ['/'],
+    fs: [
+      { kind: 'read', path: '/' },
+      { kind: 'execute', path: '/' },
+    ],
     network: 'full',
   })
   assert.equal(typeof child.pid, 'number')
@@ -48,8 +50,8 @@ test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: proc
   // `default_config_runs_command_under_job_object`
   // (crates/guardrail-windows/tests/resource_limits.rs).
   //
-  // No readPaths/executePaths are needed: guardrail's ACL grants are additive
-  // on the per-run AppContainer SID (guardrail-windows/src/acl.rs applies them
+  // No `fs` grants are needed: guardrail's ACL grants are additive on the
+  // per-run AppContainer SID (guardrail-windows/src/acl.rs applies them
   // via SetNamedSecurityInfoW, only ever appending ACEs), and Windows already
   // grants `ALL APPLICATION PACKAGES` read+execute on C:\Windows\System32, so
   // the AppContainer child can load cmd.exe and its system DLLs without any

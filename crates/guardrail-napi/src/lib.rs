@@ -7,6 +7,7 @@
 #![deny(clippy::all)]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail_core::{
-    Backend, ExplainCtx, IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig,
+    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig,
     SharedSandboxChild, ViolationKind,
 };
 
@@ -99,19 +100,34 @@ impl From<ViolationKind> for JsViolationKind {
     }
 }
 
+#[napi(string_enum, js_name = "FsAccessKind")]
+pub enum JsFsAccessKind {
+    #[napi(value = "read")]
+    Read,
+    #[napi(value = "write")]
+    Write,
+    #[napi(value = "execute")]
+    Execute,
+}
+
+#[napi(object, js_name = "FsAccess")]
+pub struct JsFsAccess {
+    /// `"read"` | `"write"` | `"execute"`.
+    pub kind: JsFsAccessKind,
+    /// Path granted access (recursive).
+    pub path: String,
+}
+
 /// Sandbox policy + launch options. All fields optional; omitting everything
 /// yields the maximally restrictive default (no fs, no network, strict IPC,
 /// empty environment).
 #[napi(object)]
 #[derive(Default)]
 pub struct SpawnOptions {
-    /// Paths granted read access (recursive).
-    pub read_paths: Option<Vec<String>>,
-    /// Paths granted read+write access (recursive).
-    pub write_paths: Option<Vec<String>>,
-    /// Paths granted execute access (recursive). Note: execute does NOT imply
-    /// read; grant `readPaths` for the binary and its libraries too.
-    pub execute_paths: Option<Vec<String>>,
+    /// Filesystem grants, in declaration order. Grants are applied in the order
+    /// given. Note: `"execute"` does NOT imply read — add a `"read"` grant for
+    /// the binary and its libraries too.
+    pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
     /// IPC confinement level; `"strict"` (default) if omitted.
@@ -157,16 +173,18 @@ pub struct JsViolation {
 }
 
 fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
-    let mut b = SandboxBuilder::new();
-    for p in opts.read_paths.into_iter().flatten() {
-        b = b.allow_read(p);
-    }
-    for p in opts.write_paths.into_iter().flatten() {
-        b = b.allow_write(p);
-    }
-    for p in opts.execute_paths.into_iter().flatten() {
-        b = b.allow_execute(p);
-    }
+    let fs = opts
+        .fs
+        .into_iter()
+        .flatten()
+        .map(|g| match g.kind {
+            JsFsAccessKind::Read => FsAccess::Read(g.path.into()),
+            JsFsAccessKind::Write => FsAccess::Write(g.path.into()),
+            JsFsAccessKind::Execute => FsAccess::Execute(g.path.into()),
+        })
+        .collect::<Vec<_>>();
+
+    let mut b = SandboxBuilder::new().fs(fs);
     if let Some(n) = opts.network {
         b = b.network(n.into());
     }
@@ -182,8 +200,8 @@ fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
     if let Some(p) = opts.max_processes {
         b = b.max_processes(u64::from(p));
     }
-    for p in opts.darwin_sandbox_profiles.into_iter().flatten() {
-        b = b.darwin_sandbox_profile(p);
+    if let Some(profiles) = opts.darwin_sandbox_profiles {
+        b = b.darwin_sandbox_profiles(profiles.into_iter().map(PathBuf::from).collect::<Vec<_>>());
     }
     if let Some(env) = opts.env {
         b = b.envs(env);

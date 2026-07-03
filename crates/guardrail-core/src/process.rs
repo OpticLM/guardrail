@@ -204,7 +204,12 @@ impl SharedSandboxChild {
     pub fn kill(&self) -> std::io::Result<()> {
         // See wait(): tolerate a poisoned mutex so a panic in the other caller
         // does not propagate here.
-        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        match self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             // wait() not started → we still own the handle.
             Some(child) => child.kill(),
             None => {

@@ -588,6 +588,8 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.SandboxChild = nativeBinding.SandboxChild
+module.exports.FsAccessKind = nativeBinding.FsAccessKind
+module.exports.JsFsAccessKind = nativeBinding.JsFsAccessKind
 module.exports.IpcPolicy = nativeBinding.IpcPolicy
 module.exports.JsIpcPolicy = nativeBinding.JsIpcPolicy
 module.exports.NetworkPolicy = nativeBinding.NetworkPolicy

@@ -33,10 +33,9 @@ pub(crate) fn explain(ctx: &ExplainCtx<'_>) -> Option<Violation> {
     }
 
     #[cfg(unix)]
-    if let Some(violation) = guardrail_core::diagnostics::resource_signal_violation(
-        ctx.config,
-        ctx.status,
-    ) {
+    if let Some(violation) =
+        guardrail_core::diagnostics::resource_signal_violation(ctx.config, ctx.status)
+    {
         return Some(violation);
     }
 
@@ -330,7 +329,8 @@ mod tests {
     fn cpu_signal_is_diagnosed_as_resource_limit_when_configured() {
         let config = SandboxBuilder::new().cpu_time_limit_secs(1).build();
 
-        let violation = explain(&config, signaled_status(libc::SIGXCPU)).expect("resource violation");
+        let violation =
+            explain(&config, signaled_status(libc::SIGXCPU)).expect("resource violation");
 
         assert_eq!(violation.kind, ViolationKind::ResourceLimit);
         assert!(

@@ -32,6 +32,17 @@ export interface ExitResult {
   violation?: Violation
 }
 
+export interface FsAccess {
+  /** `"read"` | `"write"` | `"execute"`. */
+  kind: FsAccessKind
+  /** Path granted access (recursive). */
+  path: string
+}
+
+export type FsAccessKind =  'read'|
+'write'|
+'execute';
+
 /**
  * IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
  * `guardrail_core::IpcPolicy`.
@@ -60,15 +71,12 @@ export declare function spawn(command: string, args?: Array<string> | undefined 
  * empty environment).
  */
 export interface SpawnOptions {
-  /** Paths granted read access (recursive). */
-  readPaths?: Array<string>
-  /** Paths granted read+write access (recursive). */
-  writePaths?: Array<string>
   /**
-   * Paths granted execute access (recursive). Note: execute does NOT imply
-   * read; grant `readPaths` for the binary and its libraries too.
+   * Filesystem grants, in declaration order. Grants are applied in the order
+   * given. Note: `"execute"` does NOT imply read — add a `"read"` grant for
+   * the binary and its libraries too.
    */
-  executePaths?: Array<string>
+  fs?: Array<FsAccess>
   /** Network confinement level; `"deny"` (default) if omitted. */
   network?: NetworkPolicy
   /** IPC confinement level; `"strict"` (default) if omitted. */

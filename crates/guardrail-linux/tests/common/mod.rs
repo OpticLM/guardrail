@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use guardrail_core::SandboxBuilder;
+use guardrail_core::{FsAccess, SandboxBuilder};
 
 pub fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_guardrail-probe"))
@@ -27,7 +27,7 @@ pub fn probe(args: &[&str]) -> Command {
 pub fn base() -> SandboxBuilder {
     let mut builder = SandboxBuilder::new();
     for dir in runtime_dirs() {
-        builder = builder.allow_read(&dir).allow_execute(dir);
+        builder = builder.fs([FsAccess::Read(dir.clone()), FsAccess::Execute(dir)]);
     }
     builder
 }
@@ -35,7 +35,7 @@ pub fn base() -> SandboxBuilder {
 pub fn read_only_base() -> SandboxBuilder {
     let mut builder = SandboxBuilder::new();
     for dir in runtime_dirs() {
-        builder = builder.allow_read(dir);
+        builder = builder.fs([FsAccess::Read(dir)]);
     }
     builder
 }

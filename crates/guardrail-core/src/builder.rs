@@ -14,12 +14,14 @@ use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy};
 ///
 /// # Example
 /// ```
-/// use guardrail_core::{SandboxBuilder, NetworkPolicy};
+/// use guardrail_core::{SandboxBuilder, NetworkPolicy, FsAccess};
 ///
 /// let config = SandboxBuilder::new()
-///     .allow_read("/tmp/input")
-///     .allow_execute("/tmp/tools")
-///     .allow_write("/tmp/work")
+///     .fs([
+///         FsAccess::Read("/tmp/input".into()),
+///         FsAccess::Execute("/tmp/tools".into()),
+///         FsAccess::Write("/tmp/work".into()),
+///     ])
 ///     .network(NetworkPolicy::OutboundOnly)
 ///     .memory_limit_mb(256)
 ///     .env("PATH", "/usr/bin:/bin")
@@ -42,21 +44,9 @@ impl SandboxBuilder {
         Self::default()
     }
 
-    /// Grant read access to `path` and everything beneath it.
-    pub fn allow_read(mut self, path: impl Into<PathBuf>) -> Self {
-        self.fs.push(FsAccess::Read(path.into()));
-        self
-    }
-
-    /// Grant read and write access to `path` and everything beneath it.
-    pub fn allow_write(mut self, path: impl Into<PathBuf>) -> Self {
-        self.fs.push(FsAccess::Write(path.into()));
-        self
-    }
-
-    /// Grant execute access to `path` and everything beneath it.
-    pub fn allow_execute(mut self, path: impl Into<PathBuf>) -> Self {
-        self.fs.push(FsAccess::Execute(path.into()));
+    /// Set or extend the filesystem grants, in declaration order.
+    pub fn fs(mut self, grants: impl IntoIterator<Item = FsAccess>) -> Self {
+        self.fs.extend(grants);
         self
     }
 
@@ -72,12 +62,9 @@ impl SandboxBuilder {
         self
     }
 
-    /// Add a macOS Seatbelt `.sb` profile path.
-    ///
-    /// This is ignored by non-Darwin backends. On macOS each call adds one
-    /// profile import before the generated Seatbelt profile rules.
-    pub fn darwin_sandbox_profile(mut self, path: impl Into<PathBuf>) -> Self {
-        self.darwin_sandbox_profiles.push(path.into());
+    /// Set or extend the macOS Seatbelt `.sb` profile paths.
+    pub fn darwin_sandbox_profiles(mut self, profiles: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.darwin_sandbox_profiles.extend(profiles);
         self
     }
 
@@ -158,9 +145,11 @@ mod tests {
     #[test]
     fn fs_grants_preserve_declaration_order() {
         let config = SandboxBuilder::new()
-            .allow_read("/a")
-            .allow_write("/b")
-            .allow_execute("/c")
+            .fs(vec![
+                FsAccess::Read("/a".into()),
+                FsAccess::Write("/b".into()),
+                FsAccess::Execute("/c".into()),
+            ])
             .build();
         assert_eq!(
             config.fs,
@@ -184,8 +173,21 @@ mod tests {
     #[test]
     fn darwin_sandbox_profiles_preserve_declaration_order() {
         let config = SandboxBuilder::new()
-            .darwin_sandbox_profile("/tmp/first.sb")
-            .darwin_sandbox_profile("/tmp/second.sb")
+            .darwin_sandbox_profiles(vec!["/tmp/first.sb".into(), "/tmp/second.sb".into()])
+            .build();
+        assert_eq!(
+            config.darwin_sandbox_profiles,
+            vec![
+                PathBuf::from("/tmp/first.sb"),
+                PathBuf::from("/tmp/second.sb"),
+            ]
+        );
+    }
+
+    #[test]
+    fn darwin_sandbox_profile_appends_one() {
+        let config = SandboxBuilder::new()
+            .darwin_sandbox_profiles(vec!["/tmp/first.sb".into(), "/tmp/second.sb".into()])
             .build();
         assert_eq!(
             config.darwin_sandbox_profiles,

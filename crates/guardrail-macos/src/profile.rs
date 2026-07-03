@@ -96,7 +96,9 @@ mod tests {
     #[test]
     fn imported_profiles_are_emitted_before_generated_rules() {
         let profile = build_with_imports(
-            &SandboxBuilder::new().allow_read("/tmp/in").build(),
+            &SandboxBuilder::new()
+                .fs([FsAccess::Read("/tmp/in".into())])
+                .build(),
             &[
                 std::path::PathBuf::from("/tmp/base-one.sb"),
                 std::path::PathBuf::from("/tmp/base-two.sb"),
@@ -131,7 +133,11 @@ mod tests {
 
     #[test]
     fn read_access_emits_file_read_subpath_rule() {
-        let profile = build(&SandboxBuilder::new().allow_read("/tmp/in").build());
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::Read("/tmp/in".into())])
+                .build(),
+        );
 
         assert!(profile.source.contains("(version 1)\n"));
         assert!(
@@ -143,7 +149,11 @@ mod tests {
 
     #[test]
     fn write_access_emits_read_and_write_subpath_rule() {
-        let profile = build(&SandboxBuilder::new().allow_write("/tmp/work").build());
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::Write("/tmp/work".into())])
+                .build(),
+        );
 
         assert!(
             profile
@@ -159,7 +169,11 @@ mod tests {
 
     #[test]
     fn execute_access_emits_process_exec_rule() {
-        let profile = build(&SandboxBuilder::new().allow_execute("/tmp/bin").build());
+        let profile = build(
+            &SandboxBuilder::new()
+                .fs([FsAccess::Execute("/tmp/bin".into())])
+                .build(),
+        );
 
         assert!(
             profile
@@ -209,7 +223,7 @@ mod tests {
     fn double_quotes_in_paths_are_escaped() {
         let profile = build(
             &SandboxBuilder::new()
-                .allow_read(r#"/tmp/name"with-quote"#)
+                .fs([FsAccess::Read(r#"/tmp/name"with-quote"#.into())])
                 .build(),
         );
 
@@ -224,7 +238,7 @@ mod tests {
     fn backslashes_in_paths_are_escaped() {
         let profile = build(
             &SandboxBuilder::new()
-                .allow_read(r"/tmp/name\with-slash")
+                .fs([FsAccess::Read(r"/tmp/name\with-slash".into())])
                 .build(),
         );
 
