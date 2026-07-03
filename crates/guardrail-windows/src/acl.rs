@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use guardrail_core::{Error, FsAccess};
-use windows_sys::core::PWSTR;
-use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    SetEntriesInAclW, SetNamedSecurityInfoW, ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W,
-    GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
@@ -21,6 +20,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
+use windows_sys::core::PWSTR;
 
 #[derive(Debug)]
 pub(crate) struct AclGuard {
@@ -293,29 +293,58 @@ fn win32_status(status: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_APPEND_DATA, FILE_EXECUTE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL, SYNCHRONIZE,
+    };
 
     #[test]
-    fn read_access_is_pure_read_without_execute() {
+    fn read_access_grants_file_read_without_write_or_execute() {
         let rights = read_rights();
         assert_eq!(rights, FILE_GENERIC_READ);
-        assert_eq!(rights & FILE_GENERIC_EXECUTE, 0);
+        assert_eq!(
+            file_specific_rights(rights),
+            FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES
+        );
+        assert_eq!(
+            rights & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES),
+            0
+        );
+        assert_eq!(rights & FILE_EXECUTE, 0);
         assert_ne!(rights, write_rights());
     }
 
     #[test]
-    fn write_access_is_pure_write_without_read_or_execute() {
+    fn write_access_grants_file_write_without_read_or_execute() {
         let rights = write_rights();
         assert_eq!(rights, FILE_GENERIC_WRITE);
-        assert_eq!(rights & FILE_GENERIC_READ, 0);
-        assert_eq!(rights & FILE_GENERIC_EXECUTE, 0);
+        assert_eq!(
+            file_specific_rights(rights),
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
+        );
+        assert_eq!(
+            rights & (FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | FILE_EXECUTE),
+            0
+        );
     }
 
     #[test]
-    fn execute_access_is_pure_execute() {
+    fn execute_access_grants_file_execute_without_read_or_write() {
         let rights = execute_rights();
         assert_eq!(rights, FILE_GENERIC_EXECUTE);
-        assert_eq!(rights & FILE_GENERIC_READ, 0);
-        assert_eq!(rights & FILE_GENERIC_WRITE, 0);
+        assert_eq!(
+            file_specific_rights(rights),
+            FILE_EXECUTE | FILE_READ_ATTRIBUTES
+        );
+        assert_eq!(rights & (FILE_READ_DATA | FILE_READ_EA), 0);
+        assert_eq!(
+            rights & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES),
+            0
+        );
+    }
+
+    fn file_specific_rights(rights: u32) -> u32 {
+        rights & !(READ_CONTROL | SYNCHRONIZE)
     }
 
     #[test]
