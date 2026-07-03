@@ -163,6 +163,37 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
 }
 
 #[test]
+fn read_allow_with_read_deny_keeps_parent_inheritance_for_future_sibling() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let secret = temp.path().join("secret.txt");
+    let future = temp.path().join("future.txt");
+    fs::write(&secret, "secret").expect("write secret");
+
+    let config = builder_with_system_root()
+        .fs([
+            FsAccess::ReadAllow(probe_dir()),
+            FsAccess::ReadAllow(temp.path().into()),
+            FsAccess::ReadDeny(secret.clone()),
+        ])
+        .build();
+
+    let mut command = probe();
+    command.args(["delayed-read-file", "750"]).arg(&future);
+    let mut child = config
+        .spawn_with(&WindowsBackend::new(), command)
+        .expect("spawn delayed probe");
+    fs::write(&future, "future").expect("write future sibling");
+    let status = child.wait().expect("wait");
+
+    assert!(
+        status.success(),
+        "future sibling should inherit the broad parent read grant"
+    );
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+}
+
+#[test]
 fn read_deny_then_read_allow_reopens_child_only() {
     let temp = TempPath::new();
     fs::create_dir_all(temp.path()).expect("create temp dir");

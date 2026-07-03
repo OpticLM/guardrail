@@ -41,6 +41,16 @@ fn main() {
                 exit(3);
             }
         }
+        "delayed-read-file" => {
+            let delay_ms = required_arg(&args, 2)
+                .parse::<u64>()
+                .unwrap_or_else(|_| exit(2));
+            let path = required_arg(&args, 3);
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            if fs::read(path).is_err() {
+                exit(3);
+            }
+        }
         "write-file" => {
             let path = required_arg(&args, 2);
             if fs::write(path, b"guardrail").is_err() {
@@ -61,7 +71,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: guardrail-windows-probe <echo-env|check-env|alloc|spin|read-file|write-file|tcp-connect|tcp-bind> ..."
+                "usage: guardrail-windows-probe <echo-env|check-env|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind> ..."
             );
             exit(2);
         }

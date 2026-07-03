@@ -4,23 +4,33 @@
 
 use std::ffi::OsStr;
 use std::io;
+use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::slice;
 
 use guardrail_core::{Error, FsAccess};
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
-    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+    TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAce, CONTAINER_INHERIT_ACE,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl, InitializeAcl,
+    OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+    UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_APPEND_DATA, FILE_EXECUTE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+    FILE_WRITE_EA,
 };
 use windows_sys::core::PWSTR;
+
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 
 #[derive(Debug)]
 pub(crate) struct AclGuard {
@@ -36,28 +46,22 @@ impl AclGuard {
         };
 
         for entry in compile_entries(fs).map_err(|err| Error::confinement("acl", err))? {
-            guard
-                .apply_path(
-                    &entry.path,
-                    sid,
-                    rights_for(entry.right),
-                    access_mode(entry.effect),
-                )
-                .map_err(|err| Error::confinement("acl", err))?;
+            match entry.effect {
+                RuleEffect::Allow => guard
+                    .apply_allow(&entry.path, sid, rights_for(entry.right))
+                    .map_err(|err| Error::confinement("acl", err))?,
+                RuleEffect::Deny => guard
+                    .apply_deny(&entry.path, sid, deny_mask_for(entry.right))
+                    .map_err(|err| Error::confinement("acl", err))?,
+            }
         }
 
         Ok(guard)
     }
 
-    fn apply_path(
-        &mut self,
-        path: &Path,
-        sid: PSID,
-        rights: u32,
-        mode: ACCESS_MODE,
-    ) -> io::Result<()> {
+    fn apply_allow(&mut self, path: &Path, sid: PSID, rights: u32) -> io::Result<()> {
         let original = OriginalDacl::capture(path)?;
-        let explicit = explicit_access(sid, rights, mode);
+        let explicit = explicit_access(sid, rights);
         let mut new_acl = ptr::null_mut();
         let status =
             unsafe { SetEntriesInAclW(1, &explicit, original.dacl.cast_const(), &mut new_acl) };
@@ -83,6 +87,37 @@ impl AclGuard {
         self.originals.push(original);
         Ok(())
     }
+
+    fn apply_deny(&mut self, path: &Path, sid: PSID, deny_mask: u32) -> io::Result<()> {
+        self.apply_deny_path(path, sid, deny_mask)?;
+        if std::fs::metadata(path)?.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                let child = entry?.path();
+                self.apply_deny(&child, sid, deny_mask)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_deny_path(&mut self, path: &Path, sid: PSID, deny_mask: u32) -> io::Result<()> {
+        let original = OriginalDacl::capture(path)?;
+        let stripped_acl = acl_without_sid_mask(original.dacl, sid, deny_mask)?;
+        let set_status = unsafe {
+            SetNamedSecurityInfoW(
+                original.path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                stripped_acl.as_ptr().cast::<ACL>(),
+                ptr::null_mut(),
+            )
+        };
+        win32_status(set_status)?;
+
+        self.originals.push(original);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +134,13 @@ enum RuleEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedRule {
+    path: PathBuf,
+    right: FsRight,
+    effect: RuleEffect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AclEntry {
     path: PathBuf,
     right: FsRight,
@@ -110,11 +152,11 @@ fn compile_entries(fs: &[FsAccess]) -> io::Result<Vec<AclEntry>> {
     Ok(compile_normalized_entries(&rules))
 }
 
-fn normalize_rules(fs: &[FsAccess]) -> io::Result<Vec<AclEntry>> {
+fn normalize_rules(fs: &[FsAccess]) -> io::Result<Vec<NormalizedRule>> {
     fs.iter()
         .map(|rule| {
             let (path, right, effect) = split_rule(rule);
-            Ok(AclEntry {
+            Ok(NormalizedRule {
                 path: normalize_path(path)?,
                 right,
                 effect,
@@ -127,7 +169,7 @@ fn normalize_path(path: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
-fn compile_normalized_entries(rules: &[AclEntry]) -> Vec<AclEntry> {
+fn compile_normalized_entries(rules: &[NormalizedRule]) -> Vec<AclEntry> {
     let mut entries = Vec::new();
     for rule in rules {
         if final_effect(rules, rule.right, &rule.path) == rule.effect
@@ -135,13 +177,17 @@ fn compile_normalized_entries(rules: &[AclEntry]) -> Vec<AclEntry> {
                 entry.path == rule.path && entry.right == rule.right && entry.effect == rule.effect
             })
         {
-            entries.push(rule.clone());
+            entries.push(AclEntry {
+                path: rule.path.clone(),
+                right: rule.right,
+                effect: rule.effect,
+            });
         }
     }
     entries
 }
 
-fn final_effect(rules: &[AclEntry], right: FsRight, path: &Path) -> RuleEffect {
+fn final_effect(rules: &[NormalizedRule], right: FsRight, path: &Path) -> RuleEffect {
     let mut effect = RuleEffect::Deny;
     for rule in rules {
         if rule.right == right && path.starts_with(&rule.path) {
@@ -170,10 +216,102 @@ fn rights_for(right: FsRight) -> u32 {
     }
 }
 
-fn access_mode(effect: RuleEffect) -> ACCESS_MODE {
-    match effect {
-        RuleEffect::Allow => GRANT_ACCESS,
-        RuleEffect::Deny => DENY_ACCESS,
+fn deny_mask_for(right: FsRight) -> u32 {
+    match right {
+        FsRight::Read => FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES,
+        FsRight::Write => {
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
+        }
+        FsRight::Execute => FILE_EXECUTE,
+    }
+}
+
+fn acl_without_sid_mask(dacl: *mut ACL, sid: PSID, deny_mask: u32) -> io::Result<Vec<u8>> {
+    if dacl.is_null() {
+        return Err(io::Error::other(
+            "cannot selectively deny AppContainer access on a null DACL",
+        ));
+    }
+
+    let dacl_ref = unsafe { &*dacl };
+    let mut storage = vec![0u8; dacl_ref.AclSize as usize];
+    let initialized = unsafe {
+        InitializeAcl(
+            storage.as_mut_ptr().cast::<ACL>(),
+            storage.len() as u32,
+            ACL_REVISION,
+        )
+    };
+    win32_bool(initialized)?;
+
+    for index in 0..dacl_ref.AceCount as u32 {
+        let mut ace = ptr::null_mut();
+        let got_ace = unsafe { GetAce(dacl, index, &mut ace) };
+        win32_bool(got_ace)?;
+
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        let mut bytes =
+            unsafe { slice::from_raw_parts(ace.cast::<u8>(), header.AceSize as usize) }.to_vec();
+
+        if standard_ace_matches_sid(ace, sid) {
+            let mask = read_standard_ace_mask(&bytes);
+            let remaining = mask & !deny_mask;
+            if remaining == 0 {
+                continue;
+            }
+            write_standard_ace_mask(&mut bytes, remaining);
+        }
+
+        let added = unsafe {
+            AddAce(
+                storage.as_mut_ptr().cast::<ACL>(),
+                ACL_REVISION,
+                u32::MAX,
+                bytes.as_ptr().cast(),
+                bytes.len() as u32,
+            )
+        };
+        win32_bool(added)?;
+    }
+
+    Ok(storage)
+}
+
+fn standard_ace_matches_sid(ace: *mut core::ffi::c_void, sid: PSID) -> bool {
+    let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+    if header.AceType != ACCESS_ALLOWED_ACE_TYPE && header.AceType != ACCESS_DENIED_ACE_TYPE {
+        return false;
+    }
+
+    let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+    let ace_sid = unsafe {
+        ptr::addr_of!((*ace).SidStart)
+            .cast_mut()
+            .cast::<core::ffi::c_void>()
+    };
+    unsafe { EqualSid(ace_sid, sid) != 0 }
+}
+
+fn read_standard_ace_mask(bytes: &[u8]) -> u32 {
+    unsafe {
+        ptr::read_unaligned(
+            bytes
+                .as_ptr()
+                .add(mem::size_of::<ACE_HEADER>())
+                .cast::<u32>(),
+        )
+    }
+}
+
+fn write_standard_ace_mask(bytes: &mut [u8], mask: u32) {
+    unsafe {
+        ptr::write_unaligned(
+            bytes
+                .as_mut_ptr()
+                .add(mem::size_of::<ACE_HEADER>())
+                .cast::<u32>(),
+            mask,
+        );
     }
 }
 
@@ -195,6 +333,7 @@ struct OriginalDacl {
     path: PathBuf,
     path_wide: Vec<u16>,
     dacl: *mut windows_sys::Win32::Security::ACL,
+    dacl_protected: bool,
     security_descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
 }
 
@@ -217,20 +356,33 @@ impl OriginalDacl {
         };
         win32_status(status)?;
 
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        let got_control = unsafe {
+            GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision)
+        };
+        win32_bool(got_control)?;
+
         Ok(Self {
             path: path.to_owned(),
             path_wide,
             dacl,
+            dacl_protected: control & SE_DACL_PROTECTED != 0,
             security_descriptor,
         })
     }
 
     fn restore(&self) -> io::Result<()> {
+        let protection = if self.dacl_protected {
+            PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
         let status = unsafe {
             SetNamedSecurityInfoW(
                 self.path_wide.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION | protection,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 self.dacl,
@@ -251,10 +403,10 @@ impl Drop for OriginalDacl {
     }
 }
 
-fn explicit_access(sid: PSID, rights: u32, mode: ACCESS_MODE) -> EXPLICIT_ACCESS_W {
+fn explicit_access(sid: PSID, rights: u32) -> EXPLICIT_ACCESS_W {
     EXPLICIT_ACCESS_W {
         grfAccessPermissions: rights,
-        grfAccessMode: mode,
+        grfAccessMode: GRANT_ACCESS,
         grfInheritance: OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: ptr::null_mut(),
@@ -287,6 +439,14 @@ fn win32_status(status: u32) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::from_raw_os_error(status as i32))
+    }
+}
+
+fn win32_bool(ok: i32) -> io::Result<()> {
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -350,7 +510,7 @@ mod tests {
     #[test]
     fn explicit_allow_access_targets_sid_and_inherits_to_children() {
         let sid = 1usize as PSID;
-        let access = explicit_access(sid, read_rights(), GRANT_ACCESS);
+        let access = explicit_access(sid, read_rights());
         assert_eq!(access.grfAccessMode, GRANT_ACCESS);
         assert_eq!(access.Trustee.TrusteeForm, TRUSTEE_IS_SID);
         assert_eq!(
@@ -361,74 +521,194 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deny_access_uses_deny_mode() {
-        let sid = 1usize as PSID;
-        let access = explicit_access(sid, read_rights(), DENY_ACCESS);
+    fn compile_entries_uses_final_same_path_allow() {
+        let dir = temp_dir("same-path-allow");
+        let canonical = std::fs::canonicalize(&dir).unwrap();
 
-        assert_eq!(access.grfAccessMode, DENY_ACCESS);
-        assert_eq!(access.grfAccessPermissions, FILE_GENERIC_READ);
-    }
-
-    #[test]
-    fn compile_entries_uses_final_same_path_effect() {
-        let entries = compile_normalized_entries(&[
-            AclEntry {
-                path: PathBuf::from("C:\\work"),
-                right: FsRight::Read,
-                effect: RuleEffect::Allow,
-            },
-            AclEntry {
-                path: PathBuf::from("C:\\work"),
-                right: FsRight::Read,
-                effect: RuleEffect::Deny,
-            },
-            AclEntry {
-                path: PathBuf::from("C:\\work"),
-                right: FsRight::Read,
-                effect: RuleEffect::Allow,
-            },
-        ]);
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::ReadDeny(dir.clone()),
+            FsAccess::ReadAllow(dir.clone()),
+        ])
+        .unwrap();
 
         assert_eq!(
             entries,
             vec![AclEntry {
-                path: PathBuf::from("C:\\work"),
+                path: canonical,
                 right: FsRight::Read,
                 effect: RuleEffect::Allow,
             }]
         );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn compile_entries_keeps_independent_write_deny() {
-        let entries = compile_normalized_entries(&[
-            AclEntry {
-                path: PathBuf::from("C:\\work"),
+    fn compile_entries_uses_final_same_path_deny() {
+        let dir = temp_dir("same-path-deny");
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::ReadDeny(dir.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![AclEntry {
+                path: canonical,
                 right: FsRight::Read,
-                effect: RuleEffect::Allow,
-            },
-            AclEntry {
-                path: PathBuf::from("C:\\work"),
-                right: FsRight::Write,
                 effect: RuleEffect::Deny,
-            },
-        ]);
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compile_entries_keeps_independent_grants() {
+        let dir = temp_dir("independent-grants");
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::WriteAllow(dir.clone()),
+        ])
+        .unwrap();
 
         assert_eq!(
             entries,
             vec![
                 AclEntry {
-                    path: PathBuf::from("C:\\work"),
+                    path: canonical.clone(),
                     right: FsRight::Read,
                     effect: RuleEffect::Allow,
                 },
                 AclEntry {
-                    path: PathBuf::from("C:\\work"),
+                    path: canonical,
                     right: FsRight::Write,
+                    effect: RuleEffect::Allow,
+                },
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn allow_parent_deny_existing_child_preserves_ordered_entries() {
+        let dir = temp_dir("allow-parent-deny-child");
+        let public = dir.join("public.txt");
+        let secret = dir.join("secret.txt");
+        std::fs::write(&public, b"public").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+        let secret = std::fs::canonicalize(secret).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::ReadDeny(secret.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                AclEntry {
+                    path: root,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+                AclEntry {
+                    path: secret,
+                    right: FsRight::Read,
                     effect: RuleEffect::Deny,
                 },
             ]
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn allow_parent_deny_child_allow_grandchild_preserves_ordered_entries() {
+        let dir = temp_dir("allow-deny-allow-child");
+        let child = dir.join("child");
+        let grandchild = child.join("grandchild.txt");
+        let other = child.join("other.txt");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(&grandchild, b"grandchild").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let child = std::fs::canonicalize(child).unwrap();
+        let grandchild = std::fs::canonicalize(grandchild).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadAllow(dir.clone()),
+            FsAccess::ReadDeny(child.clone()),
+            FsAccess::ReadAllow(grandchild.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                AclEntry {
+                    path: root,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+                AclEntry {
+                    path: child,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Deny,
+                },
+                AclEntry {
+                    path: grandchild,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deny_parent_allow_child_preserves_ordered_entries() {
+        let dir = temp_dir("deny-parent-allow-child");
+        let child = dir.join("child");
+        let sibling = dir.join("sibling");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let child = std::fs::canonicalize(child).unwrap();
+
+        let entries = compile_entries(&[
+            FsAccess::ReadDeny(dir.clone()),
+            FsAccess::ReadAllow(child.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                AclEntry {
+                    path: root,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Deny,
+                },
+                AclEntry {
+                    path: child,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
