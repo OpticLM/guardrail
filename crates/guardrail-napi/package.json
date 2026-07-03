@@ -1,19 +1,25 @@
 {
   "name": "@opticlm/guardrail",
-  "version": "0.1.0",
-  "description": "Cross-platform process sandbox (Landlock/seccomp, Seatbelt, AppContainer) for Node.js.",
+  "version": "0.0.2",
+  "description": "Node.js runtime of guardrail, a cross-platform process sandbox for LLM agents.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/OpticLM/guardrail.git"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
   "files": [
     "index.js",
     "index.d.ts"
   ],
   "napi": {
+    "npmClient": "pnpm",
     "constEnum": false,
     "binaryName": "guardrail",
     "packageName": "@opticlm/guardrail",
@@ -34,15 +40,22 @@
     "access": "public"
   },
   "scripts": {
-    "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm",
-    "test": "node --test __test__/smoke.test.mjs",
-    "version": "napi version"
+    "create-npm-dirs": "napi create-npm-dirs",
+    "artifacts": "napi artifacts --output-dir .",
+    "build": "napi build --platform --release --esm",
+    "build:debug": "napi build --platform --esm",
+    "test": "node --test __test__/smoke.test.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.2.0"
   },
-  "packageManager": "pnpm@11.5.1"
+  "packageManager": "pnpm@11.5.1",
+  "optionalDependencies": {
+    "@opticlm/guardrail-win32-x64-msvc": "0.0.2",
+    "@opticlm/guardrail-win32-arm64-msvc": "0.0.2",
+    "@opticlm/guardrail-darwin-x64": "0.0.2",
+    "@opticlm/guardrail-darwin-arm64": "0.0.2",
+    "@opticlm/guardrail-linux-x64-gnu": "0.0.2",
+    "@opticlm/guardrail-linux-arm64-gnu": "0.0.2"
+  }
 }
