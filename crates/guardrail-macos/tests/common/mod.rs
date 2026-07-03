@@ -21,7 +21,7 @@ pub fn probe(args: &[&str]) -> Command {
 /// These are explicit test grants, not backend defaults: every filesystem path
 /// allowed here is visible in the resulting `SandboxConfig`.
 pub fn base() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
+    let mut builder = SandboxBuilder::new().darwin_sandbox_profiles([runtime_profile()]);
     for dir in runtime_dirs() {
         builder = builder.fs([
             FsAccess::ReadAllow(dir.clone()),
@@ -32,11 +32,18 @@ pub fn base() -> SandboxBuilder {
 }
 
 pub fn read_only_base() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
+    let mut builder = SandboxBuilder::new().darwin_sandbox_profiles([runtime_profile()]);
     for dir in runtime_dirs() {
         builder = builder.fs([FsAccess::ReadAllow(dir)]);
     }
     builder
+}
+
+fn runtime_profile() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("runtime.sb")
 }
 
 fn runtime_dirs() -> BTreeSet<PathBuf> {

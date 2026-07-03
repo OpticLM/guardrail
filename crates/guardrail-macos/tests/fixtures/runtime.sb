@@ -1,0 +1,16 @@
+(version 1)
+
+;; Grants needed by the macOS runtime before the probe reaches test logic.
+;; Keep filesystem data reads narrow so generated FsAccess rules still decide
+;; whether test temp files are readable.
+(allow sysctl-read)
+(allow mach-lookup)
+(allow file-read-metadata)
+(allow file-read* (literal "/"))
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (subpath "/System/Cryptexes/OS"))
+(allow file-read* (subpath "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"))
+(allow file-read* (literal "/dev/dtracehelper"))
+(allow file-write* (literal "/dev/dtracehelper"))
+(allow file-ioctl (literal "/dev/dtracehelper"))

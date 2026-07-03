@@ -1,19 +1,62 @@
 #![cfg(target_os = "macos")]
 
+use std::fmt;
+use std::process::{ExitStatus, Stdio};
+
 use guardrail_core::{Error, FsAccess, NetworkPolicy, SandboxConfig};
 use guardrail_macos::MacosBackend;
 
 mod common;
 
-fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
-    run(config, args).success()
+fn assert_allowed(config: &SandboxConfig, args: &[&str]) {
+    let result = run(config, args);
+    assert!(
+        result.status.success(),
+        "expected {args:?} to be allowed\n{result}\nconfig: {config:#?}"
+    );
 }
 
-fn run(config: &SandboxConfig, args: &[&str]) -> std::process::ExitStatus {
-    let mut child = config
-        .spawn_with(&MacosBackend::new(), common::probe(args))
-        .expect("spawn");
-    child.wait().expect("wait")
+fn assert_denied(config: &SandboxConfig, args: &[&str]) {
+    let result = run(config, args);
+    assert!(
+        !result.status.success(),
+        "expected {args:?} to be denied\n{result}\nconfig: {config:#?}"
+    );
+}
+
+fn run(config: &SandboxConfig, args: &[&str]) -> RunResult {
+    let mut command = common::probe(args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = config
+        .spawn_with(&MacosBackend::new(), command)
+        .unwrap_or_else(|err| panic!("spawn failed for {args:?}: {err:?}\nconfig: {config:#?}"));
+    let output = child.into_inner().wait_with_output().expect("wait");
+
+    RunResult {
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    }
+}
+
+struct RunResult {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl fmt::Display for RunResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "status: {}", self.status)?;
+        if !self.stdout.is_empty() {
+            writeln!(f, "stdout:\n{}", String::from_utf8_lossy(&self.stdout))?;
+        }
+        if !self.stderr.is_empty() {
+            writeln!(f, "stderr:\n{}", String::from_utf8_lossy(&self.stderr))?;
+        }
+        Ok(())
+    }
 }
 
 fn loopback_listener() -> (std::net::TcpListener, String) {
@@ -25,11 +68,7 @@ fn loopback_listener() -> (std::net::TcpListener, String) {
 #[test]
 fn target_binary_runs_with_explicit_runtime_grants() {
     let config = common::base().build();
-    let status = run(&config, &["noop"]);
-    assert!(
-        status.success(),
-        "the sandboxed binary must run when read and execute are explicitly granted; status: {status}"
-    );
+    assert_allowed(&config, &["noop"]);
 }
 
 #[test]
@@ -60,8 +99,8 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
         ])
         .build();
 
-    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
-    assert!(!allowed(&config, &["read-file", secret.to_str().unwrap()]));
+    assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
+    assert_denied(&config, &["read-file", secret.to_str().unwrap()]);
 }
 
 #[test]
@@ -77,8 +116,8 @@ fn read_deny_then_read_allow_reopens_child_only() {
         ])
         .build();
 
-    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
-    assert!(!allowed(&config, &["read-file", other.to_str().unwrap()]));
+    assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
+    assert_denied(&config, &["read-file", other.to_str().unwrap()]);
 }
 
 #[test]
@@ -94,39 +133,28 @@ fn later_read_allow_overrides_same_path_deny() {
         ])
         .build();
 
-    assert!(allowed(&config, &["read-file", public.to_str().unwrap()]));
+    assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
 }
 
 #[test]
 fn deny_blocks_tcp_connect() {
     let (_listener, addr) = loopback_listener();
     let config = common::base().network(NetworkPolicy::Deny).build();
-    assert!(
-        !allowed(&config, &["tcp-connect", &addr]),
-        "TCP connect must be blocked under Deny"
-    );
+    assert_denied(&config, &["tcp-connect", &addr]);
 }
 
 #[test]
 fn outbound_only_allows_tcp_connect() {
     let (_listener, addr) = loopback_listener();
     let config = common::base().network(NetworkPolicy::OutboundOnly).build();
-    let status = run(&config, &["tcp-connect", &addr]);
-    assert!(
-        status.success(),
-        "TCP connect must be allowed under OutboundOnly; status: {status}"
-    );
+    assert_allowed(&config, &["tcp-connect", &addr]);
 }
 
 #[test]
 fn full_allows_tcp_connect() {
     let (_listener, addr) = loopback_listener();
     let config = common::base().network(NetworkPolicy::Full).build();
-    let status = run(&config, &["tcp-connect", &addr]);
-    assert!(
-        status.success(),
-        "TCP connect must be allowed under Full; status: {status}"
-    );
+    assert_allowed(&config, &["tcp-connect", &addr]);
 }
 
 struct TempDir {

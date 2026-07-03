@@ -1,6 +1,5 @@
 #![cfg(target_os = "macos")]
 
-use guardrail_core::FsAccess;
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -10,33 +9,41 @@ fn custom_profile_is_loaded_and_applied() {
     let temp_dir = TempDir::create();
     let secret = temp_dir.path().join("secret.txt");
     std::fs::write(&secret, b"top secret").unwrap();
+    let canonical_secret = std::fs::canonicalize(&secret).unwrap_or_else(|_| secret.clone());
 
     let profile_path = temp_dir.path().join("deny-secret.sb");
-    std::fs::write(
-        &profile_path,
-        format!(
-            "(version 1)\n\
-             (allow default)\n\
-             (deny file-read* (literal \"{}\"))\n",
-            sbpl_string(&secret)
-        ),
-    )
-    .unwrap();
+    let profile_source = format!(
+        "(version 1)\n\
+         (allow file-read* (literal \"{}\"))\n\
+         (allow file-read* (literal \"{}\"))\n",
+        sbpl_string(&secret),
+        sbpl_string(&canonical_secret)
+    );
+    std::fs::write(&profile_path, &profile_source).unwrap();
 
     let config = common::base()
-        .fs([FsAccess::ReadAllow(temp_dir.path().into())])
         .darwin_sandbox_profiles([profile_path])
         .build();
-    let mut child = config
-        .spawn_with(
-            &MacosBackend::new(),
-            common::probe(&["read-file", secret.to_str().unwrap()]),
-        )
+    let mut command = common::probe(&["read-file", secret.to_str().unwrap()]);
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = config
+        .spawn_with(&MacosBackend::new(), command)
         .expect("spawn");
+    let output = child.into_inner().wait_with_output().expect("wait");
 
     assert!(
-        !child.wait().expect("wait").success(),
-        "the imported profile must deny reading the explicitly granted secret"
+        output.status.success(),
+        "the imported profile must grant reading a path absent from generated FsAccess rules\n\
+         status: {}\n\
+         stderr:\n{}\n\
+         profile:\n{}\n\
+         config: {:#?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        profile_source,
+        config
     );
 }
 

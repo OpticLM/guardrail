@@ -90,6 +90,7 @@ mod tests {
                  (import \"{first_import}\")\n\
                  (import \"{second_import}\")\n\
                  (deny default)\n\
+                 (debug deny)\n\
                  (allow file-read* (subpath \"/generated-read\"))\n",
             )
         );
