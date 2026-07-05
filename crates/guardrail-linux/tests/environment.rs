@@ -5,6 +5,7 @@
 
 use std::process::Command;
 
+use guardrail_core::Backend;
 use guardrail_linux::LinuxBackend;
 
 fn probe() -> Command {
@@ -26,7 +27,10 @@ fn inherited_env_is_cleared() {
     cmd.env_clear();
     cmd.envs(&config.env);
 
-    let child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
+    let child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     let out = child.into_inner().wait_with_output().expect("wait");
     assert!(out.status.success());
     assert_eq!(
@@ -46,7 +50,10 @@ fn explicitly_added_env_reaches_child() {
     cmd.env_clear();
     cmd.envs(&config.env);
 
-    let child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
+    let child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     let out = child.into_inner().wait_with_output().expect("wait");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
 }

@@ -67,6 +67,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         }
     }
 
@@ -95,6 +96,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![first.clone(), second.clone()],
+            windows_cache_namespace: None,
         };
         let profile = resolve(&config).unwrap();
 
@@ -124,6 +126,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
 
         let err = resolve(&config).unwrap_err();
@@ -153,6 +156,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![path.clone()],
+            windows_cache_namespace: None,
         };
         let err = resolve(&config).unwrap_err();
 

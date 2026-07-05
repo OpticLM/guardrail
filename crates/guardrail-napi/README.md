@@ -3,9 +3,9 @@
 Native Node.js bindings for the `guardrail` cross-platform process sandbox.
 
 ```js
-const { spawn } = require('@opticlm/guardrail')
+const { Sandbox } = require('@opticlm/guardrail')
 
-const child = spawn('/usr/bin/mytool', ['--flag'], {
+const sandbox = await Sandbox.build({
   fs: [
     { kind: 'read-allow', path: '/usr' },
     { kind: 'read-allow', path: '/lib' },
@@ -17,8 +17,10 @@ const child = spawn('/usr/bin/mytool', ['--flag'], {
   ipc: 'strict',              // 'strict' | 'relaxed'
   memoryLimitMb: 256,
   env: { PATH: '/usr/bin:/bin' },
+  windowsCacheNamespace: 'tools',
 })
 
+const child = sandbox.spawn('/usr/bin/mytool', ['--flag'])
 const result = await child.wait()
 // result: { code, signal, success, violation? }
 if (!result.success && result.violation) {
@@ -35,15 +37,22 @@ if (!result.success && result.violation) {
   libraries too. A `"write-allow"` rule does not imply read.
 - stdio is inherited from the parent process. Output capture (piping) is not yet
   supported.
+- `spawn(command, args, options)` remains available as a one-shot wrapper, but a
+  reusable `Sandbox` avoids rebuilding platform policy state for repeated runs.
+  Use `await Sandbox.build(options)` so expensive setup runs off the event loop.
+- On Windows, `windowsCacheNamespace` separates cached AppContainer filesystem
+  state. Use different namespaces for policies that may be active at the same
+  time.
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
   Unix and is unsupported on Windows in that state.
 
 ```js
-const child = spawn('/usr/bin/mytool', [], {
+const sandbox = await Sandbox.build({
   fs: [
     { kind: 'read-allow', path: '/workspace' },
     { kind: 'read-deny', path: '/workspace/secrets' },
     { kind: 'read-allow', path: '/workspace/secrets/public-schema.json' },
   ],
 })
+const child = sandbox.spawn('/usr/bin/mytool')
 ```

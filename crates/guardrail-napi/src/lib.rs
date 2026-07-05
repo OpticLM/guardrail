@@ -1,9 +1,8 @@
 //! Node-API bindings for the `guardrail` sandbox.
 //!
-//! Exposes a single [`spawn`] function that launches a child process confined
-//! by the platform backend, returning a [`SandboxChild`] handle with async
-//! `wait()` and `kill()`. Policy is supplied as a plain options object that
-//! mirrors `guardrail_core::SandboxConfig` fields.
+//! Exposes a reusable [`Sandbox`] object plus a one-shot [`spawn`] wrapper that
+//! launches a child process confined by the platform backend, returning a
+//! [`SandboxChild`] handle with async `wait()` and `kill()`.
 #![deny(clippy::all)]
 
 use std::collections::{BTreeMap, HashMap};
@@ -16,8 +15,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail_core::{
-    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxConfig,
-    SharedSandboxChild, ViolationKind,
+    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxConfig, SharedSandboxChild,
+    ViolationKind,
 };
 
 // Compile-time backend selection: each published binary targets exactly one OS,
@@ -125,9 +124,36 @@ pub struct JsFsAccess {
     pub path: String,
 }
 
-/// Sandbox policy + launch options. All fields optional; omitting everything
+/// Sandbox policy. All fields optional; omitting everything
 /// yields the maximally restrictive default (no fs, no network, strict IPC,
 /// empty environment).
+#[napi(object)]
+#[derive(Default)]
+pub struct SandboxOptions {
+    /// Filesystem rules, in declaration order. Later matching rules override
+    /// earlier rules for the same right. Note: `"execute-allow"` does NOT imply
+    /// read — add a `"read-allow"` rule for the binary and its libraries too.
+    pub fs: Option<Vec<JsFsAccess>>,
+    /// Network confinement level; `"deny"` (default) if omitted.
+    pub network: Option<JsNetworkPolicy>,
+    /// IPC confinement level; `"strict"` (default) if omitted.
+    pub ipc: Option<JsIpcPolicy>,
+    /// Address-space cap in megabytes.
+    pub memory_limit_mb: Option<u32>,
+    /// CPU-time cap in seconds.
+    pub cpu_time_limit_secs: Option<u32>,
+    /// Maximum number of processes/threads.
+    pub max_processes: Option<u32>,
+    /// The ONLY environment variables the child sees (inherited env is cleared).
+    pub env: Option<HashMap<String, String>>,
+    /// macOS-only Seatbelt `.sb` profile paths; ignored on other platforms.
+    pub darwin_sandbox_profiles: Option<Vec<String>>,
+    /// Windows-only AppContainer cache namespace; ignored on other platforms.
+    pub windows_cache_namespace: Option<String>,
+}
+
+/// One-shot sandbox policy + launch options. All fields optional; omitting
+/// everything yields the maximally restrictive default.
 #[napi(object)]
 #[derive(Default)]
 pub struct SpawnOptions {
@@ -149,6 +175,16 @@ pub struct SpawnOptions {
     pub env: Option<HashMap<String, String>>,
     /// macOS-only Seatbelt `.sb` profile paths; ignored on other platforms.
     pub darwin_sandbox_profiles: Option<Vec<String>>,
+    /// Windows-only AppContainer cache namespace; ignored on other platforms.
+    pub windows_cache_namespace: Option<String>,
+    /// Working directory for the child. Defaults to the parent's cwd.
+    pub cwd: Option<String>,
+}
+
+/// Per-spawn launch options for a reusable [`Sandbox`].
+#[napi(object)]
+#[derive(Default)]
+pub struct SandboxSpawnOptions {
     /// Working directory for the child. Defaults to the parent's cwd.
     pub cwd: Option<String>,
 }
@@ -179,7 +215,7 @@ pub struct JsViolation {
     pub suggestions: Vec<String>,
 }
 
-fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
+fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
     let fs = opts
         .fs
         .into_iter()
@@ -217,19 +253,46 @@ fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
 
     Ok(SandboxConfig {
         fs,
-        network: opts.network.map(|n| n.into()).unwrap_or(NetworkPolicy::Deny),
+        network: opts
+            .network
+            .map(|n| n.into())
+            .unwrap_or(NetworkPolicy::Deny),
         ipc: opts.ipc.map(|i| i.into()).unwrap_or(IpcPolicy::Strict),
         limits,
         env,
         darwin_sandbox_profiles,
+        windows_cache_namespace: opts.windows_cache_namespace,
     })
+}
+
+impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
+    fn from(options: SpawnOptions) -> Self {
+        (
+            SandboxOptions {
+                fs: options.fs,
+                network: options.network,
+                ipc: options.ipc,
+                memory_limit_mb: options.memory_limit_mb,
+                cpu_time_limit_secs: options.cpu_time_limit_secs,
+                max_processes: options.max_processes,
+                env: options.env,
+                darwin_sandbox_profiles: options.darwin_sandbox_profiles,
+                windows_cache_namespace: options.windows_cache_namespace,
+            },
+            options.cwd,
+        )
+    }
 }
 
 fn to_napi_err(e: guardrail_core::Error) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
 
-fn build_exit_result(config: &SandboxConfig, status: ExitStatus) -> ExitResult {
+fn build_exit_result(
+    backend: &PlatformBackend,
+    config: &SandboxConfig,
+    status: ExitStatus,
+) -> ExitResult {
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;
@@ -238,7 +301,7 @@ fn build_exit_result(config: &SandboxConfig, status: ExitStatus) -> ExitResult {
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
 
-    let violation = PlatformBackend::new()
+    let violation = backend
         .explain(&ExplainCtx::new(config, status))
         .map(|v| JsViolation {
             kind: v.kind.into(),
@@ -254,6 +317,71 @@ fn build_exit_result(config: &SandboxConfig, status: ExitStatus) -> ExitResult {
     }
 }
 
+/// A reusable, pre-initialized sandbox.
+#[napi]
+pub struct Sandbox {
+    backend: Arc<PlatformBackend>,
+    config: Arc<SandboxConfig>,
+}
+
+#[napi]
+impl Sandbox {
+    /// Create a sandbox and pre-initialize platform policy state off the event
+    /// loop.
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn build(options: Option<SandboxOptions>) -> AsyncTask<BuildSandboxTask> {
+        AsyncTask::new(BuildSandboxTask {
+            options: options.unwrap_or_default(),
+        })
+    }
+
+    /// Spawn `command` (with `args`) inside this sandbox. stdio is inherited
+    /// from the parent process.
+    #[napi]
+    pub fn spawn(
+        &self,
+        command: String,
+        args: Option<Vec<String>>,
+        options: Option<SandboxSpawnOptions>,
+    ) -> Result<SandboxChild> {
+        spawn_with_backend(
+            Arc::clone(&self.backend),
+            Arc::clone(&self.config),
+            command,
+            args,
+            options.and_then(|options| options.cwd),
+        )
+    }
+}
+
+pub struct BuiltSandbox {
+    backend: PlatformBackend,
+    config: SandboxConfig,
+}
+
+pub struct BuildSandboxTask {
+    options: SandboxOptions,
+}
+
+impl Task for BuildSandboxTask {
+    type Output = BuiltSandbox;
+    type JsValue = Sandbox;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = std::mem::take(&mut self.options);
+        let config = build_config(options)?;
+        let backend = PlatformBackend::new(config.clone()).map_err(to_napi_err)?;
+        Ok(BuiltSandbox { backend, config })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Sandbox {
+            backend: Arc::new(output.backend),
+            config: Arc::new(output.config),
+        })
+    }
+}
+
 /// Spawn `command` (with `args`) confined by `options`. stdio is inherited from
 /// the parent process. Returns a handle to await or kill the child.
 #[napi]
@@ -262,10 +390,19 @@ pub fn spawn(
     args: Option<Vec<String>>,
     options: Option<SpawnOptions>,
 ) -> Result<SandboxChild> {
-    let options = options.unwrap_or_default();
-    let cwd = options.cwd.clone();
-    let config = build_config(options)?;
+    let (sandbox_options, cwd) = options.unwrap_or_default().into();
+    let config = build_config(sandbox_options)?;
+    let backend = PlatformBackend::new(config.clone()).map_err(to_napi_err)?;
+    spawn_with_backend(Arc::new(backend), Arc::new(config), command, args, cwd)
+}
 
+fn spawn_with_backend(
+    backend: Arc<PlatformBackend>,
+    config: Arc<SandboxConfig>,
+    command: String,
+    args: Option<Vec<String>>,
+    cwd: Option<String>,
+) -> Result<SandboxChild> {
     let mut cmd = Command::new(&command);
     if let Some(args) = args {
         cmd.args(args);
@@ -273,16 +410,14 @@ pub fn spawn(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    cmd.env_clear();
-    cmd.envs(&config.env);
     // stdio is inherited by default for std::process::Command::spawn().
 
-    let backend = PlatformBackend::new();
-    let child = backend.spawn(&config, cmd).map_err(to_napi_err)?;
+    let child = backend.spawn(cmd).map_err(to_napi_err)?;
 
     Ok(SandboxChild {
         inner: SharedSandboxChild::new(child),
-        config: Arc::new(config),
+        backend,
+        config,
     })
 }
 
@@ -290,6 +425,7 @@ pub fn spawn(
 #[napi]
 pub struct SandboxChild {
     inner: SharedSandboxChild,
+    backend: Arc<PlatformBackend>,
     // Kept so `build_exit_result` can call `explain(config, status)` to attach a
     // policy-violation diagnostic to the exit result.
     config: Arc<SandboxConfig>,
@@ -309,6 +445,7 @@ impl SandboxChild {
     pub fn wait(&self) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask {
             inner: self.inner.clone(),
+            backend: Arc::clone(&self.backend),
             config: self.config.clone(),
         })
     }
@@ -327,6 +464,7 @@ impl SandboxChild {
 /// libuv-threadpool task backing the async `wait()`.
 pub struct WaitTask {
     inner: SharedSandboxChild,
+    backend: Arc<PlatformBackend>,
     config: Arc<SandboxConfig>,
 }
 
@@ -344,7 +482,7 @@ impl Task for WaitTask {
                 format!("failed to wait for child: {e}"),
             )
         })?;
-        Ok(build_exit_result(&self.config, status))
+        Ok(build_exit_result(&self.backend, &self.config, status))
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

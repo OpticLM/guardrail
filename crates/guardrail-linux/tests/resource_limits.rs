@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use guardrail_core::Backend;
 use guardrail_linux::LinuxBackend;
 
 mod common;
@@ -19,7 +20,10 @@ fn memory_limit_blocks_large_allocation() {
     cmd.arg("alloc").arg("512");
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     let status = child.wait().expect("wait");
     assert!(
         !status.success(),
@@ -36,7 +40,10 @@ fn without_limit_the_same_allocation_succeeds() {
     cmd.arg("alloc").arg("512");
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     let status = child.wait().expect("wait");
     assert!(
         status.success(),
@@ -53,7 +60,10 @@ fn cpu_time_limit_kills_busy_loop() {
     cmd.arg("spin");
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
 
     let start = Instant::now();
     let status = child.wait().expect("wait");
@@ -81,7 +91,7 @@ fn process_limit_is_applied() {
     cmd.arg("spin");
     cmd.env_clear();
     cmd.envs(&config.env);
-    let res = LinuxBackend::new().spawn(&config, cmd);
+    let res = LinuxBackend::new(config).expect("backend").spawn(cmd);
     // The assertion is intentionally loose; document-only.
     let _ = res;
 }

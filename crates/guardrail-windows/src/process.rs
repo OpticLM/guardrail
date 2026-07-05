@@ -7,9 +7,10 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::process::Command;
+use std::sync::Arc;
 use std::{io, mem, ptr};
 
-use guardrail_core::{Error, SandboxChild};
+use guardrail_core::{Error, NetworkPolicy, SandboxChild};
 use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
 use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
@@ -20,15 +21,14 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, UpdateProcThreadAttribute,
 };
 
-use crate::acl::AclGuard;
-use crate::appcontainer::AppContainerProfile;
+use crate::cache::{CachedAppContainer, raw_security_capabilities};
 use crate::handle::{bool_result, owned_handle_from_raw, resume_then_close_thread};
 
 pub(crate) fn launch(
     command: Command,
     job: OwnedHandle,
-    mut appcontainer: AppContainerProfile,
-    acl: AclGuard,
+    appcontainer: Arc<CachedAppContainer>,
+    network: NetworkPolicy,
 ) -> Result<SandboxChild, Error> {
     let mut command_line = command_line_block(&command);
     let environment = environment_block(&command);
@@ -50,9 +50,9 @@ pub(crate) fn launch(
     };
     let mut attributes =
         AttributeList::new(1).map_err(|err| Error::confinement("appcontainer", err))?;
-    let mut security_capabilities = appcontainer.security_capabilities();
+    let mut security_capabilities = appcontainer.security_capabilities(network)?;
     attributes
-        .update_security_capabilities(&mut security_capabilities)
+        .update_security_capabilities(raw_security_capabilities(&mut security_capabilities))
         .map_err(|err| Error::confinement("appcontainer", err))?;
     startup.lpAttributeList = attributes.as_mut_ptr();
 
@@ -102,7 +102,7 @@ pub(crate) fn launch(
     }
 
     let pid = process_info.dwProcessId;
-    let guards: Vec<Box<dyn Any + Send>> = vec![Box::new(appcontainer), Box::new(acl)];
+    let guards: Vec<Box<dyn Any + Send>> = vec![Box::new(appcontainer)];
     // SAFETY: the owned process handle, owned job handle, and pid all come
     // from the successful CreateProcessW + AssignProcessToJobObject sequence
     // above and are transferred into SandboxChild. The cleanup guards only own
@@ -143,14 +143,14 @@ impl AttributeList {
 
     fn update_security_capabilities(
         &mut self,
-        security_capabilities: &mut SECURITY_CAPABILITIES,
+        security_capabilities: *mut SECURITY_CAPABILITIES,
     ) -> io::Result<()> {
         let ok = unsafe {
             UpdateProcThreadAttribute(
                 self.as_mut_ptr(),
                 0,
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                security_capabilities as *mut _ as *const _,
+                security_capabilities.cast(),
                 mem::size_of::<SECURITY_CAPABILITIES>(),
                 ptr::null_mut(),
                 ptr::null(),

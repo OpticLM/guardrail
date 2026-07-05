@@ -7,6 +7,7 @@ const guardrail = require('../index.js')
 
 test('module exposes the expected API', () => {
   assert.equal(typeof guardrail.spawn, 'function')
+  assert.equal(typeof guardrail.Sandbox, 'function')
 })
 
 test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process.platform === 'win32' }, async () => {
@@ -16,13 +17,15 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   // /usr/lib/x86_64-linux-gnu on Debian/Ubuntu). This is a binding-plumbing
   // smoke test — spawn(), async wait(), exit result, diagnostics — not a
   // Landlock/Seatbelt precision test, so broad grants are appropriate here.
-  const child = guardrail.spawn('/usr/bin/true', [], {
+  assert.equal(typeof guardrail.Sandbox.build, 'function')
+  const sandbox = await guardrail.Sandbox.build({
     fs: [
       { kind: 'read-allow', path: '/' },
       { kind: 'execute-allow', path: '/' },
     ],
     network: 'full',
   })
+  const child = sandbox.spawn('/usr/bin/true')
   assert.equal(typeof child.pid, 'number')
   const result = await child.wait()
   if (process.platform === 'darwin') {
@@ -66,10 +69,12 @@ test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: proc
   for (const key of ['SystemRoot', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP']) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
-  const child = guardrail.spawn('cmd', ['/c', 'exit', '0'], {
+  const sandbox = await guardrail.Sandbox.build({
     network: 'deny',
     env,
+    windowsCacheNamespace: 'smoke',
   })
+  const child = sandbox.spawn('cmd', ['/c', 'exit', '0'])
   assert.equal(typeof child.pid, 'number')
   const result = await child.wait()
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)

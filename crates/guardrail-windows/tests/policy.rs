@@ -23,6 +23,13 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
+fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+    WindowsBackend::new(config.clone())
+        .expect("backend")
+        .spawn(command)
+        .expect("spawn")
+}
+
 #[test]
 fn default_network_deny_still_launches_process_in_appcontainer() {
     let config = builder_with_system_root();
@@ -31,9 +38,7 @@ fn default_network_deny_still_launches_process_in_appcontainer() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn with default AppContainer policy");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(status.success(), "cmd /C exit 0 should succeed");
@@ -53,9 +58,7 @@ fn filesystem_read_is_denied_without_grant() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -81,9 +84,7 @@ fn read_grant_allows_reading_a_declared_directory() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn with read grant");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(status.success(), "read-granted file should be readable");
@@ -105,9 +106,7 @@ fn write_is_denied_under_read_grant() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn with read grant");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -136,9 +135,7 @@ fn write_grant_allows_writing_under_declared_directory() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn with write grant");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -187,9 +184,7 @@ fn read_allow_with_read_deny_keeps_parent_inheritance_for_future_sibling() {
     command.args(["delayed-read-file", "750"]).arg(&future);
     command.env_clear();
     command.envs(&config.env);
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn delayed probe");
+    let mut child = spawn_child(&config, command);
     fs::write(&future, "future").expect("write future sibling");
     let status = child.wait().expect("wait");
 
@@ -290,9 +285,7 @@ fn default_network_deny_blocks_outbound_tcp_connect() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -319,9 +312,7 @@ fn outbound_only_allows_loopback_connect_when_host_allows_appcontainer_loopback(
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -340,9 +331,7 @@ fn full_network_allows_tcp_bind() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -369,6 +358,7 @@ fn builder_with_system_root() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],
+        windows_cache_namespace: Some(unique_namespace("policy")),
     }
 }
 
@@ -377,9 +367,7 @@ fn probe_file_allowed(config: &SandboxConfig, operation: &str, path: &Path) -> b
     command.arg(operation).arg(path);
     command.env_clear();
     command.envs(&config.env);
-    let mut child = WindowsBackend::new()
-        .spawn(config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(config, command);
     child.wait().expect("wait").success()
 }
 
@@ -396,6 +384,11 @@ impl TempPath {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn unique_namespace(label: &str) -> String {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("guardrail-windows-{label}-{}-{counter}", std::process::id())
 }
 
 impl Drop for TempPath {

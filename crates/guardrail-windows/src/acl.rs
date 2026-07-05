@@ -38,6 +38,7 @@ pub(crate) struct AclGuard {
 }
 
 unsafe impl Send for AclGuard {}
+unsafe impl Sync for AclGuard {}
 
 impl AclGuard {
     pub(crate) fn apply(fs: &[FsAccess], sid: PSID) -> Result<Self, Error> {

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
 
-use guardrail_core::{Error, FsAccess, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Backend, Error, FsAccess, NetworkPolicy, SandboxConfig};
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -30,8 +30,8 @@ fn run(config: &SandboxConfig, args: &[&str]) -> RunResult {
     command.env_clear();
     command.envs(&config.env);
 
-    let child = MacosBackend::new()
-        .spawn(config, command)
+    let child = MacosBackend::new(config.clone())
+        .and_then(|backend| backend.spawn(command))
         .unwrap_or_else(|err| panic!("spawn failed for {args:?}: {err:?}\nconfig: {config:#?}"));
     let output = child.into_inner().wait_with_output().expect("wait");
 
@@ -79,7 +79,7 @@ fn read_rule_does_not_grant_execute() {
     let mut command = common::probe(&["noop"]);
     command.env_clear();
     command.envs(&config.env);
-    let result = MacosBackend::new().spawn(&config, command);
+    let result = MacosBackend::new(config.clone()).and_then(|backend| backend.spawn(command));
 
     match result {
         Err(Error::Spawn(_)) => {}

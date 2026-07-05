@@ -34,9 +34,10 @@ pub struct ResourceLimits {
 ///     limits: ResourceLimits::default(),
 ///     env: BTreeMap::new(),
 ///     darwin_sandbox_profiles: vec![],
+///     windows_cache_namespace: None,
 /// };
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SandboxConfig {
     /// Filesystem rules, in the order they were declared.
     pub fs: Vec<FsAccess>,
@@ -48,12 +49,16 @@ pub struct SandboxConfig {
     pub limits: ResourceLimits,
     /// The **only** environment variables the child will see. The child's
     /// inherited environment is unconditionally cleared before these are
-    /// applied — backends expect the command's environment to already be
-    /// scrubbed by the caller.
+    /// applied by the backend.
     pub env: BTreeMap<String, String>,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending
     /// the generated profile from the portable `fs`/`network`/`ipc` policies.
     pub darwin_sandbox_profiles: Vec<PathBuf>,
+    /// Windows-only cache namespace for reusable AppContainer profiles and ACLs.
+    ///
+    /// Use distinct namespaces for sandboxes whose filesystem policies may be
+    /// active at the same time. Non-Windows backends ignore this field.
+    pub windows_cache_namespace: Option<String>,
 }

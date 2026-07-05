@@ -32,6 +32,13 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
+fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+    WindowsBackend::new(config.clone())
+        .expect("backend")
+        .spawn(command)
+        .expect("spawn")
+}
+
 fn base_config() -> SandboxConfig {
     let mut env = BTreeMap::new();
     for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
@@ -46,18 +53,19 @@ fn base_config() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],
+        windows_cache_namespace: Some(unique_namespace("diagnostics")),
     }
 }
 
 fn run(config: &SandboxConfig, command: Command) -> ExitStatus {
-    let mut child = WindowsBackend::new()
-        .spawn(config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(config, command);
     child.wait().expect("wait")
 }
 
 fn explain(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
-    WindowsBackend::new().explain(&ExplainCtx::new(config, status))
+    WindowsBackend::new(config.clone())
+        .expect("backend")
+        .explain(&ExplainCtx::new(config, status))
 }
 
 #[test]
@@ -194,9 +202,7 @@ fn violation_display_includes_summary_and_suggestion_bullets() {
 }
 
 fn run_with_watchdog(config: &SandboxConfig, command: Command, timeout: Duration) -> ExitStatus {
-    let mut child = WindowsBackend::new()
-        .spawn(config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(config, command);
     let (cancel_watchdog, watchdog, watchdog_fired) = spawn_watchdog(child.id(), timeout);
     let status = child.wait().expect("wait");
     let _ = cancel_watchdog.send(());
@@ -259,4 +265,9 @@ impl Drop for TempPath {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn unique_namespace(label: &str) -> String {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("guardrail-windows-{label}-{}-{counter}", std::process::id())
 }

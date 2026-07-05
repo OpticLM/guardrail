@@ -11,6 +11,25 @@ importers:
       '@napi-rs/cli':
         specifier: ^3.2.0
         version: 3.7.2(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)
+    optionalDependencies:
+      '@opticlm/guardrail-darwin-arm64':
+        specifier: 0.0.2
+        version: 0.0.2
+      '@opticlm/guardrail-darwin-x64':
+        specifier: 0.0.2
+        version: 0.0.2
+      '@opticlm/guardrail-linux-arm64-gnu':
+        specifier: 0.0.2
+        version: 0.0.2
+      '@opticlm/guardrail-linux-x64-gnu':
+        specifier: 0.0.2
+        version: 0.0.2
+      '@opticlm/guardrail-win32-arm64-msvc':
+        specifier: 0.0.2
+        version: 0.0.2
+      '@opticlm/guardrail-win32-x64-msvc':
+        specifier: 0.0.2
+        version: 0.0.2
 
 packages:
 
@@ -562,6 +581,44 @@ packages:
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
 
+  '@opticlm/guardrail-darwin-arm64@0.0.2':
+    resolution: {integrity: sha512-SDL9YrKZFzPEciW2a85QfDKwzIYgf3cjb5fKOD388bRlCKD/X9zimlRm6/sBbwnr4KguqCnS6PUDcwKS/aKuYw==}
+    engines: {node: '>= 22'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@opticlm/guardrail-darwin-x64@0.0.2':
+    resolution: {integrity: sha512-mIvyqr7z/kqpalFfrOHGJT1uUV1HrVaNpFBtYH9heIX2H0boJ0ahk1hS1etm+JAUyu2ir/vdMtwm7Tx6R/OLIg==}
+    engines: {node: '>= 22'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@opticlm/guardrail-linux-arm64-gnu@0.0.2':
+    resolution: {integrity: sha512-W1mNSPCHqAFQGUjbePUyzr8U4PLB2jrARJcX+IymfndX7GoNztTe+RfrFnJj+jAglm+CJUmfS96xkxOa6tSi3g==}
+    engines: {node: '>= 22'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@opticlm/guardrail-linux-x64-gnu@0.0.2':
+    resolution: {integrity: sha512-8VhP0J/RFSiKc1KKpb1WLGz65YEf99axqdP6MWqKOiY/1zDc3QvQLChhCxpU5fxGevFoEneHBW+tltUXqRzsnQ==}
+    engines: {node: '>= 22'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@opticlm/guardrail-win32-arm64-msvc@0.0.2':
+    resolution: {integrity: sha512-u6yuHvq7EyKBiYKgmNZodz/kioES7qILE3wwNeYBPJ5/gIu4eVND9Wk50sJ0yuzXYLGrwB09prYGfnDkT9rBIA==}
+    engines: {node: '>= 22'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@opticlm/guardrail-win32-x64-msvc@0.0.2':
+    resolution: {integrity: sha512-pyDMFqgJuOHYl6ysK1ltfrHb1VEX7tQx9qZ+VvCSeU4ZB/BiBDZd4zuGLCiNrVXuaXB/8MeqpG3j0QDzefnRBw==}
+    engines: {node: '>= 22'}
+    cpu: [x64]
+    os: [win32]
+
   '@tybys/wasm-util@0.10.3':
     resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
@@ -1099,6 +1156,24 @@ snapshots:
   '@octokit/types@16.0.0':
     dependencies:
       '@octokit/openapi-types': 27.0.0
+
+  '@opticlm/guardrail-darwin-arm64@0.0.2':
+    optional: true
+
+  '@opticlm/guardrail-darwin-x64@0.0.2':
+    optional: true
+
+  '@opticlm/guardrail-linux-arm64-gnu@0.0.2':
+    optional: true
+
+  '@opticlm/guardrail-linux-x64-gnu@0.0.2':
+    optional: true
+
+  '@opticlm/guardrail-win32-arm64-msvc@0.0.2':
+    optional: true
+
+  '@opticlm/guardrail-win32-x64-msvc@0.0.2':
+    optional: true
 
   '@tybys/wasm-util@0.10.3':
     dependencies:

@@ -1,4 +1,4 @@
-//! Per-run AppContainer profile creation.
+//! AppContainer profile creation and process capability helpers.
 
 #![cfg(windows)]
 
@@ -6,7 +6,6 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{Error, NetworkPolicy};
 use windows_sys::Win32::Security::Isolation::{
@@ -17,24 +16,23 @@ use windows_sys::Win32::Security::{
     WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
 };
 
-static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const SE_GROUP_ENABLED: u32 = 4;
+const ERROR_ALREADY_EXISTS: i32 = 183;
 
 pub(crate) struct AppContainerProfile {
     name: Vec<u16>,
     sid: Sid,
-    capabilities: CapabilitySet,
 }
 
 unsafe impl Send for AppContainerProfile {}
+unsafe impl Sync for AppContainerProfile {}
 
 impl AppContainerProfile {
-    pub(crate) fn create(network: NetworkPolicy) -> Result<Self, Error> {
-        let name = unique_profile_name();
-        let name_wide = wide_null(OsStr::new(&name));
+    pub(crate) fn create(name: &str) -> Result<Self, Error> {
+        let name_wide = wide_null(OsStr::new(name));
         let display = wide_null(OsStr::new("guardrail sandbox"));
-        let description = wide_null(OsStr::new("Per-run guardrail AppContainer profile"));
-        let capabilities = CapabilitySet::for_network(network)
+        let description = wide_null(OsStr::new("Reusable guardrail AppContainer profile"));
+        let capabilities = CapabilitySet::for_network(NetworkPolicy::Full)
             .map_err(|err| Error::confinement("appcontainer", err))?;
         let mut created_sid = ptr::null_mut();
 
@@ -48,7 +46,7 @@ impl AppContainerProfile {
                 &mut created_sid,
             )
         };
-        if hr < 0 {
+        if hr < 0 && hresult_code(hr) != ERROR_ALREADY_EXISTS {
             return Err(Error::confinement("appcontainer", hresult_error(hr)));
         }
         if !created_sid.is_null() {
@@ -63,7 +61,6 @@ impl AppContainerProfile {
         Ok(Self {
             name: name_wide,
             sid,
-            capabilities,
         })
     }
 
@@ -71,13 +68,12 @@ impl AppContainerProfile {
         self.sid.as_psid()
     }
 
-    pub(crate) fn security_capabilities(&mut self) -> SECURITY_CAPABILITIES {
-        SECURITY_CAPABILITIES {
-            AppContainerSid: self.sid(),
-            Capabilities: self.capabilities.as_mut_ptr(),
-            CapabilityCount: self.capabilities.len(),
-            Reserved: 0,
-        }
+    pub(crate) fn security_capabilities(
+        &self,
+        network: NetworkPolicy,
+    ) -> Result<AppContainerSecurityCapabilities, Error> {
+        AppContainerSecurityCapabilities::new(self.sid(), network)
+            .map_err(|err| Error::confinement("appcontainer", err))
     }
 }
 
@@ -163,7 +159,7 @@ pub(crate) struct CapabilitySet {
 }
 
 impl CapabilitySet {
-    fn for_network(network: NetworkPolicy) -> io::Result<Self> {
+    pub(crate) fn for_network(network: NetworkPolicy) -> io::Result<Self> {
         let mut set = Self {
             sids: Vec::new(),
             attributes: Vec::new(),
@@ -214,9 +210,29 @@ impl CapabilitySet {
     }
 }
 
-fn unique_profile_name() -> String {
-    let counter = PROFILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("guardrail-{}-{counter}", std::process::id())
+pub(crate) struct AppContainerSecurityCapabilities {
+    _capabilities: CapabilitySet,
+    raw: SECURITY_CAPABILITIES,
+}
+
+impl AppContainerSecurityCapabilities {
+    fn new(sid: PSID, network: NetworkPolicy) -> io::Result<Self> {
+        let mut capabilities = CapabilitySet::for_network(network)?;
+        let raw = SECURITY_CAPABILITIES {
+            AppContainerSid: sid,
+            Capabilities: capabilities.as_mut_ptr(),
+            CapabilityCount: capabilities.len(),
+            Reserved: 0,
+        };
+        Ok(Self {
+            _capabilities: capabilities,
+            raw,
+        })
+    }
+
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut SECURITY_CAPABILITIES {
+        &mut self.raw
+    }
 }
 
 fn wide_null(value: &OsStr) -> Vec<u16> {
@@ -224,7 +240,11 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
 }
 
 fn hresult_error(hr: i32) -> io::Error {
-    io::Error::from_raw_os_error(hr & 0xffff)
+    io::Error::from_raw_os_error(hresult_code(hr))
+}
+
+fn hresult_code(hr: i32) -> i32 {
+    hr & 0xffff
 }
 
 #[cfg(test)]
@@ -250,14 +270,6 @@ mod tests {
     fn full_network_is_distinct_from_outbound() {
         let set = CapabilitySet::for_network(NetworkPolicy::Full).expect("capabilities");
         assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn profile_names_are_unique_and_prefixed() {
-        let first = unique_profile_name();
-        let second = unique_profile_name();
-        assert!(first.starts_with("guardrail-"));
-        assert_ne!(first, second);
     }
 
     #[test]

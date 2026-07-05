@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use guardrail_core::{NetworkPolicy, SandboxConfig};
+use guardrail_core::{Backend, NetworkPolicy, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
 mod common;
@@ -15,7 +15,10 @@ fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
     let mut cmd = probe(args);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     child.wait().expect("wait").success()
 }
 

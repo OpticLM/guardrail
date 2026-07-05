@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +13,8 @@ use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+static NAMESPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn probe() -> Command {
     Command::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
@@ -25,6 +27,13 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
+fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+    WindowsBackend::new(config.clone())
+        .expect("backend")
+        .spawn(command)
+        .expect("spawn")
+}
+
 #[test]
 fn default_config_runs_command_under_job_object() {
     let config = builder_with_windows_runtime_env();
@@ -33,9 +42,7 @@ fn default_config_runs_command_under_job_object() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn under Windows Job Object");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(status.success(), "cmd /C exit 0 should succeed");
@@ -51,9 +58,7 @@ fn memory_limit_blocks_large_allocation() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -71,9 +76,7 @@ fn without_limit_the_same_allocation_succeeds() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -92,9 +95,7 @@ fn cpu_time_limit_kills_busy_loop() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn probe");
+    let mut child = spawn_child(&config, command);
     let (cancel_watchdog, watchdog, watchdog_fired) =
         spawn_watchdog(child.id(), Duration::from_secs(10));
 
@@ -128,9 +129,7 @@ fn process_limit_is_applied() {
     command.env_clear();
     command.envs(&config.env);
 
-    let mut child = WindowsBackend::new()
-        .spawn(&config, command)
-        .expect("spawn under Windows Job Object");
+    let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
 
     assert!(
@@ -181,5 +180,11 @@ fn builder_with_windows_runtime_env() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],
+        windows_cache_namespace: Some(unique_namespace("resource-limits")),
     }
+}
+
+fn unique_namespace(label: &str) -> String {
+    let counter = NAMESPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("guardrail-windows-{label}-{}-{counter}", std::process::id())
 }

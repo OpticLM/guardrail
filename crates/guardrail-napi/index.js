@@ -590,7 +590,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { SandboxChild, FsAccessKind, JsFsAccessKind, IpcPolicy, JsIpcPolicy, NetworkPolicy, JsNetworkPolicy, spawn, ViolationKind, JsViolationKind } = nativeBinding
+const { Sandbox, SandboxChild, FsAccessKind, JsFsAccessKind, IpcPolicy, JsIpcPolicy, NetworkPolicy, JsNetworkPolicy, spawn, ViolationKind, JsViolationKind } = nativeBinding
+export { Sandbox }
 export { SandboxChild }
 export { FsAccessKind }
 export { JsFsAccessKind }

@@ -25,26 +25,47 @@ mod rlimit;
 mod seccomp;
 
 /// The Linux sandbox backend.
-#[derive(Debug, Default, Clone)]
 pub struct LinuxBackend {
-    _private: (),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    config: SandboxConfig,
+    #[cfg(target_os = "linux")]
+    fs_rules: fs::CompiledRules,
+    #[cfg(target_os = "linux")]
+    seccomp_program: Option<seccompiler::BpfProgram>,
 }
 
 impl LinuxBackend {
     /// Create a new Linux backend.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(config: SandboxConfig) -> Result<Self, Error> {
+        #[cfg(target_os = "linux")]
+        {
+            let fs_rules = fs::compile(&config.fs)?;
+            let seccomp_program = seccomp::build(&config)?;
+            Ok(Self {
+                config,
+                fs_rules,
+                seccomp_program,
+            })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self { config })
+        }
     }
 }
 
 impl Backend for LinuxBackend {
     #[cfg(target_os = "linux")]
-    fn spawn(&self, config: &SandboxConfig, mut command: Command) -> Result<SandboxChild, Error> {
+    fn spawn(&self, mut command: Command) -> Result<SandboxChild, Error> {
+        command.env_clear();
+        command.envs(&self.config.env);
+
         // Clone only the data the child closure needs. The closure runs in the
-        // forked child, so it must own its inputs (no borrows of `config`).
-        let limits = config.limits;
-        let fs_rules = fs::compile(&config.fs)?;
-        let seccomp_program = seccomp::build(config)?;
+        // forked child, so it must own its inputs (no borrows of `self`).
+        let limits = self.config.limits;
+        let fs_rules = self.fs_rules.clone();
+        let seccomp_program = self.seccomp_program.clone();
 
         // SAFETY: the closure runs after fork() and before execvp() in the
         // child. NO_NEW_PRIVS and the rlimit calls are async-signal-safe; the
@@ -83,7 +104,7 @@ impl Backend for LinuxBackend {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn spawn(&self, _config: &SandboxConfig, _command: Command) -> Result<SandboxChild, Error> {
+    fn spawn(&self, _command: Command) -> Result<SandboxChild, Error> {
         Err(Error::Unsupported(
             "guardrail-linux is only available on Linux".into(),
         ))

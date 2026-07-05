@@ -38,6 +38,7 @@ pub fn base() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![],
+        windows_cache_namespace: None,
     }
 }
 
@@ -53,6 +54,7 @@ pub fn read_only_base() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![],
+        windows_cache_namespace: None,
     }
 }
 

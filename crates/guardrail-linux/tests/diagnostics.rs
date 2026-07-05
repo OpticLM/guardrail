@@ -10,7 +10,9 @@ use guardrail_linux::LinuxBackend;
 mod common;
 
 fn explain(config: &SandboxConfig, status: std::process::ExitStatus) -> Option<Violation> {
-    LinuxBackend::new().explain(&ExplainCtx::new(config, status))
+    LinuxBackend::new(config.clone())
+        .expect("backend")
+        .explain(&ExplainCtx::new(config, status))
 }
 
 fn probe(args: &[&str]) -> Command {
@@ -21,7 +23,10 @@ fn run(config: &SandboxConfig, args: &[&str]) -> std::process::ExitStatus {
     let mut cmd = probe(args);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     child.wait().expect("wait")
 }
 

@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use guardrail_core::Backend;
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -29,7 +30,9 @@ fn custom_profile_is_loaded_and_applied() {
         .stderr(std::process::Stdio::piped());
     command.env_clear();
     command.envs(&config.env);
-    let child = MacosBackend::new().spawn(&config, command).expect("spawn");
+    let child = MacosBackend::new(config.clone())
+        .and_then(|backend| backend.spawn(command))
+        .expect("spawn");
     let output = child.into_inner().wait_with_output().expect("wait");
 
     assert!(

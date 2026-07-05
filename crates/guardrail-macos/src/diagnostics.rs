@@ -240,7 +240,9 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt;
 
-    use guardrail_core::{ExplainCtx, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, ViolationKind};
+    use guardrail_core::{
+        ExplainCtx, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, ViolationKind,
+    };
 
     use super::*;
 
@@ -252,6 +254,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         }
     }
 
@@ -333,6 +336,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let text = "Sandbox: curl(123) deny(1) network-outbound 93.184.216.34:443";
 
@@ -371,9 +375,14 @@ mod tests {
             fs: vec![],
             network: NetworkPolicy::Deny,
             ipc: IpcPolicy::Strict,
-            limits: ResourceLimits { memory_bytes: None, cpu_time_secs: Some(1), max_processes: None },
+            limits: ResourceLimits {
+                memory_bytes: None,
+                cpu_time_secs: Some(1),
+                max_processes: None,
+            },
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
 
         let violation =

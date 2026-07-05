@@ -264,6 +264,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         }
     }
 
@@ -286,6 +287,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build_with_imports(
             &config,
@@ -331,6 +333,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -364,6 +367,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -404,6 +408,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -428,6 +433,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -447,6 +453,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -467,6 +474,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -487,6 +495,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -512,6 +521,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -542,6 +552,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -578,6 +589,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -594,6 +606,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -610,6 +623,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 
@@ -629,6 +643,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            windows_cache_namespace: None,
         };
         let profile = build(&config);
 

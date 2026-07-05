@@ -11,7 +11,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use guardrail_core::{Error, FsAccess};
+use guardrail_core::{Backend, Error, FsAccess};
 use guardrail_linux::LinuxBackend;
 use tempfile::TempDir;
 
@@ -26,7 +26,10 @@ fn allowed(config: &guardrail_core::SandboxConfig, args: &[&str]) -> bool {
     let mut cmd = probe(args);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let mut child = LinuxBackend::new().spawn(config, cmd).expect("spawn");
+    let mut child = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
     child.wait().expect("wait").success()
 }
 
@@ -52,7 +55,9 @@ fn read_rule_does_not_grant_execute() {
     let mut cmd = probe(&["echo-env", "PATH"]);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let result = LinuxBackend::new().spawn(&config, cmd);
+    let result = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd);
 
     match result {
         Err(Error::Spawn(err)) => assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied),
@@ -84,7 +89,9 @@ fn write_rule_does_not_grant_execute() {
     let mut cmd = Command::new(&copied_probe);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let result = LinuxBackend::new().spawn(&config, cmd);
+    let result = LinuxBackend::new(config.clone())
+        .expect("backend")
+        .spawn(cmd);
 
     match result {
         Err(Error::Spawn(err)) => assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied),
@@ -109,7 +116,9 @@ fn execute_rule_does_not_grant_read() {
     let secret_s = secret.to_str().unwrap();
 
     let mut config = common::base();
-    config.fs.extend([FsAccess::ExecuteAllow(tmp.path().into())]);
+    config
+        .fs
+        .extend([FsAccess::ExecuteAllow(tmp.path().into())]);
     assert!(
         !allowed(&config, &["read-file", secret_s]),
         "execute grants must not imply read access"
@@ -289,7 +298,7 @@ fn missing_deny_descendant_inside_allow_fails_before_spawn() {
     let mut cmd = probe(&["echo-env", "PATH"]);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let result = LinuxBackend::new().spawn(&config, cmd);
+    let result = LinuxBackend::new(config);
 
     assert!(matches!(
         result,
