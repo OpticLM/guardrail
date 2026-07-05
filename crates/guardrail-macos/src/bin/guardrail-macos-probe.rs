@@ -2,8 +2,10 @@
 //!
 //! Usage: `guardrail-macos-probe <COMMAND> [ARG]`
 
+#[cfg(target_os = "macos")]
 use std::process::exit;
 
+#[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
@@ -20,7 +22,6 @@ fn main() {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
         "socket-inet" => {
             // SAFETY: socket() takes scalar args; close the fd if created.
             let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
@@ -42,7 +43,6 @@ fn main() {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
         "apply-profile" => {
             let path = args.get(2).map(String::as_str).unwrap_or("");
             let profile = std::fs::read_to_string(path).unwrap_or_else(|err| {
@@ -65,3 +65,6 @@ fn main() {
         }
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}

@@ -46,7 +46,7 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Test workspace
-        run: cargo test --workspace --all-targets
+      - name: Test default packages
+        run: cargo test --all-targets
       - name: Test native platform backend
         run: cargo test -p ${{ matrix.native_package }} --all-targets

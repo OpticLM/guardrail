@@ -10,18 +10,9 @@ repository.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-guardrail-core.workspace = true
+guardrail.workspace = true
 napi = { version = "3", default-features = false, features = ["napi6"] }
 napi-derive = "3"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-guardrail-linux.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-guardrail-macos.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-guardrail-windows.workspace = true
 
 [build-dependencies]
 napi-build = "2"

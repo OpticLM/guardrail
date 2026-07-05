@@ -14,24 +14,13 @@ use napi::Task;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use guardrail_core::{
-    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxConfig, SharedSandboxChild,
-    ViolationKind,
+use guardrail::{
+    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig,
+    SharedSandboxChild, ViolationKind,
 };
 
-// Compile-time backend selection: each published binary targets exactly one OS,
-// so the correct backend is chosen at build time. Diagnostics come from the
-// backend's `Backend::explain` override, so there is no separate `explain`
-// import to keep in sync with the backend ladder.
-#[cfg(target_os = "linux")]
-use guardrail_linux::LinuxBackend as PlatformBackend;
-#[cfg(target_os = "macos")]
-use guardrail_macos::MacosBackend as PlatformBackend;
-#[cfg(target_os = "windows")]
-use guardrail_windows::WindowsBackend as PlatformBackend;
-
 /// Network confinement level for the child: `"deny"` | `"outbound-only"` |
-/// `"full"`. Mirrors `guardrail_core::NetworkPolicy`; the string values are the
+/// `"full"`. Mirrors `guardrail::NetworkPolicy`; the string values are the
 /// ones typed by the JS caller.
 #[napi(string_enum, js_name = "NetworkPolicy")]
 pub enum JsNetworkPolicy {
@@ -54,7 +43,7 @@ impl From<JsNetworkPolicy> for NetworkPolicy {
 }
 
 /// IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
-/// `guardrail_core::IpcPolicy`.
+/// `guardrail::IpcPolicy`.
 #[napi(string_enum, js_name = "IpcPolicy")]
 pub enum JsIpcPolicy {
     #[napi(value = "strict")]
@@ -73,7 +62,7 @@ impl From<JsIpcPolicy> for IpcPolicy {
 }
 
 /// The category of a suspected policy violation: `"seccomp"` | `"resource-limit"`
-/// | `"filesystem"` | `"unknown"`. Mirrors `guardrail_core::ViolationKind`.
+/// | `"filesystem"` | `"unknown"`. Mirrors `guardrail::ViolationKind`.
 #[napi(string_enum, js_name = "ViolationKind")]
 pub enum JsViolationKind {
     #[napi(value = "seccomp")]
@@ -240,7 +229,7 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
         env = e.into_iter().collect();
     }
 
-    let mut limits = guardrail_core::ResourceLimits::default();
+    let mut limits = guardrail::ResourceLimits::default();
     if let Some(m) = opts.memory_limit_mb {
         limits.memory_bytes = Some(u64::from(m) * 1024 * 1024);
     }
@@ -284,7 +273,7 @@ impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
     }
 }
 
-fn to_napi_err(e: guardrail_core::Error) -> Error {
+fn to_napi_err(e: guardrail::Error) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
 

@@ -491,6 +491,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "guardrail"
+version = "0.1.0"
+dependencies = [
+ "guardrail-core",
+ "guardrail-linux",
+ "guardrail-macos",
+ "guardrail-windows",
+]
+
+[[package]]
 name = "guardrail-core"
 version = "0.1.0"
 dependencies = [
@@ -522,10 +532,7 @@ dependencies = [
 name = "guardrail-napi"
 version = "0.1.0"
 dependencies = [
- "guardrail-core",
- "guardrail-linux",
- "guardrail-macos",
- "guardrail-windows",
+ "guardrail",
  "napi",
  "napi-build",
  "napi-derive",

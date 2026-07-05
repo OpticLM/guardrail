@@ -1,7 +1,6 @@
 //! macOS backend support for `guardrail`.
 //!
-//! Profile generation is platform-independent and tested on Linux. Native
-//! Seatbelt application is available on macOS.
+//! Profile generation is pure Rust; Seatbelt application is native macOS.
 //!
 //! # Tips: common macOS runtime grants
 //!
@@ -29,148 +28,16 @@
 //! in your profile. Set `darwin_sandbox_profiles` on `SandboxConfig` for the
 //! custom-profile escape hatch.
 
+#[cfg(target_os = "macos")]
+mod backend;
+#[cfg(target_os = "macos")]
 pub mod diagnostics;
-#[allow(dead_code)]
+#[cfg(target_os = "macos")]
 mod profile;
 #[cfg(target_os = "macos")]
 mod rlimit;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "macos")]
 mod seatbelt;
 
 #[cfg(target_os = "macos")]
-use std::os::unix::process::CommandExt;
-use std::process::Command;
-
-use guardrail_core::{Backend, Error, ExplainCtx, SandboxChild, SandboxConfig, Violation};
-
-/// The macOS sandbox backend.
-pub struct MacosBackend {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    config: SandboxConfig,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    seatbelt_profile: profile::SeatbeltProfile,
-}
-
-impl MacosBackend {
-    /// Create a new macOS backend.
-    pub fn new(config: SandboxConfig) -> Result<Self, Error> {
-        let seatbelt_profile = seatbelt::resolve(&config)?;
-        Ok(Self {
-            config,
-            seatbelt_profile,
-        })
-    }
-}
-
-impl Backend for MacosBackend {
-    #[cfg(target_os = "macos")]
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild, Error> {
-        command.env_clear();
-        command.envs(&self.config.env);
-
-        let seatbelt_profile = self.seatbelt_profile.clone();
-        let limits = self.config.limits;
-
-        // SAFETY: the closure runs after fork() and before execvp() in the
-        // child. It only applies rlimits and calls Apple's sandbox_init wrapper,
-        // returning io::Error instead of panicking.
-        unsafe {
-            command.pre_exec(move || {
-                rlimit::apply(&limits)?;
-                seatbelt::apply(&seatbelt_profile).map_err(std::io::Error::other)?;
-                Ok(())
-            });
-        }
-
-        let child = command.spawn().map_err(Error::Spawn)?;
-        Ok(SandboxChild::from(child))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn spawn(&self, _command: Command) -> Result<SandboxChild, Error> {
-        Err(Error::Unsupported(
-            "guardrail-macos backend only supports target_os = \"macos\"".into(),
-        ))
-    }
-
-    // Not cfg-gated: the explanation is pure text/exit-status logic (the Unix
-    // signal handling is delegated to core's cfg(unix) helper), so it compiles
-    // everywhere and the Seatbelt denial parsing stays unit-testable on Linux.
-    fn explain(&self, ctx: &ExplainCtx<'_>) -> Option<Violation> {
-        diagnostics::explain(ctx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    #[cfg(not(target_os = "macos"))]
-    use guardrail_core::{Backend, Error};
-    use guardrail_core::{IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
-
-    #[test]
-    fn crate_smoke_test_builds_a_default_config() {
-        let config = SandboxConfig {
-            fs: vec![],
-            network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
-            limits: ResourceLimits::default(),
-            env: BTreeMap::new(),
-            darwin_sandbox_profiles: vec![],
-            windows_cache_namespace: None,
-        };
-        assert!(config.fs.is_empty());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn backend_returns_unsupported_on_non_macos() {
-        let config = SandboxConfig {
-            fs: vec![],
-            network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
-            limits: ResourceLimits::default(),
-            env: BTreeMap::new(),
-            darwin_sandbox_profiles: vec![],
-            windows_cache_namespace: None,
-        };
-        let backend = super::MacosBackend::new(config).expect("backend");
-
-        let err = backend
-            .spawn(std::process::Command::new("true"))
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            Error::Unsupported(message)
-                if message == "guardrail-macos backend only supports target_os = \"macos\""
-        ));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn backend_construction_resolves_custom_profiles() {
-        let config = SandboxConfig {
-            fs: vec![],
-            network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
-            limits: ResourceLimits::default(),
-            env: BTreeMap::new(),
-            darwin_sandbox_profiles: vec!["/definitely/missing/profile.sb".into()],
-            windows_cache_namespace: None,
-        };
-        let err = match super::MacosBackend::new(config) {
-            Ok(_) => panic!("missing profile must fail backend construction"),
-            Err(err) => err,
-        };
-
-        assert!(matches!(
-            err,
-            Error::Confinement {
-                stage: "seatbelt-profile",
-                ..
-            }
-        ));
-    }
-}
+pub use backend::MacosBackend;

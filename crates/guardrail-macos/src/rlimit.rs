@@ -4,9 +4,6 @@ use std::io;
 
 use guardrail_core::ResourceLimits;
 
-#[cfg(target_os = "linux")]
-type RlimitResource = libc::__rlimit_resource_t;
-#[cfg(not(target_os = "linux"))]
 type RlimitResource = libc::c_int;
 
 /// Apply `limits` to the current process. Called from within `pre_exec` in the

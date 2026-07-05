@@ -65,14 +65,14 @@ export type FsAccessKind =  'read-allow'|
 
 /**
  * IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
- * `guardrail_core::IpcPolicy`.
+ * `guardrail::IpcPolicy`.
  */
 export type IpcPolicy =  'strict'|
 'relaxed';
 
 /**
  * Network confinement level for the child: `"deny"` | `"outbound-only"` |
- * `"full"`. Mirrors `guardrail_core::NetworkPolicy`; the string values are the
+ * `"full"`. Mirrors `guardrail::NetworkPolicy`; the string values are the
  * ones typed by the JS caller.
  */
 export type NetworkPolicy =  'deny'|
@@ -164,7 +164,7 @@ export interface Violation {
 
 /**
  * The category of a suspected policy violation: `"seccomp"` | `"resource-limit"`
- * | `"filesystem"` | `"unknown"`. Mirrors `guardrail_core::ViolationKind`.
+ * | `"filesystem"` | `"unknown"`. Mirrors `guardrail::ViolationKind`.
  */
 export type ViolationKind =  'seccomp'|
 'resource-limit'|

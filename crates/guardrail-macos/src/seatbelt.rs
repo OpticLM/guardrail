@@ -25,17 +25,9 @@ pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile, Error> 
     Ok(profile)
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn apply(profile: &SeatbeltProfile) -> Result<(), Error> {
     painless_belt::ffi::sandbox_init(&profile.source, 0)
         .map_err(|err| Error::confinement("seatbelt", io::Error::other(err.to_string())))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn apply(_profile: &SeatbeltProfile) -> Result<(), Error> {
-    Err(Error::Unsupported(
-        "Seatbelt is only available on macOS".into(),
-    ))
 }
 
 fn validate(source: &str) -> Result<(), Error> {

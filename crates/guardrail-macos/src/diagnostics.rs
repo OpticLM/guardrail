@@ -235,10 +235,7 @@ fn escape_builder_string(value: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
-    #[cfg(windows)]
-    use std::os::windows::process::ExitStatusExt;
 
     use guardrail_core::{
         ExplainCtx, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, ViolationKind,
@@ -259,17 +256,9 @@ mod tests {
     }
 
     fn exit_status(code: i32) -> ExitStatus {
-        #[cfg(unix)]
-        {
-            ExitStatus::from_raw(code << 8)
-        }
-        #[cfg(windows)]
-        {
-            ExitStatus::from_raw(code as u32)
-        }
+        ExitStatus::from_raw(code << 8)
     }
 
-    #[cfg(unix)]
     fn signaled_status(signal: i32) -> ExitStatus {
         ExitStatus::from_raw(signal)
     }

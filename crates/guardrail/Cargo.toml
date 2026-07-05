@@ -1,0 +1,19 @@
+[package]
+name = "guardrail"
+description = "Cross-platform guardrail sandbox facade selecting the native backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+guardrail-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+guardrail-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+guardrail-macos.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+guardrail-windows.workspace = true
