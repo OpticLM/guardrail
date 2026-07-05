@@ -385,6 +385,473 @@ Tested result: `gh --version` completed with `network: 'deny'`, and
 `gh api rate_limit --jq .resources.core.limit` completed with
 `network: 'outbound-only'`.
 
+## macOS Setup Guide
+
+This section is macOS-specific. It was tested on Darwin 24.6.0 arm64 with Node
+24.15.0, pnpm 11.7.0, Cargo 1.96.0, Go 1.26.4, Git 2.53.0, jj 0.43.0, and
+GitHub CLI 2.96.0.
+
+macOS uses Seatbelt profiles. Guardrail still generates a literal `(deny
+default)` profile from your `fs`, `network`, and `ipc` options, but macOS
+developer tools also need a few runtime operations that are not filesystem
+paths. Use `darwinSandboxProfiles` to import those explicit `.sb` grants.
+
+### Built-in Profile Choice
+
+Use Apple's built-in `dyld-support.sb` as the first imported profile:
+
+```js
+const darwinRuntimeProfile =
+  '/System/Library/Sandbox/Profiles/dyld-support.sb'
+```
+
+This was the narrowest useful built-in preset found under
+`/System/Library/Sandbox/Profiles`: it let a dynamically linked `/usr/bin/true`
+run when paired with explicit Guardrail read/execute grants. `bsd.sb` also ran
+that probe, but imports `system.sb` and grants a much broader set of system
+reads, sysctls, IPC, and Mach lookups. `application.sb` and `container.sb`
+expect Apple app-sandbox parameters that Guardrail does not provide, and failed
+as imports in this setup.
+
+Apple marks these system profiles as private interface, so treat the path as a
+tested macOS baseline, not a stable public API. Re-test it on each macOS release
+you support.
+
+### Baseline Policy
+
+Start with one writable workspace root, one writable temp root, explicit system
+runtime reads, and `dyld-support.sb`:
+
+```js
+import { mkdir, writeFile } from 'node:fs/promises'
+
+const profileRoot = `${workRoot}-profiles`
+
+await mkdir(workRoot, { recursive: true })
+await mkdir(tmpRoot, { recursive: true })
+await mkdir(profileRoot, { recursive: true })
+await mkdir(`${workRoot}/home`, { recursive: true })
+await mkdir(`${workRoot}/xdg-cache`, { recursive: true })
+await mkdir(`${workRoot}/xdg-config`, { recursive: true })
+
+const xdgCache = `${workRoot}/xdg-cache`
+const xdgConfig = `${workRoot}/xdg-config`
+const darwinRuntimeProfile =
+  '/System/Library/Sandbox/Profiles/dyld-support.sb'
+
+const fs = [
+  // Shells, system CLIs, dyld/libSystem, frameworks, certificates, and DNS.
+  { kind: 'read-allow', path: '/bin' },
+  { kind: 'execute-allow', path: '/bin' },
+  { kind: 'read-allow', path: '/usr/bin' },
+  { kind: 'execute-allow', path: '/usr/bin' },
+  { kind: 'read-allow', path: '/usr/lib' },
+  { kind: 'execute-allow', path: '/usr/lib' },
+  { kind: 'read-allow', path: '/System' },
+  { kind: 'execute-allow', path: '/System' },
+  { kind: 'read-allow', path: '/etc' },
+  { kind: 'read-allow', path: '/private/etc' },
+  { kind: 'read-allow', path: '/dev/urandom' },
+  { kind: 'read-allow', path: '/dev/random' },
+  { kind: 'read-allow', path: '/dev/null' },
+  { kind: 'write-allow', path: '/dev/null' },
+
+  // Your controlled area.
+  { kind: 'read-allow', path: workRoot },
+  { kind: 'write-allow', path: workRoot },
+  { kind: 'execute-allow', path: workRoot },
+  { kind: 'read-allow', path: tmpRoot },
+  { kind: 'write-allow', path: tmpRoot },
+  { kind: 'execute-allow', path: tmpRoot },
+]
+
+const env = {
+  PATH: '/usr/bin:/bin',
+  HOME: `${workRoot}/home`,
+  TMPDIR: tmpRoot,
+  LANG: 'C.UTF-8',
+  LC_ALL: 'C.UTF-8',
+}
+```
+
+Notes:
+
+- Use real macOS paths. `/tmp` is normally a symlink to `/private/tmp`; using a
+  resolved `workRoot` and `tmpRoot` makes the profile easier to reason about.
+- Create every workspace, profile, home, cache, config, and temp directory
+  before calling `Sandbox.build()`. Missing imported `.sb` paths fail while
+  building the backend.
+- Keep imported `.sb` files outside any path the child can write. The backend
+  validates imports during `Sandbox.build()`, but Seatbelt still imports by path
+  when each child applies the profile.
+- Keep mutable tool state under `workRoot`. Do not point `HOME`, `CARGO_HOME`,
+  `GOCACHE`, `GOMODCACHE`, `PNPM_HOME`, npm cache, or XDG cache/config at your
+  real home directory unless you want the sandboxed tool to read or mutate it.
+- `network: 'outbound-only'` is enough for HTTPS client requests on macOS in
+  these tests. Use `network: 'full'` only for tools that need inbound sockets.
+- `IpcPolicy` is effectively a no-op on macOS today. Use an imported `.sb`
+  profile for macOS-specific IPC or Mach permissions.
+
+### Developer Tool Profile
+
+Many developer tools fork helper processes and query sysctls. `dyld-support.sb`
+alone was enough for `grep`, but Cargo aborted with `SIGABRT` and pnpm exited
+128 without the extra profile below.
+
+Create this small profile in a non-writable setup area and import it after
+`dyld-support.sb` for Cargo, pnpm, Go, Git, jj, and `gh`:
+
+```js
+const devToolsProfile = `${profileRoot}/guardrail-dev-tools.sb`
+
+await writeFile(
+  devToolsProfile,
+  `(version 1)
+(allow process-fork)
+(allow signal (target self) (target children))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow file-test-existence)
+`,
+)
+
+const darwinDeveloperProfiles = [darwinRuntimeProfile, devToolsProfile]
+```
+
+This is intentionally literal. If `allow sysctl-read` is too broad for your
+threat model, replace it with the exact `(sysctl-name "...")` grants your
+workload needs after tracing failures on your target macOS version.
+
+### Coreutils
+
+For tools such as `ls`, `cat`, and `grep`, the baseline policy plus
+`dyld-support.sb` is enough when target files live under `workRoot`:
+
+```js
+const sandbox = await Sandbox.build({
+  fs,
+  env,
+  network: 'deny',
+  ipc: 'strict',
+  darwinSandboxProfiles: [darwinRuntimeProfile],
+})
+
+await sandbox.spawn('/usr/bin/grep', ['-q', 'needle', 'alpha.txt'], {
+  cwd: `${workRoot}/coreutils-demo`,
+}).wait()
+```
+
+Tested result: `grep -q needle alpha.txt` completed successfully.
+
+### Cargo
+
+Use the real Rust sysroot as read/execute input, grant the Xcode or Command
+Line Tools developer directory for the linker and SDK, and keep Cargo state and
+build artifacts under the sandbox workspace:
+
+```js
+const rustSysroot =
+  '/Users/me/.rustup/toolchains/stable-aarch64-apple-darwin'
+const xcodeDeveloperDir = '/Applications/Xcode.app/Contents/Developer'
+const sdkRoot =
+  `${xcodeDeveloperDir}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`
+const clang =
+  `${xcodeDeveloperDir}/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang`
+const rustTriple = 'aarch64-apple-darwin' // x86_64-apple-darwin on Intel Macs.
+const cargoHome = `${workRoot}/cargo-home`
+const targetDir = `${workRoot}/rust-project/target`
+
+const cargoSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: rustSysroot },
+    { kind: 'execute-allow', path: rustSysroot },
+    { kind: 'read-allow', path: xcodeDeveloperDir },
+    { kind: 'execute-allow', path: xcodeDeveloperDir },
+    { kind: 'read-allow', path: cargoHome },
+    { kind: 'write-allow', path: cargoHome },
+    { kind: 'execute-allow', path: cargoHome },
+  ],
+  env: {
+    ...env,
+    PATH: `${rustSysroot}/bin:/usr/bin:/bin`,
+    CARGO_HOME: cargoHome,
+    CARGO_TARGET_DIR: targetDir,
+    CARGO_TERM_COLOR: 'never',
+    RUSTUP_TOOLCHAIN: 'stable-aarch64-apple-darwin',
+    SDKROOT: sdkRoot,
+    [`CARGO_TARGET_${rustTriple.toUpperCase().replaceAll('-', '_')}_LINKER`]:
+      clang,
+  },
+  network: 'deny',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await cargoSandbox.spawn(`${rustSysroot}/bin/cargo`, ['build', '--offline'], {
+  cwd: `${workRoot}/rust-project`,
+}).wait()
+```
+
+Tested result: a dependency-free Rust binary built successfully with
+`cargo build --offline`.
+
+### pnpm
+
+pnpm needs read/execute access to the pnpm installation and to the Node runtime
+it executes, plus writable project, store, npm cache, XDG cache/config, home,
+and temp paths. Package downloads worked with `network: 'outbound-only'`.
+
+```js
+const nodeRoot = '/Users/me/.nvm/versions/node/v24.15.0'
+const pnpmRoot = '/Users/me/Library/pnpm'
+const pnpmStore = `${workRoot}/pnpm-store`
+const pnpmCache = `${workRoot}/pnpm-cache`
+const pnpmHome = `${workRoot}/pnpm-home`
+
+await mkdir(pnpmHome, { recursive: true })
+
+const pnpmSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: nodeRoot },
+    { kind: 'execute-allow', path: nodeRoot },
+    { kind: 'read-allow', path: pnpmRoot },
+    { kind: 'execute-allow', path: pnpmRoot },
+    { kind: 'read-allow', path: pnpmStore },
+    { kind: 'write-allow', path: pnpmStore },
+    { kind: 'execute-allow', path: pnpmStore },
+    { kind: 'read-allow', path: pnpmCache },
+    { kind: 'write-allow', path: pnpmCache },
+    { kind: 'execute-allow', path: pnpmCache },
+    { kind: 'read-allow', path: xdgCache },
+    { kind: 'write-allow', path: xdgCache },
+    { kind: 'execute-allow', path: xdgCache },
+    { kind: 'read-allow', path: xdgConfig },
+    { kind: 'write-allow', path: xdgConfig },
+    { kind: 'execute-allow', path: xdgConfig },
+  ],
+  env: {
+    ...env,
+    PATH: `${pnpmRoot}/bin:/usr/bin:/bin`,
+    PNPM_HOME: pnpmHome,
+    npm_config_cache: pnpmCache,
+    npm_config_update_notifier: 'false',
+    XDG_CACHE_HOME: xdgCache,
+    XDG_CONFIG_HOME: xdgConfig,
+    CI: '1',
+  },
+  network: 'outbound-only',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await pnpmSandbox.spawn(
+  `${pnpmRoot}/bin/pnpm`,
+  ['add', 'is-number@7.0.0', '--store-dir', pnpmStore],
+  { cwd: `${workRoot}/node-project` },
+).wait()
+```
+
+Tested result: `pnpm add is-number@7.0.0` and
+`pnpm add left-pad@1.3.0` completed successfully with
+`network: 'outbound-only'`.
+
+### Go
+
+Grant read/execute access to `GOROOT`, keep writable Go state in the sandbox
+workspace, and set `GOTOOLCHAIN: 'local'` so Go does not try to download a
+different toolchain. The example below disables cgo; if you enable cgo, also
+grant the Xcode developer directory and SDK as in the Cargo section.
+
+```js
+const goRoot = '/usr/local/go' // or /opt/homebrew/opt/go/libexec
+const goPath = `${workRoot}/go-path`
+const goCache = `${workRoot}/go-cache`
+const goModCache = `${workRoot}/go-mod-cache`
+
+const goSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: goRoot },
+    { kind: 'execute-allow', path: goRoot },
+    { kind: 'read-allow', path: goPath },
+    { kind: 'write-allow', path: goPath },
+    { kind: 'execute-allow', path: goPath },
+    { kind: 'read-allow', path: goCache },
+    { kind: 'write-allow', path: goCache },
+    { kind: 'execute-allow', path: goCache },
+    { kind: 'read-allow', path: goModCache },
+    { kind: 'write-allow', path: goModCache },
+    { kind: 'execute-allow', path: goModCache },
+  ],
+  env: {
+    ...env,
+    PATH: `${goRoot}/bin:/usr/bin:/bin`,
+    GOROOT: goRoot,
+    GOPATH: goPath,
+    GOCACHE: goCache,
+    GOMODCACHE: goModCache,
+    GOTOOLCHAIN: 'local',
+    CGO_ENABLED: '0',
+  },
+  network: 'deny',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await goSandbox.spawn(`${goRoot}/bin/go`, ['build', './...'], {
+  cwd: `${workRoot}/go-project`,
+}).wait()
+```
+
+Tested result: `go build ./...` completed successfully for a local module with
+no external downloads.
+
+### Git
+
+Git works with the baseline policy, the developer tool profile, a readable
+Git installation, and writable config/cache paths. Keep repository contents
+under `workRoot`.
+
+```js
+const gitRoot = '/opt/homebrew/opt/git' // or another resolved Git install root.
+const gitBin = `${gitRoot}/bin/git`
+
+const gitSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: gitRoot },
+    { kind: 'execute-allow', path: gitRoot },
+    { kind: 'read-allow', path: xdgConfig },
+    { kind: 'write-allow', path: xdgConfig },
+    { kind: 'execute-allow', path: xdgConfig },
+  ],
+  env: {
+    ...env,
+    PATH: `${gitRoot}/bin:/usr/bin:/bin`,
+    XDG_CONFIG_HOME: xdgConfig,
+  },
+  network: 'deny',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await gitSandbox.spawn(gitBin, ['init'], {
+  cwd: `${workRoot}/repo`,
+}).wait()
+await gitSandbox.spawn(gitBin, ['status', '--short'], {
+  cwd: `${workRoot}/repo`,
+}).wait()
+```
+
+Tested result: `git init` and `git status --short` completed successfully.
+
+### jj
+
+jj works with the same developer tool profile. Keep jj config in the sandbox or
+pass identity with `--config` for commands that create commits. For prompt-like
+read-only status, pass `--ignore-working-copy` so jj does not snapshot the
+working copy.
+
+```js
+const jjRoot = '/Users/me/.cargo'
+const jjBin = `${jjRoot}/bin/jj`
+const jjConfig = [
+  '--config',
+  'user.name="Guardrail"',
+  '--config',
+  'user.email="guardrail@example.invalid"',
+]
+
+const jjSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: jjRoot },
+    { kind: 'execute-allow', path: jjRoot },
+    { kind: 'read-allow', path: xdgConfig },
+    { kind: 'write-allow', path: xdgConfig },
+    { kind: 'execute-allow', path: xdgConfig },
+  ],
+  env: {
+    ...env,
+    PATH: `${jjRoot}/bin:/usr/bin:/bin`,
+    XDG_CONFIG_HOME: xdgConfig,
+  },
+  network: 'deny',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await jjSandbox.spawn(jjBin, [...jjConfig, 'git', 'init', '--colocate'], {
+  cwd: `${workRoot}/jj-repo`,
+}).wait()
+await jjSandbox.spawn(
+  jjBin,
+  [...jjConfig, '--ignore-working-copy', 'status'],
+  { cwd: `${workRoot}/jj-repo` },
+).wait()
+await jjSandbox.spawn(
+  jjBin,
+  [...jjConfig, '--ignore-working-copy', '--no-pager', 'log'],
+  { cwd: `${workRoot}/jj-repo` },
+).wait()
+```
+
+Tested result: `jj git init --colocate`, `jj --ignore-working-copy status`, and
+`jj --ignore-working-copy --no-pager log` completed successfully.
+
+### GitHub CLI (`gh`)
+
+Local commands such as `gh --version` work with `network: 'deny'`. API calls
+need `network: 'outbound-only'` and a `GH_TOKEN` or existing credentials inside
+the sandboxed environment; otherwise `gh api` exits before making the request.
+
+```js
+const ghRoot = '/opt/homebrew/opt/gh'
+const ghBin = `${ghRoot}/bin/gh`
+const ghEnv = {
+  ...env,
+  PATH: `${ghRoot}/bin:/usr/bin:/bin`,
+  XDG_CACHE_HOME: xdgCache,
+  XDG_CONFIG_HOME: xdgConfig,
+}
+
+if (process.env.GH_TOKEN) {
+  ghEnv.GH_TOKEN = process.env.GH_TOKEN
+}
+
+const ghSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: ghRoot },
+    { kind: 'execute-allow', path: ghRoot },
+    { kind: 'read-allow', path: xdgCache },
+    { kind: 'write-allow', path: xdgCache },
+    { kind: 'execute-allow', path: xdgCache },
+    { kind: 'read-allow', path: xdgConfig },
+    { kind: 'write-allow', path: xdgConfig },
+    { kind: 'execute-allow', path: xdgConfig },
+  ],
+  env: ghEnv,
+  network: 'outbound-only',
+  ipc: 'strict',
+  darwinSandboxProfiles: darwinDeveloperProfiles,
+})
+
+await ghSandbox.spawn(
+  ghBin,
+  ['api', 'rate_limit', '--jq', '.resources.core.limit'],
+  { cwd: workRoot },
+).wait()
+```
+
+Tested result: `gh --version` completed successfully with `network: 'deny'`.
+This test host had no `GH_TOKEN`, so `gh api rate_limit` exited with GitHub
+CLI's authentication prompt both outside and inside Guardrail. The same macOS
+policy and `network: 'outbound-only'` completed an HTTPS request to
+`https://api.github.com/rate_limit` with `/usr/bin/curl`.
+
 ## Diagnostics
 
 `wait()` resolves to `{ code, signal, success, violation? }`. Diagnostics are
@@ -405,6 +872,12 @@ too tight for the tool. A plain nonzero exit with "Permission denied" or
 `Invalid cross-device link` in the tool's stderr usually means a filesystem
 grant or current Landlock limitation is involved.
 
+On macOS, `signal: 6 (SIGABRT)` from an otherwise normal CLI often means
+Seatbelt denied a runtime operation such as process fork, sysctl read, metadata
+lookup, or a path access. If `spawn()` rejects with `Invalid argument` and
+stderr says `sandbox initialization failed`, inspect the imported `.sb` profile
+syntax and make sure the profile does not require Apple app-sandbox parameters.
+
 ## API Notes
 
 - The sandbox denies everything by default. Grant exactly the access the child
@@ -421,5 +894,5 @@ grant or current Landlock limitation is involved.
 
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
   Unix and is unsupported on Windows in that state.
-- `windowsCacheNamespace` is Windows-only and ignored on Linux.
-- `darwinSandboxProfiles` is macOS-only and ignored on Linux.
+- `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS.
+- `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows.
