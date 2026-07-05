@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use guardrail_core::{FsAccess, SandboxBuilder};
+use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
@@ -26,12 +27,14 @@ fn probe_dir() -> PathBuf {
 
 #[test]
 fn default_config_runs_command_under_job_object() {
-    let config = builder_with_windows_runtime_env().build();
+    let config = builder_with_windows_runtime_env();
     let mut command = Command::new("cmd");
     command.args(["/C", "exit", "0"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn under Windows Job Object");
     let status = child.wait().expect("wait");
 
@@ -40,15 +43,16 @@ fn default_config_runs_command_under_job_object() {
 
 #[test]
 fn memory_limit_blocks_large_allocation() {
-    let config = builder_with_windows_runtime_env()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .memory_limit_mb(64)
-        .build();
+    let mut config = builder_with_windows_runtime_env();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.limits.memory_bytes = Some(64 * 1024 * 1024);
     let mut command = probe();
     command.args(["alloc", "512"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -60,14 +64,15 @@ fn memory_limit_blocks_large_allocation() {
 
 #[test]
 fn without_limit_the_same_allocation_succeeds() {
-    let config = builder_with_windows_runtime_env()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .build();
+    let mut config = builder_with_windows_runtime_env();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
     command.args(["alloc", "512"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -79,15 +84,16 @@ fn without_limit_the_same_allocation_succeeds() {
 
 #[test]
 fn cpu_time_limit_kills_busy_loop() {
-    let config = builder_with_windows_runtime_env()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .cpu_time_limit_secs(1)
-        .build();
+    let mut config = builder_with_windows_runtime_env();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.limits.cpu_time_secs = Some(1);
     let mut command = probe();
     command.arg("spin");
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let (cancel_watchdog, watchdog, watchdog_fired) =
         spawn_watchdog(child.id(), Duration::from_secs(10));
@@ -115,12 +121,15 @@ fn cpu_time_limit_kills_busy_loop() {
 #[test]
 #[ignore = "Windows nested process-count behavior is host-sensitive; run manually on a quiet machine"]
 fn process_limit_is_applied() {
-    let config = builder_with_windows_runtime_env().max_processes(1).build();
+    let mut config = builder_with_windows_runtime_env();
+    config.limits.max_processes = Some(1);
     let mut command = Command::new("cmd");
     command.args(["/C", "start", "/B", "cmd", "/C", "exit", "0"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn under Windows Job Object");
     let status = child.wait().expect("wait");
 
@@ -158,12 +167,19 @@ fn terminate_process(pid: u32) {
     }
 }
 
-fn builder_with_windows_runtime_env() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
+fn builder_with_windows_runtime_env() -> SandboxConfig {
+    let mut env = BTreeMap::new();
     for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
         if let Ok(value) = std::env::var(key) {
-            builder = builder.env(key, value);
+            env.insert(key.to_string(), value);
         }
     }
-    builder
+    SandboxConfig {
+        fs: vec![],
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env,
+        darwin_sandbox_profiles: vec![],
+    }
 }

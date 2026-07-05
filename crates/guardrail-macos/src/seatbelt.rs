@@ -53,9 +53,22 @@ fn validate(source: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use guardrail_core::{FsAccess, SandboxBuilder};
+    use std::collections::BTreeMap;
+
+    use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 
     use super::*;
+
+    fn empty_config() -> SandboxConfig {
+        SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        }
+    }
 
     #[test]
     fn custom_profile_paths_are_imported_before_generated_policy() {
@@ -75,10 +88,14 @@ mod tests {
         let first = first.canonicalize().unwrap();
         let second = second.canonicalize().unwrap();
 
-        let config = SandboxBuilder::new()
-            .darwin_sandbox_profiles([first.clone(), second.clone()])
-            .fs([FsAccess::ReadAllow("/generated-read".into())])
-            .build();
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("/generated-read".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![first.clone(), second.clone()],
+        };
         let profile = resolve(&config).unwrap();
 
         let first_import = crate::profile::sbpl_string(&first);
@@ -100,9 +117,14 @@ mod tests {
 
     #[test]
     fn rejects_generated_profile_with_interior_nul_byte() {
-        let config = SandboxBuilder::new()
-            .fs([FsAccess::ReadAllow("/tmp/has\0nul".into())])
-            .build();
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("/tmp/has\0nul".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
 
         let err = resolve(&config).unwrap_err();
 
@@ -124,9 +146,14 @@ mod tests {
         ));
         std::fs::write(&path, "(version 1)\n\0\n").unwrap();
 
-        let config = SandboxBuilder::new()
-            .darwin_sandbox_profiles([path.clone()])
-            .build();
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![path.clone()],
+        };
         let err = resolve(&config).unwrap_err();
 
         assert!(matches!(

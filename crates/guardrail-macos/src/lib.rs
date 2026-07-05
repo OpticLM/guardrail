@@ -26,7 +26,7 @@
 //! Use `.fs([FsAccess::ReadAllow(...), FsAccess::ExecuteAllow(...)])` for
 //! binary and dylib paths, and grant sysctl access via a custom `.sb` profile
 //! import or a manual `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule
-//! in your profile. See [`SandboxBuilder::darwin_sandbox_profiles`] for the
+//! in your profile. Set `darwin_sandbox_profiles` on `SandboxConfig` for the
 //! custom-profile escape hatch.
 
 pub mod diagnostics;
@@ -94,13 +94,22 @@ impl Backend for MacosBackend {
 
 #[cfg(test)]
 mod tests {
-    use guardrail_core::SandboxBuilder;
+    use std::collections::BTreeMap;
+
+    use guardrail_core::{IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
     #[cfg(not(target_os = "macos"))]
     use guardrail_core::{Backend, Error};
 
     #[test]
     fn crate_smoke_test_builds_a_default_config() {
-        let config = SandboxBuilder::new().build();
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
         assert!(config.fs.is_empty());
     }
 
@@ -108,9 +117,14 @@ mod tests {
     #[test]
     fn backend_returns_unsupported_on_non_macos() {
         let backend = super::MacosBackend::new();
-        let config = SandboxBuilder::new()
-            .darwin_sandbox_profiles(["/definitely/missing/profile.sb".into()])
-            .build();
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec!["/definitely/missing/profile.sb".into()],
+        };
 
         let err = backend
             .spawn(&config, std::process::Command::new("true"))

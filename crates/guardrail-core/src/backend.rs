@@ -11,8 +11,8 @@ use crate::process::SandboxChild;
 ///
 /// Implementors apply OS-level confinement (filesystem, network, IPC, resource
 /// limits) and spawn the child. The `command` they receive has **already** had
-/// its environment scrubbed by [`SandboxConfig::spawn_with`] — a backend must
-/// not re-add inherited environment variables.
+/// its environment scrubbed by the caller — a backend must not re-add
+/// inherited environment variables.
 ///
 /// The trait is object-safe so callers may hold a `&dyn Backend` if they wish.
 pub trait Backend {
@@ -39,7 +39,7 @@ pub trait Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SandboxBuilder;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     struct RecordingBackend {
@@ -58,12 +58,22 @@ mod tests {
     }
 
     #[test]
-    fn spawn_with_scrubs_then_delegates() {
+    fn spawn_scrubs_env_before_delegating() {
         let backend = RecordingBackend {
             seen: Mutex::new(None),
         };
-        let config = SandboxBuilder::new().env("FOO", "bar").build();
-        let _ = config.spawn_with(&backend, std::process::Command::new("true"));
+        let config = SandboxConfig {
+            fs: vec![],
+            network: crate::policy::NetworkPolicy::Deny,
+            ipc: crate::policy::IpcPolicy::Strict,
+            limits: crate::config::ResourceLimits::default(),
+            env: BTreeMap::from([("FOO".into(), "bar".into())]),
+            darwin_sandbox_profiles: vec![],
+        };
+        let mut cmd = std::process::Command::new("true");
+        cmd.env_clear();
+        cmd.envs(&config.env);
+        let _ = backend.spawn(&config, cmd);
         assert_eq!(backend.seen.lock().unwrap().as_ref(), Some(&config));
     }
 }

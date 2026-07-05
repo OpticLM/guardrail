@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use guardrail_core::{
-    Backend, ExplainCtx, FsAccess, NetworkPolicy, SandboxBuilder, SandboxConfig, Violation,
-    ViolationKind,
+    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig,
+    Violation, ViolationKind,
 };
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -31,13 +32,26 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn base_builder() -> SandboxBuilder {
-    builder_with_windows_runtime_env().fs([FsAccess::ReadAllow(probe_dir())])
+fn base_config() -> SandboxConfig {
+    let mut env = BTreeMap::new();
+    for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    SandboxConfig {
+        fs: vec![FsAccess::ReadAllow(probe_dir())],
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env,
+        darwin_sandbox_profiles: vec![],
+    }
 }
 
 fn run(config: &SandboxConfig, command: Command) -> ExitStatus {
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(config, command)
         .expect("spawn probe");
     child.wait().expect("wait")
 }
@@ -48,9 +62,12 @@ fn explain(config: &SandboxConfig, status: ExitStatus) -> Option<Violation> {
 
 #[test]
 fn success_yields_no_violation() {
-    let config = base_builder().env("GREETING", "hello").build();
+    let mut config = base_config();
+    config.env.insert("GREETING".into(), "hello".into());
     let mut command = probe();
     command.args(["check-env", "GREETING", "hello"]);
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run(&config, command);
 
@@ -60,9 +77,12 @@ fn success_yields_no_violation() {
 
 #[test]
 fn memory_limit_is_diagnosed_as_resource_limit() {
-    let config = base_builder().memory_limit_mb(64).build();
+    let mut config = base_config();
+    config.limits.memory_bytes = Some(64 * 1024 * 1024);
     let mut command = probe();
     command.args(["alloc", "512"]);
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run(&config, command);
     let violation = explain(&config, status).expect("should diagnose resource limit");
@@ -78,9 +98,12 @@ fn memory_limit_is_diagnosed_as_resource_limit() {
 
 #[test]
 fn cpu_limit_is_diagnosed_as_resource_limit() {
-    let config = base_builder().cpu_time_limit_secs(1).build();
+    let mut config = base_config();
+    config.limits.cpu_time_secs = Some(1);
     let mut command = probe();
     command.arg("spin");
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run_with_watchdog(&config, command, Duration::from_secs(10));
     let violation = explain(&config, status).expect("should diagnose resource limit");
@@ -101,9 +124,12 @@ fn filesystem_denial_suggests_file_grants() {
     let file = temp.path().join("input.txt");
     fs::write(&file, "guardrail").expect("write input");
 
-    let config = base_builder().network(NetworkPolicy::Full).build();
+    let mut config = base_config();
+    config.network = NetworkPolicy::Full;
     let mut command = probe();
     command.arg("read-file").arg(&file);
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run(&config, command);
     let violation = explain(&config, status).expect("should diagnose policy failure");
@@ -123,9 +149,11 @@ fn network_denial_suggests_network_policy() {
         .port()
         .to_string();
 
-    let config = base_builder().network(NetworkPolicy::Deny).build();
+    let config = base_config();
     let mut command = probe();
     command.args(["tcp-connect", "127.0.0.1", &port]);
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run(&config, command);
     let violation = explain(&config, status).expect("should diagnose policy failure");
@@ -148,9 +176,11 @@ fn violation_display_includes_summary_and_suggestion_bullets() {
         .port()
         .to_string();
 
-    let config = base_builder().network(NetworkPolicy::Deny).build();
+    let config = base_config();
     let mut command = probe();
     command.args(["tcp-connect", "127.0.0.1", &port]);
+    command.env_clear();
+    command.envs(&config.env);
 
     let status = run(&config, command);
     let violation = explain(&config, status).expect("should diagnose policy failure");
@@ -164,8 +194,8 @@ fn violation_display_includes_summary_and_suggestion_bullets() {
 }
 
 fn run_with_watchdog(config: &SandboxConfig, command: Command, timeout: Duration) -> ExitStatus {
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(config, command)
         .expect("spawn probe");
     let (cancel_watchdog, watchdog, watchdog_fired) = spawn_watchdog(child.id(), timeout);
     let status = child.wait().expect("wait");
@@ -196,7 +226,7 @@ fn spawn_watchdog(
 
 fn terminate_process(pid: u32) {
     // SAFETY: best-effort test cleanup. The PID comes from the just-spawned
-    // sandbox child, and the handle is closed if it can be opened.
+    // sandboxed child, and the handle is closed if it can be opened.
     unsafe {
         let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
         if !process.is_null() {
@@ -204,16 +234,6 @@ fn terminate_process(pid: u32) {
             let _ = CloseHandle(process);
         }
     }
-}
-
-fn builder_with_windows_runtime_env() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
-    for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
-        if let Ok(value) = std::env::var(key) {
-            builder = builder.env(key, value);
-        }
-    }
-    builder
 }
 
 struct TempPath {

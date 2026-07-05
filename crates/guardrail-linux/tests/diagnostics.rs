@@ -18,22 +18,24 @@ fn probe(args: &[&str]) -> Command {
 }
 
 fn run(config: &SandboxConfig, args: &[&str]) -> std::process::ExitStatus {
-    let mut child = config
-        .spawn_with(&LinuxBackend::new(), probe(args))
-        .expect("spawn");
+    let mut cmd = probe(args);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new().spawn(config, cmd).expect("spawn");
     child.wait().expect("wait")
 }
 
 #[test]
 fn success_yields_no_violation() {
-    let config = common::base().build();
+    let config = common::base();
     let status = run(&config, &["echo-env", "PATH"]);
     assert!(explain(&config, status).is_none());
 }
 
 #[test]
 fn blocked_network_is_diagnosed_as_seccomp() {
-    let config = common::base().network(NetworkPolicy::Deny).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
     let status = run(&config, &["socket-inet"]);
     let v = explain(&config, status).expect("should diagnose a violation");
     assert_eq!(v.kind, ViolationKind::Seccomp);
@@ -45,7 +47,8 @@ fn blocked_network_is_diagnosed_as_seccomp() {
 
 #[test]
 fn blocked_ipc_is_diagnosed_as_seccomp() {
-    let config = common::base().ipc(IpcPolicy::Strict).build();
+    let mut config = common::base();
+    config.ipc = IpcPolicy::Strict;
     let status = run(&config, &["shm"]);
     let v = explain(&config, status).expect("should diagnose a violation");
     assert_eq!(v.kind, ViolationKind::Seccomp);
@@ -53,7 +56,8 @@ fn blocked_ipc_is_diagnosed_as_seccomp() {
 
 #[test]
 fn cpu_limit_is_diagnosed_as_resource_limit() {
-    let config = common::base().cpu_time_limit_secs(1).build();
+    let mut config = common::base();
+    config.limits.cpu_time_secs = Some(1);
     let status = run(&config, &["spin"]);
     let v = explain(&config, status).expect("should diagnose a violation");
     assert_eq!(v.kind, ViolationKind::ResourceLimit);
@@ -61,7 +65,8 @@ fn cpu_limit_is_diagnosed_as_resource_limit() {
 
 #[test]
 fn violation_display_includes_summary_and_suggestions() {
-    let config = common::base().network(NetworkPolicy::Deny).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
     let status = run(&config, &["socket-inet"]);
     let v = explain(&config, status).unwrap();
     let rendered = v.to_string();

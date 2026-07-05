@@ -1,9 +1,10 @@
 #![cfg(windows)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use guardrail_core::{FsAccess, SandboxBuilder};
+use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 use guardrail_windows::WindowsBackend;
 
 fn probe() -> Command {
@@ -23,14 +24,15 @@ fn inherited_env_is_cleared() {
     // sandboxed child and does not read it concurrently.
     unsafe { std::env::set_var("GUARDRAIL_SECRET", "leaked") };
 
-    let config = builder_with_windows_runtime_env()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .build();
+    let mut config = builder_with_windows_runtime_env();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
     command.args(["check-env", "GUARDRAIL_SECRET", "leaked"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -42,29 +44,37 @@ fn inherited_env_is_cleared() {
 
 #[test]
 fn explicitly_added_env_reaches_child() {
-    let config = builder_with_windows_runtime_env()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .env("GREETING", "hello")
-        .build();
+    let mut config = builder_with_windows_runtime_env();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.env.insert("GREETING".into(), "hello".into());
     let mut command = probe();
     command.args(["check-env", "GREETING", "hello"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
     assert!(status.success(), "explicit env var should reach the child");
 }
 
-fn builder_with_windows_runtime_env() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
+fn builder_with_windows_runtime_env() -> SandboxConfig {
+    let mut env = BTreeMap::new();
     // AppContainer CreateProcess launches need these standard runtime values;
     // they are still explicit builder inputs, so parent-only vars stay scrubbed.
     for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
         if let Ok(value) = std::env::var(key) {
-            builder = builder.env(key, value);
+            env.insert(key.to_string(), value);
         }
     }
-    builder
+    SandboxConfig {
+        fs: vec![],
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env,
+        darwin_sandbox_profiles: vec![],
+    }
 }

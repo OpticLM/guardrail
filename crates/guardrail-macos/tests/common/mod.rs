@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use guardrail_core::{FsAccess, SandboxBuilder};
+use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 
 pub fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_guardrail-macos-probe"))
@@ -20,23 +21,35 @@ pub fn probe(args: &[&str]) -> Command {
 ///
 /// These are explicit test grants, not backend defaults: every filesystem path
 /// allowed here is visible in the resulting `SandboxConfig`.
-pub fn base() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new().darwin_sandbox_profiles([runtime_profile()]);
+pub fn base() -> SandboxConfig {
+    let mut fs = Vec::new();
     for dir in runtime_dirs() {
-        builder = builder.fs([
-            FsAccess::ReadAllow(dir.clone()),
-            FsAccess::ExecuteAllow(dir),
-        ]);
+        fs.push(FsAccess::ReadAllow(dir.clone()));
+        fs.push(FsAccess::ExecuteAllow(dir));
     }
-    builder
+    SandboxConfig {
+        fs,
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env: BTreeMap::new(),
+        darwin_sandbox_profiles: vec![runtime_profile()],
+    }
 }
 
-pub fn read_only_base() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new().darwin_sandbox_profiles([runtime_profile()]);
+pub fn read_only_base() -> SandboxConfig {
+    let mut fs = Vec::new();
     for dir in runtime_dirs() {
-        builder = builder.fs([FsAccess::ReadAllow(dir)]);
+        fs.push(FsAccess::ReadAllow(dir));
     }
-    builder
+    SandboxConfig {
+        fs,
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env: BTreeMap::new(),
+        darwin_sandbox_profiles: vec![runtime_profile()],
+    }
 }
 
 fn runtime_profile() -> PathBuf {

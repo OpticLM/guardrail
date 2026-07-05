@@ -250,13 +250,26 @@ pub(crate) fn sbpl_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use guardrail_core::{NetworkPolicy, SandboxBuilder};
+    use std::collections::BTreeMap;
+
+    use guardrail_core::{IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 
     use super::*;
 
+    fn empty_config() -> SandboxConfig {
+        SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        }
+    }
+
     #[test]
     fn default_config_denies_by_default() {
-        let profile = build(&SandboxBuilder::new().build());
+        let profile = build(&empty_config());
 
         assert_eq!(
             profile.source,
@@ -266,10 +279,16 @@ mod tests {
 
     #[test]
     fn imported_profiles_are_emitted_before_generated_rules() {
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
         let profile = build_with_imports(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadAllow("/tmp/in".into())])
-                .build(),
+            &config,
             &[
                 std::path::PathBuf::from("/tmp/base-one.sb"),
                 std::path::PathBuf::from("/tmp/base-two.sb"),
@@ -292,7 +311,7 @@ mod tests {
     #[test]
     fn import_paths_are_escaped() {
         let profile = build_with_imports(
-            &SandboxBuilder::new().build(),
+            &empty_config(),
             &[std::path::PathBuf::from(r#"/tmp/base"name\with-slash.sb"#)],
         );
 
@@ -305,11 +324,15 @@ mod tests {
 
     #[test]
     fn read_access_emits_file_read_subpath_rule() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadAllow("/tmp/in".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(profile.source.contains("(version 1)\n"));
         assert!(
@@ -334,11 +357,15 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink(&real, &alias).unwrap();
 
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadAllow(future_alias.clone())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow(future_alias.clone())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(profile.source.contains(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
@@ -367,14 +394,18 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink(&real, &alias).unwrap();
 
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([
-                    FsAccess::ReadAllow(alias.clone()),
-                    FsAccess::ReadDeny(secret_alias.clone()),
-                ])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![
+                FsAccess::ReadAllow(alias.clone()),
+                FsAccess::ReadDeny(secret_alias.clone()),
+            ],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(profile.source.contains(&format!(
             "(require-not (subpath \"{}\"))",
@@ -390,11 +421,15 @@ mod tests {
 
     #[test]
     fn read_deny_emits_file_read_deny_rule() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadDeny("/tmp/secret".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadDeny("/tmp/secret".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(
             profile
@@ -405,11 +440,15 @@ mod tests {
 
     #[test]
     fn write_access_emits_only_file_write_subpath_rule() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::WriteAllow("/tmp/work".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::WriteAllow("/tmp/work".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(!profile.source.contains("(allow file-read*"));
         assert!(
@@ -421,11 +460,15 @@ mod tests {
 
     #[test]
     fn write_deny_emits_only_file_write_deny_rule() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::WriteDeny("/tmp/work".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::WriteDeny("/tmp/work".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(!profile.source.contains("(deny file-read*"));
         assert!(
@@ -437,11 +480,15 @@ mod tests {
 
     #[test]
     fn execute_access_emits_only_executable_rules() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ExecuteAllow("/tmp/bin".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ExecuteAllow("/tmp/bin".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(!profile.source.contains("(allow file-read*"));
         assert!(
@@ -458,11 +505,15 @@ mod tests {
 
     #[test]
     fn execute_deny_emits_only_executable_deny_rules() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ExecuteDeny("/tmp/bin".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ExecuteDeny("/tmp/bin".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(!profile.source.contains("(deny file-read*"));
         assert!(
@@ -479,16 +530,20 @@ mod tests {
 
     #[test]
     fn mixed_filesystem_rules_preserve_declaration_order() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([
-                    FsAccess::ReadAllow("/tmp".into()),
-                    FsAccess::ReadDeny("/tmp/secret".into()),
-                    FsAccess::ReadAllow("/tmp/secret/public.txt".into()),
-                    FsAccess::WriteAllow("/tmp/out".into()),
-                ])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![
+                FsAccess::ReadAllow("/tmp".into()),
+                FsAccess::ReadDeny("/tmp/secret".into()),
+                FsAccess::ReadAllow("/tmp/secret/public.txt".into()),
+                FsAccess::WriteAllow("/tmp/out".into()),
+            ],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert_substrings_in_order(
             &profile.source,
@@ -508,18 +563,23 @@ mod tests {
 
     #[test]
     fn deny_network_emits_no_network_rule() {
-        let profile = build(&SandboxBuilder::new().network(NetworkPolicy::Deny).build());
+        let config = empty_config();
+        let profile = build(&config);
 
         assert!(!profile.source.contains("network"));
     }
 
     #[test]
     fn outbound_network_emits_network_outbound_rule() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .network(NetworkPolicy::OutboundOnly)
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::OutboundOnly,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(profile.source.contains("(allow network-outbound)\n"));
         assert!(profile.source.contains("(allow system-socket)\n"));
@@ -527,7 +587,15 @@ mod tests {
 
     #[test]
     fn full_network_emits_network_star_rule() {
-        let profile = build(&SandboxBuilder::new().network(NetworkPolicy::Full).build());
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Full,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(profile.source.contains("(allow network*)\n"));
         assert!(profile.source.contains("(allow system-socket)\n"));
@@ -535,11 +603,15 @@ mod tests {
 
     #[test]
     fn double_quotes_in_paths_are_escaped() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadAllow(r#"/tmp/name"with-quote"#.into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow(r#"/tmp/name"with-quote"#.into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(
             profile
@@ -550,11 +622,15 @@ mod tests {
 
     #[test]
     fn backslashes_in_paths_are_escaped() {
-        let profile = build(
-            &SandboxBuilder::new()
-                .fs([FsAccess::ReadAllow(r"/tmp/name\with-slash".into())])
-                .build(),
-        );
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow(r"/tmp/name\with-slash".into())],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
+        let profile = build(&config);
 
         assert!(
             profile

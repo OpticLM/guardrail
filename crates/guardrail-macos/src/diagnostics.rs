@@ -233,14 +233,27 @@ fn escape_builder_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt;
 
-    use guardrail_core::{ExplainCtx, NetworkPolicy, SandboxBuilder, ViolationKind};
+    use guardrail_core::{ExplainCtx, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, ViolationKind};
 
     use super::*;
+
+    fn empty_config() -> SandboxConfig {
+        SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        }
+    }
 
     fn exit_status(code: i32) -> ExitStatus {
         #[cfg(unix)]
@@ -272,14 +285,14 @@ mod tests {
 
     #[test]
     fn success_yields_no_violation() {
-        let config = SandboxBuilder::new().build();
+        let config = empty_config();
 
         assert!(explain(&config, exit_status(0)).is_none());
     }
 
     #[test]
     fn seatbelt_file_read_denial_suggests_read_grant() {
-        let config = SandboxBuilder::new().build();
+        let config = empty_config();
         let text = "Sandbox: cat(123) deny(1) file-read-data /private/tmp/input.txt";
 
         let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
@@ -297,7 +310,7 @@ mod tests {
 
     #[test]
     fn seatbelt_write_denial_suggests_write_grant() {
-        let config = SandboxBuilder::new().build();
+        let config = empty_config();
         let text = "Sandbox: touch(123) deny(1) file-write-create /private/tmp/out.txt";
 
         let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
@@ -313,7 +326,14 @@ mod tests {
 
     #[test]
     fn seatbelt_network_denial_suggests_network_policy() {
-        let config = SandboxBuilder::new().network(NetworkPolicy::Deny).build();
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits::default(),
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
         let text = "Sandbox: curl(123) deny(1) network-outbound 93.184.216.34:443";
 
         let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
@@ -329,7 +349,7 @@ mod tests {
 
     #[test]
     fn generic_permission_denied_output_suggests_filesystem_grants() {
-        let config = SandboxBuilder::new().build();
+        let config = empty_config();
         let text = "cat: /Users/me/secret.txt: Permission denied";
 
         let violation = explain_with_text(&config, exit_status(1), text).expect("violation");
@@ -347,7 +367,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cpu_signal_is_diagnosed_as_resource_limit_when_configured() {
-        let config = SandboxBuilder::new().cpu_time_limit_secs(1).build();
+        let config = SandboxConfig {
+            fs: vec![],
+            network: NetworkPolicy::Deny,
+            ipc: IpcPolicy::Strict,
+            limits: ResourceLimits { memory_bytes: None, cpu_time_secs: Some(1), max_processes: None },
+            env: BTreeMap::new(),
+            darwin_sandbox_profiles: vec![],
+        };
 
         let violation =
             explain(&config, signaled_status(libc::SIGXCPU)).expect("resource violation");
@@ -362,7 +389,7 @@ mod tests {
 
     #[test]
     fn fallback_mentions_seatbelt_profile_escape_hatch() {
-        let config = SandboxBuilder::new().build();
+        let config = empty_config();
 
         let violation = explain(&config, exit_status(1)).expect("fallback violation");
 

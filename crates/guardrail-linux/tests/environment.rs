@@ -19,12 +19,14 @@ fn inherited_env_is_cleared() {
     // SAFETY: single-threaded test setup before any spawn.
     unsafe { std::env::set_var("GUARDRAIL_SECRET", "leaked") };
 
-    let config = common::base().build();
+    let config = common::base();
     let mut cmd = probe();
     cmd.arg("echo-env").arg("GUARDRAIL_SECRET");
     cmd.stdout(std::process::Stdio::piped());
+    cmd.env_clear();
+    cmd.envs(&config.env);
 
-    let child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
+    let child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
     let out = child.into_inner().wait_with_output().expect("wait");
     assert!(out.status.success());
     assert_eq!(
@@ -36,12 +38,15 @@ fn inherited_env_is_cleared() {
 
 #[test]
 fn explicitly_added_env_reaches_child() {
-    let config = common::base().env("GREETING", "hello").build();
+    let mut config = common::base();
+    config.env.insert("GREETING".into(), "hello".into());
     let mut cmd = probe();
     cmd.arg("echo-env").arg("GREETING");
     cmd.stdout(std::process::Stdio::piped());
+    cmd.env_clear();
+    cmd.envs(&config.env);
 
-    let child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
+    let child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
     let out = child.into_inner().wait_with_output().expect("wait");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
 }

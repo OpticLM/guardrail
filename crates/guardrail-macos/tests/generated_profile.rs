@@ -27,9 +27,11 @@ fn assert_denied(config: &SandboxConfig, args: &[&str]) {
 fn run(config: &SandboxConfig, args: &[&str]) -> RunResult {
     let mut command = common::probe(args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.env_clear();
+    command.envs(&config.env);
 
-    let child = config
-        .spawn_with(&MacosBackend::new(), command)
+    let child = MacosBackend::new()
+        .spawn(config, command)
         .unwrap_or_else(|err| panic!("spawn failed for {args:?}: {err:?}\nconfig: {config:#?}"));
     let output = child.into_inner().wait_with_output().expect("wait");
 
@@ -67,14 +69,17 @@ fn loopback_listener() -> (std::net::TcpListener, String) {
 
 #[test]
 fn target_binary_runs_with_explicit_runtime_grants() {
-    let config = common::base().build();
+    let config = common::base();
     assert_allowed(&config, &["noop"]);
 }
 
 #[test]
 fn read_rule_does_not_grant_execute() {
-    let config = common::read_only_base().build();
-    let result = config.spawn_with(&MacosBackend::new(), common::probe(&["noop"]));
+    let config = common::read_only_base();
+    let mut command = common::probe(&["noop"]);
+    command.env_clear();
+    command.envs(&config.env);
+    let result = MacosBackend::new().spawn(&config, command);
 
     match result {
         Err(Error::Spawn(_)) => {}
@@ -92,12 +97,11 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
     let public = temp_dir.write("public.txt", b"public");
     let secret = temp_dir.write("secret.txt", b"secret");
 
-    let config = common::base()
-        .fs([
-            FsAccess::ReadAllow(temp_dir.path().into()),
-            FsAccess::ReadDeny(secret.clone()),
-        ])
-        .build();
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(temp_dir.path().into()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
 
     assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
     assert_denied(&config, &["read-file", secret.to_str().unwrap()]);
@@ -109,12 +113,11 @@ fn read_deny_then_read_allow_reopens_child_only() {
     let public = temp_dir.write("public.txt", b"public");
     let other = temp_dir.write("other.txt", b"other");
 
-    let config = common::base()
-        .fs([
-            FsAccess::ReadDeny(temp_dir.path().into()),
-            FsAccess::ReadAllow(public.clone()),
-        ])
-        .build();
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadDeny(temp_dir.path().into()),
+        FsAccess::ReadAllow(public.clone()),
+    ]);
 
     assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
     assert_denied(&config, &["read-file", other.to_str().unwrap()]);
@@ -125,13 +128,12 @@ fn later_read_allow_overrides_same_path_deny() {
     let temp_dir = TempDir::create("ordered-same-path");
     let public = temp_dir.write("public.txt", b"public");
 
-    let config = common::base()
-        .fs([
-            FsAccess::ReadAllow(temp_dir.path().into()),
-            FsAccess::ReadDeny(temp_dir.path().into()),
-            FsAccess::ReadAllow(temp_dir.path().into()),
-        ])
-        .build();
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(temp_dir.path().into()),
+        FsAccess::ReadDeny(temp_dir.path().into()),
+        FsAccess::ReadAllow(temp_dir.path().into()),
+    ]);
 
     assert_allowed(&config, &["read-file", public.to_str().unwrap()]);
 }
@@ -139,21 +141,24 @@ fn later_read_allow_overrides_same_path_deny() {
 #[test]
 fn deny_blocks_tcp_connect() {
     let (_listener, addr) = loopback_listener();
-    let config = common::base().network(NetworkPolicy::Deny).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
     assert_denied(&config, &["tcp-connect", &addr]);
 }
 
 #[test]
 fn outbound_only_allows_tcp_connect() {
     let (_listener, addr) = loopback_listener();
-    let config = common::base().network(NetworkPolicy::OutboundOnly).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
     assert_allowed(&config, &["tcp-connect", &addr]);
 }
 
 #[test]
 fn full_allows_tcp_connect() {
     let (_listener, addr) = loopback_listener();
-    let config = common::base().network(NetworkPolicy::Full).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Full;
     assert_allowed(&config, &["tcp-connect", &addr]);
 }
 

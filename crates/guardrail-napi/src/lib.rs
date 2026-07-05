@@ -3,10 +3,10 @@
 //! Exposes a single [`spawn`] function that launches a child process confined
 //! by the platform backend, returning a [`SandboxChild`] handle with async
 //! `wait()` and `kill()`. Policy is supplied as a plain options object that
-//! mirrors `guardrail_core::SandboxBuilder`.
+//! mirrors `guardrail_core::SandboxConfig` fields.
 #![deny(clippy::all)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail_core::{
-    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxBuilder, SandboxConfig,
+    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, SandboxConfig,
     SharedSandboxChild, ViolationKind,
 };
 
@@ -194,29 +194,35 @@ fn build_config(opts: SpawnOptions) -> Result<SandboxConfig> {
         })
         .collect::<Vec<_>>();
 
-    let mut b = SandboxBuilder::new().fs(fs);
-    if let Some(n) = opts.network {
-        b = b.network(n.into());
+    let mut darwin_sandbox_profiles = Vec::new();
+    if let Some(profiles) = opts.darwin_sandbox_profiles {
+        darwin_sandbox_profiles = profiles.into_iter().map(PathBuf::from).collect();
     }
-    if let Some(i) = opts.ipc {
-        b = b.ipc(i.into());
+
+    let mut env = BTreeMap::new();
+    if let Some(e) = opts.env {
+        env = e.into_iter().collect();
     }
+
+    let mut limits = guardrail_core::ResourceLimits::default();
     if let Some(m) = opts.memory_limit_mb {
-        b = b.memory_limit_mb(u64::from(m));
+        limits.memory_bytes = Some(u64::from(m) * 1024 * 1024);
     }
     if let Some(c) = opts.cpu_time_limit_secs {
-        b = b.cpu_time_limit_secs(u64::from(c));
+        limits.cpu_time_secs = Some(u64::from(c));
     }
     if let Some(p) = opts.max_processes {
-        b = b.max_processes(u64::from(p));
+        limits.max_processes = Some(u64::from(p));
     }
-    if let Some(profiles) = opts.darwin_sandbox_profiles {
-        b = b.darwin_sandbox_profiles(profiles.into_iter().map(PathBuf::from).collect::<Vec<_>>());
-    }
-    if let Some(env) = opts.env {
-        b = b.envs(env);
-    }
-    Ok(b.build())
+
+    Ok(SandboxConfig {
+        fs,
+        network: opts.network.map(|n| n.into()).unwrap_or(NetworkPolicy::Deny),
+        ipc: opts.ipc.map(|i| i.into()).unwrap_or(IpcPolicy::Strict),
+        limits,
+        env,
+        darwin_sandbox_profiles,
+    })
 }
 
 fn to_napi_err(e: guardrail_core::Error) -> Error {
@@ -267,10 +273,12 @@ pub fn spawn(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    cmd.env_clear();
+    cmd.envs(&config.env);
     // stdio is inherited by default for std::process::Command::spawn().
 
     let backend = PlatformBackend::new();
-    let child = config.spawn_with(&backend, cmd).map_err(to_napi_err)?;
+    let child = backend.spawn(&config, cmd).map_err(to_napi_err)?;
 
     Ok(SandboxChild {
         inner: SharedSandboxChild::new(child),

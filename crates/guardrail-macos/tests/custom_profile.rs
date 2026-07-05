@@ -21,16 +21,15 @@ fn custom_profile_is_loaded_and_applied() {
     );
     std::fs::write(&profile_path, &profile_source).unwrap();
 
-    let config = common::base()
-        .darwin_sandbox_profiles([profile_path])
-        .build();
+    let mut config = common::base();
+    config.darwin_sandbox_profiles.push(profile_path);
     let mut command = common::probe(&["read-file", secret.to_str().unwrap()]);
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let child = config
-        .spawn_with(&MacosBackend::new(), command)
-        .expect("spawn");
+    command.env_clear();
+    command.envs(&config.env);
+    let child = MacosBackend::new().spawn(&config, command).expect("spawn");
     let output = child.into_inner().wait_with_output().expect("wait");
 
     assert!(

@@ -12,15 +12,17 @@ fn probe(args: &[&str]) -> Command {
 }
 
 fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
-    let mut child = config
-        .spawn_with(&LinuxBackend::new(), probe(args))
-        .expect("spawn");
+    let mut cmd = probe(args);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new().spawn(config, cmd).expect("spawn");
     child.wait().expect("wait").success()
 }
 
 #[test]
 fn deny_blocks_inet_socket_creation() {
-    let config = common::base().network(NetworkPolicy::Deny).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
     assert!(
         !allowed(&config, &["socket-inet"]),
         "creating an AF_INET socket must be blocked under Deny"
@@ -29,7 +31,8 @@ fn deny_blocks_inet_socket_creation() {
 
 #[test]
 fn outbound_only_allows_socket_but_blocks_bind() {
-    let config = common::base().network(NetworkPolicy::OutboundOnly).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
     assert!(
         allowed(&config, &["socket-inet"]),
         "AF_INET socket creation must be allowed under OutboundOnly"
@@ -42,7 +45,8 @@ fn outbound_only_allows_socket_but_blocks_bind() {
 
 #[test]
 fn full_allows_socket_and_bind() {
-    let config = common::base().network(NetworkPolicy::Full).build();
+    let mut config = common::base();
+    config.network = NetworkPolicy::Full;
     assert!(
         allowed(&config, &["socket-inet"]),
         "socket creation must be allowed under Full"

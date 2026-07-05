@@ -13,10 +13,13 @@ mod common;
 #[test]
 fn memory_limit_blocks_large_allocation() {
     // 64 MiB address-space cap; ask the child to grab 512 MiB.
-    let config = common::base().memory_limit_mb(64).build();
+    let mut config = common::base();
+    config.limits.memory_bytes = Some(64 * 1024 * 1024);
     let mut cmd = common::probe(&[]);
     cmd.arg("alloc").arg("512");
-    let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
     let status = child.wait().expect("wait");
     assert!(
         !status.success(),
@@ -28,10 +31,12 @@ fn memory_limit_blocks_large_allocation() {
 fn without_limit_the_same_allocation_succeeds() {
     // Control: no cap → the 512 MiB allocation succeeds. Guards against the
     // probe being broken in a way that makes the test above pass spuriously.
-    let config = common::base().build();
+    let config = common::base();
     let mut cmd = common::probe(&[]);
     cmd.arg("alloc").arg("512");
-    let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
     let status = child.wait().expect("wait");
     assert!(
         status.success(),
@@ -42,10 +47,13 @@ fn without_limit_the_same_allocation_succeeds() {
 #[test]
 fn cpu_time_limit_kills_busy_loop() {
     // 1s CPU cap on an infinite spin. RLIMIT_CPU soft→SIGXCPU, hard→SIGKILL.
-    let config = common::base().cpu_time_limit_secs(1).build();
+    let mut config = common::base();
+    config.limits.cpu_time_secs = Some(1);
     let mut cmd = common::probe(&[]);
     cmd.arg("spin");
-    let mut child = config.spawn_with(&LinuxBackend::new(), cmd).expect("spawn");
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new().spawn(&config, cmd).expect("spawn");
 
     let start = Instant::now();
     let status = child.wait().expect("wait");
@@ -67,10 +75,13 @@ fn process_limit_is_applied() {
     // Best-effort: with max_processes(1) the child cannot fork a helper.
     // Left ignored because RLIMIT_NPROC depends on the ambient process count of
     // the running user. Run manually with `--ignored` on a quiet machine.
-    let config = common::base().max_processes(1).build();
+    let mut config = common::base();
+    config.limits.max_processes = Some(1);
     let mut cmd = common::probe_command();
     cmd.arg("spin");
-    let res = config.spawn_with(&LinuxBackend::new(), cmd);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let res = LinuxBackend::new().spawn(&config, cmd);
     // The assertion is intentionally loose; document-only.
     let _ = res;
 }

@@ -1,12 +1,13 @@
 #![cfg(windows)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use guardrail_core::{FsAccess, NetworkPolicy, SandboxBuilder, SandboxConfig};
+use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 use guardrail_windows::WindowsBackend;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -24,12 +25,14 @@ fn probe_dir() -> PathBuf {
 
 #[test]
 fn default_network_deny_still_launches_process_in_appcontainer() {
-    let config = builder_with_system_root().build();
+    let config = builder_with_system_root();
     let mut command = Command::new("cmd");
     command.args(["/C", "exit", "0"]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn with default AppContainer policy");
     let status = child.wait().expect("wait");
 
@@ -43,14 +46,15 @@ fn filesystem_read_is_denied_without_grant() {
     let file = temp.path().join("input.txt");
     fs::write(&file, "guardrail").expect("write input");
 
-    let config = builder_with_system_root()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
     command.arg("read-file").arg(&file);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -67,17 +71,18 @@ fn read_grant_allows_reading_a_declared_directory() {
     let file = temp.path().join("input.txt");
     fs::write(&file, "guardrail").expect("write input");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+    ]);
     let mut command = probe();
     command.arg("read-file").arg(&file);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn with read grant");
     let status = child.wait().expect("wait");
 
@@ -90,17 +95,18 @@ fn write_is_denied_under_read_grant() {
     fs::create_dir_all(temp.path()).expect("create temp dir");
     let file = temp.path().join("output.txt");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+    ]);
     let mut command = probe();
     command.arg("write-file").arg(&file);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn with read grant");
     let status = child.wait().expect("wait");
 
@@ -120,17 +126,18 @@ fn write_grant_allows_writing_under_declared_directory() {
     fs::create_dir_all(temp.path()).expect("create temp dir");
     let file = temp.path().join("output.txt");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::WriteAllow(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+    ]);
     let mut command = probe();
     command.arg("write-file").arg(&file);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn with write grant");
     let status = child.wait().expect("wait");
 
@@ -150,13 +157,12 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
     fs::write(&public, "public").expect("write public");
     fs::write(&secret, "secret").expect("write secret");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-            FsAccess::ReadDeny(secret.clone()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
 
     assert!(probe_file_allowed(&config, "read-file", &public));
     assert!(!probe_file_allowed(&config, "read-file", &secret));
@@ -170,18 +176,19 @@ fn read_allow_with_read_deny_keeps_parent_inheritance_for_future_sibling() {
     let future = temp.path().join("future.txt");
     fs::write(&secret, "secret").expect("write secret");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-            FsAccess::ReadDeny(secret.clone()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
 
     let mut command = probe();
     command.args(["delayed-read-file", "750"]).arg(&future);
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    command.env_clear();
+    command.envs(&config.env);
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn delayed probe");
     fs::write(&future, "future").expect("write future sibling");
     let status = child.wait().expect("wait");
@@ -202,13 +209,12 @@ fn read_deny_then_read_allow_reopens_child_only() {
     fs::write(&public, "public").expect("write public");
     fs::write(&other, "other").expect("write other");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadDeny(temp.path().into()),
-            FsAccess::ReadAllow(public.clone()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadDeny(temp.path().into()),
+        FsAccess::ReadAllow(public.clone()),
+    ]);
 
     assert!(probe_file_allowed(&config, "read-file", &public));
     assert!(!probe_file_allowed(&config, "read-file", &other));
@@ -221,14 +227,13 @@ fn later_read_allow_overrides_same_path_deny() {
     let public = temp.path().join("public.txt");
     fs::write(&public, "public").expect("write public");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-            FsAccess::ReadDeny(temp.path().into()),
-            FsAccess::ReadAllow(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(temp.path().into()),
+        FsAccess::ReadAllow(temp.path().into()),
+    ]);
 
     assert!(probe_file_allowed(&config, "read-file", &public));
 }
@@ -240,13 +245,12 @@ fn later_read_deny_overrides_same_path_allow() {
     let secret = temp.path().join("secret.txt");
     fs::write(&secret, "secret").expect("write secret");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::ReadAllow(temp.path().into()),
-            FsAccess::ReadDeny(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(temp.path().into()),
+    ]);
 
     assert!(!probe_file_allowed(&config, "read-file", &secret));
 }
@@ -259,12 +263,11 @@ fn write_rule_does_not_grant_read() {
     let secret = temp.path().join("secret.txt");
     fs::write(&secret, "secret").expect("write secret");
 
-    let config = builder_with_system_root()
-        .fs([
-            FsAccess::ReadAllow(probe_dir()),
-            FsAccess::WriteAllow(temp.path().into()),
-        ])
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+    ]);
 
     assert!(probe_file_allowed(&config, "write-file", &output));
     assert!(!probe_file_allowed(&config, "read-file", &secret));
@@ -279,15 +282,16 @@ fn default_network_deny_blocks_outbound_tcp_connect() {
         .port()
         .to_string();
 
-    let config = builder_with_system_root()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .network(NetworkPolicy::Deny)
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.network = NetworkPolicy::Deny;
     let mut command = probe();
     command.args(["tcp-connect", "127.0.0.1", &port]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -307,15 +311,16 @@ fn outbound_only_allows_loopback_connect_when_host_allows_appcontainer_loopback(
         .port()
         .to_string();
 
-    let config = builder_with_system_root()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .network(NetworkPolicy::OutboundOnly)
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.network = NetworkPolicy::OutboundOnly;
     let mut command = probe();
     command.args(["tcp-connect", "127.0.0.1", &port]);
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -327,15 +332,16 @@ fn outbound_only_allows_loopback_connect_when_host_allows_appcontainer_loopback(
 
 #[test]
 fn full_network_allows_tcp_bind() {
-    let config = builder_with_system_root()
-        .fs([FsAccess::ReadAllow(probe_dir())])
-        .network(NetworkPolicy::Full)
-        .build();
+    let mut config = builder_with_system_root();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    config.network = NetworkPolicy::Full;
     let mut command = probe();
     command.arg("tcp-bind");
+    command.env_clear();
+    command.envs(&config.env);
 
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    let mut child = WindowsBackend::new()
+        .spawn(&config, command)
         .expect("spawn probe");
     let status = child.wait().expect("wait");
 
@@ -349,21 +355,30 @@ struct TempPath {
     path: PathBuf,
 }
 
-fn builder_with_system_root() -> SandboxBuilder {
-    let mut builder = SandboxBuilder::new();
+fn builder_with_system_root() -> SandboxConfig {
+    let mut env = BTreeMap::new();
     for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
         if let Ok(value) = std::env::var(key) {
-            builder = builder.env(key, value);
+            env.insert(key.to_string(), value);
         }
     }
-    builder
+    SandboxConfig {
+        fs: vec![],
+        network: NetworkPolicy::Deny,
+        ipc: IpcPolicy::Strict,
+        limits: ResourceLimits::default(),
+        env,
+        darwin_sandbox_profiles: vec![],
+    }
 }
 
 fn probe_file_allowed(config: &SandboxConfig, operation: &str, path: &Path) -> bool {
     let mut command = probe();
     command.arg(operation).arg(path);
-    let mut child = config
-        .spawn_with(&WindowsBackend::new(), command)
+    command.env_clear();
+    command.envs(&config.env);
+    let mut child = WindowsBackend::new()
+        .spawn(config, command)
         .expect("spawn probe");
     child.wait().expect("wait").success()
 }
