@@ -1,16 +1,22 @@
 [package]
 name = "guardrail-windows"
-description = "Windows backend for the guardrail sandbox (AppContainer + Job Objects)."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+description = "Windows backend for the guardrail sandbox (AppContainer + Job Objects)."
 repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "guardrail-windows-probe"
+path = "src/bin/guardrail-windows-probe.rs"
 
 [dependencies]
 guardrail-core.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = [
+[target."cfg(windows)".dependencies]
+windows-sys = {
+  workspace = true,
+  features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
@@ -20,8 +26,5 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
-] }
-
-[[bin]]
-name = "guardrail-windows-probe"
-path = "src/bin/guardrail-windows-probe.rs"
+  ]
+}

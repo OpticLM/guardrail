@@ -1,10 +1,10 @@
 [package]
 name = "guardrail-napi"
-description = "Node-API (napi-rs) bindings for the guardrail sandbox."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+description = "Node-API (napi-rs) bindings for the guardrail sandbox."
 repository.workspace = true
+license.workspace = true
 
 [lib]
 crate-type = ["cdylib"]

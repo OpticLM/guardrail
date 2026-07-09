@@ -1,10 +1,10 @@
 [package]
 name = "guardrail-macos"
-description = "macOS backend for the guardrail sandbox (Seatbelt + setrlimit)."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+description = "macOS backend for the guardrail sandbox (Seatbelt + setrlimit)."
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 guardrail-core.workspace = true

@@ -1,10 +1,10 @@
 [package]
 name = "guardrail-core"
-description = "Core interfaces for the guardrail sandbox: policies, builder, and the platform Backend trait."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+description = "Core interfaces for the guardrail sandbox: policies, builder, and the platform Backend trait."
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
@@ -12,5 +12,5 @@ thiserror.workspace = true
 # `libc::kill` is the only OS-specific call in this crate: it backs the
 # kill-during-wait fallback in `SharedSandboxChild` on Unix. Core is otherwise
 # platform-agnostic.
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 libc.workspace = true
