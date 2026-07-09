@@ -14,6 +14,32 @@
 
 VCS is **jj (Jujutsu)** colocated with git. Use `jj` for inspection (`jj status`, `jj diff`, `jj log`), not `git`. There is a jj VCS skill for agents as reference.
 
+## Commit messages
+
+Write commit messages in **scoped commits** form (https://scopedcommits.com/): the scope comes first, before the colon, then the description.
+
+```
+<scope>: <description>
+
+[optional body]
+[optional trailer(s)]
+```
+
+- **No Conventional Commits type prefixes.** The token before the colon is the scope, not a type — never `feat:`, `fix:`, `chore:`, `refactor:`. Write `core: remove SandboxBuilder`, not `refactor(core): remove SandboxBuilder`.
+- **Scope is the area touched.** Prefer a crate or concern name: `core`, `linux`, `macos`, `windows`, `napi`, `facade` (the `guardrail` facade crate), `ci`, `docs`. A narrower sub-scope is fine when it's more informative than the crate (e.g. `acl:` for a Windows ACL change).
+- Keep the description short, starting lowercase, with no trailing period — match the existing log (`core: deny rules`, `windows: fix deny behaviour`, `*.toml: tombi fmt`).
+
+**Edge cases:**
+
+- **Several areas touched** — comma-separate the scopes (`linux, macos:`) or pick the broader scope that covers them. Don't drop the scope.
+- **Whole-tree / cross-cutting change** (formatting, deps, repo-wide docs or CI) — use `treewide`, or a file-pattern scope the repo already uses (`*.toml:`).
+- **No single scope fits** — the commit is probably too broad; consider splitting it (jj makes this cheap with `jj split`).
+- **Ticket reference** — put it in parentheses after the scope (`core (PROJ-123): ...`) or as a trailer in the body.
+- **Breaking change** — scoped commits defines no `!` / `BREAKING CHANGE:` marker; call it out in the body instead.
+- **Reverts and merges** — may take any form; the scope-first rule is for ordinary commits only.
+
+This repo is jj, not git — set the message on the current change with `jj describe -m "scope: description"`.
+
 ## Commands
 
 - In `crates/guardrail-napi`, use pnpm as the package manager, not npm.
