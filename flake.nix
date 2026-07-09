@@ -9,7 +9,7 @@
     };
   };
   outputs =
-    inputs@{ nixpkgs, fenix, ... }:
+    inputs@{ nixpkgs, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
     in
@@ -21,18 +21,23 @@
             inherit system;
             config.allowUnfree = true;
           };
+          fenix = inputs.fenix.packages.${system};
           llm-agents = inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
         in
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              (fenix.packages.${system}.stable.withComponents [
-                "cargo"
-                "clippy"
-                "rust-src"
-                "rustc"
-                "rustfmt"
-                "rust-analyzer"
+              (fenix.combine [
+                (fenix.stable.withComponents [
+                  "cargo"
+                  "clippy"
+                  "rust-src"
+                  "rustc"
+                  "rustfmt"
+                  "rust-analyzer"
+                ])
+                (fenix.targets.x86_64-pc-windows-gnu.stable.minimalToolchain)
+                (fenix.targets.aarch64-apple-darwin.stable.minimalToolchain)
               ])
               cargo-machete
               cargo-bloat
