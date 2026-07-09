@@ -21,6 +21,7 @@
 //!                     3 if denied
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
 
+#[cfg(target_os = "linux")]
 fn main() {
     use std::process::exit;
 
@@ -119,3 +120,6 @@ fn main() {
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

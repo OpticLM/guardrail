@@ -28,14 +28,11 @@
 //! in your profile. Set `darwin_sandbox_profiles` on `SandboxConfig` for the
 //! custom-profile escape hatch.
 
-#[cfg(target_os = "macos")]
+#![cfg(target_os = "macos")]
+
 mod backend;
-#[cfg(target_os = "macos")]
 mod profile;
-#[cfg(target_os = "macos")]
 mod rlimit;
-#[cfg(target_os = "macos")]
 mod seatbelt;
 
-#[cfg(target_os = "macos")]
 pub use backend::MacosBackend;

@@ -6,20 +6,14 @@
 //! `IpcPolicy` is currently a documented no-op on Windows; there is no Windows
 //! IPC restriction layer yet.
 
-#[cfg(windows)]
+#![cfg(windows)]
+
 mod acl;
-#[cfg(windows)]
 mod appcontainer;
-#[cfg(windows)]
 mod backend;
-#[cfg(windows)]
 mod cache;
-#[cfg(windows)]
 mod handle;
-#[cfg(windows)]
 mod job;
-#[cfg(windows)]
 mod process;
 
-#[cfg(windows)]
 pub use backend::WindowsBackend;
