@@ -13,6 +13,6 @@ mod process;
 
 pub use backend::Backend;
 pub use config::{ResourceLimits, SandboxConfig};
-pub use error::Error;
+pub use error::{Error, Result};
 pub use policy::{FsAccess, IpcPolicy, NetworkPolicy};
 pub use process::{SandboxChild, SharedSandboxChild};

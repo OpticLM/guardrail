@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::{io, mem, ptr};
 
-use guardrail_core::{Error, NetworkPolicy, SandboxChild};
+use guardrail_core::{Error, NetworkPolicy, Result, SandboxChild};
 use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
 use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
@@ -29,7 +29,7 @@ pub(crate) fn launch(
     job: OwnedHandle,
     appcontainer: Arc<CachedAppContainer>,
     network: NetworkPolicy,
-) -> Result<SandboxChild, Error> {
+) -> Result<SandboxChild> {
     let mut command_line = command_line_block(&command);
     let environment = environment_block(&command);
     let application_name = application_name(&command);

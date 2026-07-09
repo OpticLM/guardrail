@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use crate::error::Error;
+use crate::error::Result;
 use crate::process::SandboxChild;
 
 /// A platform-specific sandbox backend.
@@ -11,17 +11,16 @@ use crate::process::SandboxChild;
 /// limits) and spawn the child according to the immutable configuration they
 /// were constructed with. A backend must clear the command's inherited
 /// environment before applying the configuration environment.
-///
-/// The trait is object-safe so callers may hold a `&dyn Backend` if they wish.
 pub trait Backend {
     /// Spawn `command` confined according to this backend's stored config.
-    fn spawn(&self, command: Command) -> Result<SandboxChild, Error>;
+    fn spawn(&self, command: Command) -> Result<SandboxChild>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::SandboxConfig;
+    use crate::error::Error;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -31,7 +30,7 @@ mod tests {
     }
 
     impl Backend for RecordingBackend {
-        fn spawn(&self, mut command: std::process::Command) -> Result<SandboxChild, Error> {
+        fn spawn(&self, mut command: std::process::Command) -> Result<SandboxChild> {
             command.env_clear();
             command.envs(&self.config.env);
             let seen = command

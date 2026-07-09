@@ -1,7 +1,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
 
 use crate::{profile, rlimit, seatbelt};
 
@@ -13,7 +13,7 @@ pub struct MacosBackend {
 
 impl MacosBackend {
     /// Create a new macOS backend.
-    pub fn new(config: SandboxConfig) -> Result<Self, Error> {
+    pub fn new(config: SandboxConfig) -> Result<Self> {
         let seatbelt_profile = seatbelt::resolve(&config)?;
         Ok(Self {
             config,
@@ -23,7 +23,7 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild, Error> {
+    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);
 

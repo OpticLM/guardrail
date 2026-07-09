@@ -9,7 +9,7 @@ use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use guardrail_core::{Error, FsAccess, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Error, FsAccess, NetworkPolicy, Result, SandboxConfig};
 use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
 
 use crate::acl::AclGuard;
@@ -40,12 +40,12 @@ impl CachedAppContainer {
     pub(crate) fn security_capabilities(
         &self,
         network: NetworkPolicy,
-    ) -> Result<AppContainerSecurityCapabilities, Error> {
+    ) -> Result<AppContainerSecurityCapabilities> {
         self.profile.security_capabilities(network)
     }
 }
 
-pub(crate) fn get(config: &SandboxConfig) -> Result<Arc<CachedAppContainer>, Error> {
+pub(crate) fn get(config: &SandboxConfig) -> Result<Arc<CachedAppContainer>> {
     let namespace = cache_namespace(config);
     let fs_key = filesystem_policy_key(&config.fs);
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -80,7 +80,7 @@ fn create_entry(
     namespace: String,
     fs_key: FsPolicyKey,
     config: &SandboxConfig,
-) -> Result<CachedAppContainer, Error> {
+) -> Result<CachedAppContainer> {
     let profile_name = profile_name(&namespace, fs_key.hash);
     let profile = AppContainerProfile::create(&profile_name)?;
     let acl = AclGuard::apply(&config.fs, profile.sid())?;

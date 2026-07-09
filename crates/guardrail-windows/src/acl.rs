@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 
-use guardrail_core::{Error, FsAccess};
+use guardrail_core::{Error, FsAccess, Result};
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
@@ -41,7 +41,7 @@ unsafe impl Send for AclGuard {}
 unsafe impl Sync for AclGuard {}
 
 impl AclGuard {
-    pub(crate) fn apply(fs: &[FsAccess], sid: PSID) -> Result<Self, Error> {
+    pub(crate) fn apply(fs: &[FsAccess], sid: PSID) -> Result<Self> {
         let mut guard = Self {
             originals: Vec::new(),
         };

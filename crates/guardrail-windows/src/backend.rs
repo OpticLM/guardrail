@@ -3,7 +3,7 @@
 use std::process::Command;
 use std::sync::Arc;
 
-use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Result, SandboxChild, SandboxConfig};
 
 use crate::{cache, job, process};
 
@@ -15,7 +15,7 @@ pub struct WindowsBackend {
 
 impl WindowsBackend {
     /// Create a new Windows backend.
-    pub fn new(config: SandboxConfig) -> Result<Self, Error> {
+    pub fn new(config: SandboxConfig) -> Result<Self> {
         let appcontainer = cache::get(&config)?;
         Ok(Self {
             config,
@@ -25,7 +25,7 @@ impl WindowsBackend {
 }
 
 impl Backend for WindowsBackend {
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild, Error> {
+    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);
 

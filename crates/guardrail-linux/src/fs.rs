@@ -13,7 +13,7 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus, make_bitflags,
 };
 
-use guardrail_core::{Error, FsAccess};
+use guardrail_core::{Error, FsAccess, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledRules {
@@ -27,7 +27,7 @@ pub(crate) struct CompiledRules {
 /// This runs in the parent before `fork()`, so policy compilation errors remain
 /// structured [`Error::Confinement`] values instead of being collapsed into a
 /// `pre_exec` spawn failure.
-pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules, Error> {
+pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
     let normalized = normalize_rules(rules)?;
     Ok(CompiledRules {
         read_paths: expand_allow_paths(&normalized, FsRight::Read)?,
@@ -44,7 +44,7 @@ pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules, Error> {
 /// `Ok(())` after warning — hard-failing would make the library unusable on
 /// older kernels. A genuine [`landlock::RulesetError`] is wrapped in
 /// [`Error::confinement`].
-pub(crate) fn apply(rules: &CompiledRules) -> Result<(), Error> {
+pub(crate) fn apply(rules: &CompiledRules) -> Result<()> {
     // Pin ABI v1 for the broadest kernel support; the read/exec/write rights
     // this sandbox needs all exist in v1.
     let abi = ABI::V1;
@@ -106,7 +106,7 @@ struct NormalizedRule {
     path: PathBuf,
 }
 
-fn normalize_rules(rules: &[FsAccess]) -> Result<Vec<NormalizedRule>, Error> {
+fn normalize_rules(rules: &[FsAccess]) -> Result<Vec<NormalizedRule>> {
     rules
         .iter()
         .map(|rule| {
@@ -139,10 +139,7 @@ fn final_effect(rules: &[NormalizedRule], right: FsRight, path: &Path) -> RuleEf
     effect
 }
 
-fn expand_allow_paths(
-    rules: &[NormalizedRule],
-    right: FsRight,
-) -> Result<BTreeSet<PathBuf>, Error> {
+fn expand_allow_paths(rules: &[NormalizedRule], right: FsRight) -> Result<BTreeSet<PathBuf>> {
     let roots = rules
         .iter()
         .filter(|rule| rule.right == right && rule.effect == RuleEffect::Allow)
@@ -161,7 +158,7 @@ fn expand_path(
     right: FsRight,
     path: &Path,
     allowed: &mut BTreeSet<PathBuf>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let metadata = std::fs::metadata(path).map_err(|err| Error::confinement("landlock", err))?;
     let effect = final_effect(rules, right, path);
     let has_boundary_below = has_descendant_boundary(rules, right, path);
@@ -199,7 +196,7 @@ fn add_path_rules(
     mut ruleset: RulesetCreated,
     paths: &BTreeSet<PathBuf>,
     access: BitFlags<AccessFs>,
-) -> Result<RulesetCreated, Error> {
+) -> Result<RulesetCreated> {
     for path in paths {
         let fd = PathFd::new(path).map_err(|err| Error::confinement("landlock", err))?;
         ruleset = ruleset

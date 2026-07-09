@@ -1,10 +1,10 @@
 use std::io;
 
-use guardrail_core::{Error, SandboxConfig};
+use guardrail_core::{Error, Result, SandboxConfig};
 
 use crate::profile::SeatbeltProfile;
 
-pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile, Error> {
+pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     let profile = if config.darwin_sandbox_profiles.is_empty() {
         crate::profile::build(config)
     } else {
@@ -25,12 +25,12 @@ pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile, Error> 
     Ok(profile)
 }
 
-pub(crate) fn apply(profile: &SeatbeltProfile) -> Result<(), Error> {
+pub(crate) fn apply(profile: &SeatbeltProfile) -> Result<()> {
     painless_belt::ffi::sandbox_init(&profile.source, 0)
         .map_err(|err| Error::confinement("seatbelt", io::Error::other(err.to_string())))
 }
 
-fn validate(source: &str) -> Result<(), Error> {
+fn validate(source: &str) -> Result<()> {
     if source.contains('\0') {
         return Err(Error::confinement(
             "seatbelt-profile",

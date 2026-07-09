@@ -1,7 +1,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
 
 use crate::{fs, rlimit, seccomp};
 
@@ -14,7 +14,7 @@ pub struct LinuxBackend {
 
 impl LinuxBackend {
     /// Create a new Linux backend.
-    pub fn new(config: SandboxConfig) -> Result<Self, Error> {
+    pub fn new(config: SandboxConfig) -> Result<Self> {
         let fs_rules = fs::compile(&config.fs)?;
         let seccomp_program = seccomp::build(&config)?;
         Ok(Self {
@@ -26,7 +26,7 @@ impl LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild, Error> {
+    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);
 

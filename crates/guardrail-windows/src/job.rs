@@ -6,7 +6,7 @@ use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::{io, ptr};
 
-use guardrail_core::{Error, SandboxConfig};
+use guardrail_core::{Error, Result, SandboxConfig};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
     JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -16,7 +16,7 @@ use windows_sys::Win32::System::JobObjects::{
 
 use crate::handle::{bool_result, owned_handle_from_raw};
 
-pub(crate) fn create(config: &SandboxConfig) -> Result<OwnedHandle, Error> {
+pub(crate) fn create(config: &SandboxConfig) -> Result<OwnedHandle> {
     // SAFETY: null security attributes and an unnamed job are valid inputs.
     // The returned raw handle is transferred into OwnedHandle below.
     let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };

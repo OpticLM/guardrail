@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 
-use guardrail_core::{Error, IpcPolicy, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Error, IpcPolicy, NetworkPolicy, Result, SandboxConfig};
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule,
@@ -57,7 +57,7 @@ const ALWAYS_BLOCKED_IPC: &[i64] = &[
 
 /// Build the combined seccomp filter for `config`. Returns `Ok(None)` when no
 /// rules apply, meaning the caller should skip installation.
-pub(crate) fn build(config: &SandboxConfig) -> Result<Option<BpfProgram>, Error> {
+pub(crate) fn build(config: &SandboxConfig) -> Result<Option<BpfProgram>> {
     let mut rules: RuleMap = BTreeMap::new();
     add_network_rules(&mut rules, config.network)?;
     add_ipc_rules(&mut rules, config.ipc)?;
@@ -79,11 +79,11 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Option<BpfProgram>, Error>
 
 /// Install `program` on the current thread. Requires NO_NEW_PRIVS (set earlier
 /// in pre_exec). Async-signal-safe enough for pre_exec (a prctl wrapper).
-pub(crate) fn apply(program: &BpfProgram) -> Result<(), Error> {
+pub(crate) fn apply(program: &BpfProgram) -> Result<()> {
     seccompiler::apply_filter(program).map_err(|e| Error::confinement("seccomp", e))
 }
 
-fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<(), Error> {
+fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
     match policy {
         NetworkPolicy::Deny => {
             // Block creation of IP sockets at the source.
@@ -106,7 +106,7 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<(), E
     Ok(())
 }
 
-fn add_ipc_rules(rules: &mut RuleMap, policy: IpcPolicy) -> Result<(), Error> {
+fn add_ipc_rules(rules: &mut RuleMap, policy: IpcPolicy) -> Result<()> {
     for &sys in ALWAYS_BLOCKED_IPC {
         add_whole_syscall_rule(rules, sys);
     }
@@ -124,7 +124,7 @@ fn add_whole_syscall_rule(rules: &mut RuleMap, syscall: i64) {
 }
 
 /// A rule matching `socket(domain == family, ..)`.
-fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule, Error> {
+fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule> {
     let cond = SeccompCondition::new(
         0, // arg0 = domain
         SeccompCmpArgLen::Dword,

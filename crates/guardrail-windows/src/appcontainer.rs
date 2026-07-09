@@ -7,7 +7,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
-use guardrail_core::{Error, NetworkPolicy};
+use guardrail_core::{Error, Result, NetworkPolicy};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -28,7 +28,7 @@ unsafe impl Send for AppContainerProfile {}
 unsafe impl Sync for AppContainerProfile {}
 
 impl AppContainerProfile {
-    pub(crate) fn create(name: &str) -> Result<Self, Error> {
+    pub(crate) fn create(name: &str) -> Result<Self> {
         let name_wide = wide_null(OsStr::new(name));
         let display = wide_null(OsStr::new("guardrail sandbox"));
         let description = wide_null(OsStr::new("Reusable guardrail AppContainer profile"));
@@ -71,7 +71,7 @@ impl AppContainerProfile {
     pub(crate) fn security_capabilities(
         &self,
         network: NetworkPolicy,
-    ) -> Result<AppContainerSecurityCapabilities, Error> {
+    ) -> Result<AppContainerSecurityCapabilities> {
         AppContainerSecurityCapabilities::new(self.sid(), network)
             .map_err(|err| Error::confinement("appcontainer", err))
     }
