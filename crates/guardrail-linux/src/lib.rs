@@ -12,9 +12,6 @@ compile_error!("guardrail-linux can only be compiled for Linux targets");
 mod backend;
 
 #[cfg(target_os = "linux")]
-pub mod diagnostics;
-
-#[cfg(target_os = "linux")]
 mod fs;
 #[cfg(target_os = "linux")]
 mod rlimit;

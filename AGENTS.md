@@ -2,7 +2,7 @@
 
 ## Philosophy
 
-**KISS.** No glue code, no over-engineering. Each layer should be a faithful, thin implementation of its single intent — describe a policy, apply it, spawn the child, explain a failure. When a change tempts you to add indirection, abstraction, or a "flexible" extension point you weren't asked for, resist it.
+**KISS.** No glue code, no over-engineering. Each layer should be a faithful, thin implementation of its single intent — describe a policy, apply it, spawn the child. When a change tempts you to add indirection, abstraction, or a "flexible" extension point you weren't asked for, resist it.
 
 **Ground every claim about library behavior.** Do not guess other crates behaves. When unsure, verify with the **context7** or **docs-rs** MCP servers before writing or asserting behavior. Read the crate's actual `src` and its docs rather than recalling from memory.
 
@@ -32,7 +32,7 @@ VCS is **jj (Jujutsu)** colocated with git. Use `jj` for inspection (`jj status`
 - `guardrail-macos` — Seatbelt (`painless-belt`) + `setrlimit`. Profile generation is pure Rust, but the crate is native-only and tested on macOS. Seatbelt uses `(deny default)`, so a real binary often needs runtime grants (dyld paths, sysctl names) beyond the portable policy; the `darwin_sandbox_profile` builder escape hatch + the crate-level tips doc are the answer — see `guardrail-macos/src/lib.rs`. `IpcPolicy` is effectively a no-op on macOS.
 - `guardrail-windows` — AppContainer (per-run SID, fs/network), Job Object (process tree dies with the sandbox), ACL grants are *additive* (only ever append ACEs). `IpcPolicy` is a documented no-op on Windows.
 
-**`guardrail-napi` (Node bindings).** One `spawn(command, args?, options?)` function; `options` mirrors `SandboxConfig` fields (camelCase, see `SpawnOptions`). The backend comes from the Rust `guardrail::PlatformBackend` facade — each published binary targets exactly one OS. `wait()` runs on the libuv threadpool via `WaitTask`; diagnostics come from the backend's `Backend::explain` override (no separate `explain` import to keep in sync). `stdio` is inherited; output capture is not yet supported.
+**`guardrail-napi` (Node bindings).** One `spawn(command, args?, options?)` function; `options` mirrors `SandboxConfig` fields (camelCase, see `SpawnOptions`). The backend comes from the Rust `guardrail::PlatformBackend` facade — each published binary targets exactly one OS. `wait()` runs on the libuv threadpool via `WaitTask`. `stdio` is inherited; output capture is not yet supported.
 
 ## Testing conventions
 

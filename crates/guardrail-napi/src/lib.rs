@@ -15,8 +15,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail::{
-    Backend, ExplainCtx, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig,
-    SharedSandboxChild, ViolationKind,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig, SharedSandboxChild,
 };
 
 /// Network confinement level for the child: `"deny"` | `"outbound-only"` |
@@ -57,33 +56,6 @@ impl From<JsIpcPolicy> for IpcPolicy {
         match p {
             JsIpcPolicy::Strict => IpcPolicy::Strict,
             JsIpcPolicy::Relaxed => IpcPolicy::Relaxed,
-        }
-    }
-}
-
-/// The category of a suspected policy violation: `"seccomp"` | `"resource-limit"`
-/// | `"filesystem"` | `"unknown"`. Mirrors `guardrail::ViolationKind`.
-#[napi(string_enum, js_name = "ViolationKind")]
-pub enum JsViolationKind {
-    #[napi(value = "seccomp")]
-    Seccomp,
-    #[napi(value = "resource-limit")]
-    ResourceLimit,
-    #[napi(value = "filesystem")]
-    Filesystem,
-    #[napi(value = "unknown")]
-    Unknown,
-}
-
-impl From<ViolationKind> for JsViolationKind {
-    // `ViolationKind` is `#[non_exhaustive]`: any future core variant maps to
-    // `Unknown` so a new kind does not break the JS surface.
-    fn from(k: ViolationKind) -> Self {
-        match k {
-            ViolationKind::Seccomp => JsViolationKind::Seccomp,
-            ViolationKind::ResourceLimit => JsViolationKind::ResourceLimit,
-            ViolationKind::Filesystem => JsViolationKind::Filesystem,
-            _ => JsViolationKind::Unknown,
         }
     }
 }
@@ -187,21 +159,24 @@ pub struct ExitResult {
     pub signal: Option<i32>,
     /// `true` iff the process exited cleanly with code 0.
     pub success: bool,
-    /// Best-effort diagnostic when the run failed; `null` on success or when the
-    /// failure could not be attributed to a policy.
-    #[napi(ts_type = "Violation")]
-    pub violation: Option<JsViolation>,
 }
 
-/// A heuristic explanation of a suspected policy violation.
-#[napi(object, js_name = "Violation")]
-pub struct JsViolation {
-    /// The suspected category.
-    pub kind: JsViolationKind,
-    /// One-line human summary.
-    pub summary: String,
-    /// Copy-pasteable next steps (which option to add to loosen the policy).
-    pub suggestions: Vec<String>,
+impl From<ExitStatus> for ExitResult {
+    fn from(status: ExitStatus) -> Self {
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
+
+        ExitResult {
+            code: status.code(),
+            signal,
+            success: status.success(),
+        }
+    }
 }
 
 fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
@@ -277,40 +252,10 @@ fn to_napi_err(e: guardrail::Error) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
 
-fn build_exit_result(
-    backend: &PlatformBackend,
-    config: &SandboxConfig,
-    status: ExitStatus,
-) -> ExitResult {
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
-    #[cfg(not(unix))]
-    let signal: Option<i32> = None;
-
-    let violation = backend
-        .explain(&ExplainCtx::new(config, status))
-        .map(|v| JsViolation {
-            kind: v.kind.into(),
-            summary: v.summary,
-            suggestions: v.suggestions,
-        });
-
-    ExitResult {
-        code: status.code(),
-        signal,
-        success: status.success(),
-        violation,
-    }
-}
-
 /// A reusable, pre-initialized sandbox.
 #[napi]
 pub struct Sandbox {
     backend: Arc<PlatformBackend>,
-    config: Arc<SandboxConfig>,
 }
 
 #[napi]
@@ -335,7 +280,6 @@ impl Sandbox {
     ) -> Result<SandboxChild> {
         spawn_with_backend(
             Arc::clone(&self.backend),
-            Arc::clone(&self.config),
             command,
             args,
             options.and_then(|options| options.cwd),
@@ -345,7 +289,6 @@ impl Sandbox {
 
 pub struct BuiltSandbox {
     backend: PlatformBackend,
-    config: SandboxConfig,
 }
 
 pub struct BuildSandboxTask {
@@ -359,14 +302,13 @@ impl Task for BuildSandboxTask {
     fn compute(&mut self) -> Result<Self::Output> {
         let options = std::mem::take(&mut self.options);
         let config = build_config(options)?;
-        let backend = PlatformBackend::new(config.clone()).map_err(to_napi_err)?;
-        Ok(BuiltSandbox { backend, config })
+        let backend = PlatformBackend::new(config).map_err(to_napi_err)?;
+        Ok(BuiltSandbox { backend })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(Sandbox {
             backend: Arc::new(output.backend),
-            config: Arc::new(output.config),
         })
     }
 }
@@ -381,13 +323,12 @@ pub fn spawn(
 ) -> Result<SandboxChild> {
     let (sandbox_options, cwd) = options.unwrap_or_default().into();
     let config = build_config(sandbox_options)?;
-    let backend = PlatformBackend::new(config.clone()).map_err(to_napi_err)?;
-    spawn_with_backend(Arc::new(backend), Arc::new(config), command, args, cwd)
+    let backend = PlatformBackend::new(config).map_err(to_napi_err)?;
+    spawn_with_backend(Arc::new(backend), command, args, cwd)
 }
 
 fn spawn_with_backend(
     backend: Arc<PlatformBackend>,
-    config: Arc<SandboxConfig>,
     command: String,
     args: Option<Vec<String>>,
     cwd: Option<String>,
@@ -405,8 +346,6 @@ fn spawn_with_backend(
 
     Ok(SandboxChild {
         inner: SharedSandboxChild::new(child),
-        backend,
-        config,
     })
 }
 
@@ -414,10 +353,6 @@ fn spawn_with_backend(
 #[napi]
 pub struct SandboxChild {
     inner: SharedSandboxChild,
-    backend: Arc<PlatformBackend>,
-    // Kept so `build_exit_result` can call `explain(config, status)` to attach a
-    // policy-violation diagnostic to the exit result.
-    config: Arc<SandboxConfig>,
 }
 
 #[napi]
@@ -434,8 +369,6 @@ impl SandboxChild {
     pub fn wait(&self) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask {
             inner: self.inner.clone(),
-            backend: Arc::clone(&self.backend),
-            config: self.config.clone(),
         })
     }
 
@@ -453,8 +386,6 @@ impl SandboxChild {
 /// libuv-threadpool task backing the async `wait()`.
 pub struct WaitTask {
     inner: SharedSandboxChild,
-    backend: Arc<PlatformBackend>,
-    config: Arc<SandboxConfig>,
 }
 
 impl Task for WaitTask {
@@ -471,7 +402,7 @@ impl Task for WaitTask {
                 format!("failed to wait for child: {e}"),
             )
         })?;
-        Ok(build_exit_result(&self.backend, &self.config, status))
+        Ok(status.into())
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

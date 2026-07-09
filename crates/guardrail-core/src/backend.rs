@@ -2,7 +2,6 @@
 
 use std::process::Command;
 
-use crate::diagnostics::{ExplainCtx, Violation};
 use crate::error::Error;
 use crate::process::SandboxChild;
 
@@ -17,22 +16,6 @@ use crate::process::SandboxChild;
 pub trait Backend {
     /// Spawn `command` confined according to this backend's stored config.
     fn spawn(&self, command: Command) -> Result<SandboxChild, Error>;
-
-    /// Best-effort explanation of why `ctx.status` likely indicates a policy
-    /// violation under `ctx.config`. Returns `None` on success or when the
-    /// failure could not be attributed to a policy.
-    ///
-    /// The default is a platform-agnostic heuristic ([`portable_explain`]);
-    /// platform backends override it to add signal- or Seatbelt-specific
-    /// attribution. Like all diagnostics in this crate it is heuristic — the
-    /// parent cannot observe the exact syscall or path a backend denied — so
-    /// this narrows the cause from the exit status, the active configuration,
-    /// and any captured output in `ctx`.
-    ///
-    /// [`portable_explain`]: crate::diagnostics::portable_explain
-    fn explain(&self, ctx: &ExplainCtx<'_>) -> Option<Violation> {
-        crate::diagnostics::portable_explain(ctx)
-    }
 }
 
 #[cfg(test)]

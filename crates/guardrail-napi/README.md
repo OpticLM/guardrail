@@ -852,32 +852,6 @@ CLI's authentication prompt both outside and inside Guardrail. The same macOS
 policy and `network: 'outbound-only'` completed an HTTPS request to
 `https://api.github.com/rate_limit` with `/usr/bin/curl`.
 
-## Diagnostics
-
-`wait()` resolves to `{ code, signal, success, violation? }`. Diagnostics are
-best-effort hints from the native backend:
-
-```js
-const result = await child.wait()
-if (!result.success && result.violation) {
-  console.error(result.violation.summary)
-  for (const suggestion of result.violation.suggestions) {
-    console.error(`  - ${suggestion}`)
-  }
-}
-```
-
-On Linux, a bad system call usually means the seccomp network or IPC policy is
-too tight for the tool. A plain nonzero exit with "Permission denied" or
-`Invalid cross-device link` in the tool's stderr usually means a filesystem
-grant or current Landlock limitation is involved.
-
-On macOS, `signal: 6 (SIGABRT)` from an otherwise normal CLI often means
-Seatbelt denied a runtime operation such as process fork, sysctl read, metadata
-lookup, or a path access. If `spawn()` rejects with `Invalid argument` and
-stderr says `sandbox initialization failed`, inspect the imported `.sb` profile
-syntax and make sure the profile does not require Apple app-sandbox parameters.
-
 ## API Notes
 
 - The sandbox denies everything by default. Grant exactly the access the child

@@ -7,14 +7,12 @@
 
 mod backend;
 mod config;
-pub mod diagnostics;
 mod error;
 mod policy;
 mod process;
 
 pub use backend::Backend;
 pub use config::{ResourceLimits, SandboxConfig};
-pub use diagnostics::{ExplainCtx, Violation, ViolationKind};
 pub use error::Error;
 pub use policy::{FsAccess, IpcPolicy, NetworkPolicy};
 pub use process::{SandboxChild, SharedSandboxChild};

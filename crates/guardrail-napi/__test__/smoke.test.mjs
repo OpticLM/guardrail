@@ -15,8 +15,8 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   // Grant read+execute on the root so the dynamic linker can load libc/ld.so
   // regardless of where the distro stashes them (/usr/lib64 on Fedora/RHEL,
   // /usr/lib/x86_64-linux-gnu on Debian/Ubuntu). This is a binding-plumbing
-  // smoke test — spawn(), async wait(), exit result, diagnostics — not a
-  // Landlock/Seatbelt precision test, so broad grants are appropriate here.
+  // smoke test — spawn(), async wait(), exit result — not a Landlock/Seatbelt
+  // precision test, so broad grants are appropriate here.
   assert.equal(typeof guardrail.Sandbox.build, 'function')
   const sandbox = await guardrail.Sandbox.build({
     fs: [

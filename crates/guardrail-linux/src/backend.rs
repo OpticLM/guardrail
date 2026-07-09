@@ -1,9 +1,9 @@
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use guardrail_core::{Backend, Error, ExplainCtx, SandboxChild, SandboxConfig, Violation};
+use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
-use crate::{diagnostics, fs, rlimit, seccomp};
+use crate::{fs, rlimit, seccomp};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
@@ -70,10 +70,6 @@ impl Backend for LinuxBackend {
 
         let child = command.spawn().map_err(Error::Spawn)?;
         Ok(SandboxChild::from(child))
-    }
-
-    fn explain(&self, ctx: &ExplainCtx<'_>) -> Option<Violation> {
-        diagnostics::explain(ctx)
     }
 }
 

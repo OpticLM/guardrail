@@ -31,8 +31,6 @@
 #[cfg(target_os = "macos")]
 mod backend;
 #[cfg(target_os = "macos")]
-pub mod diagnostics;
-#[cfg(target_os = "macos")]
 mod profile;
 #[cfg(target_os = "macos")]
 mod rlimit;

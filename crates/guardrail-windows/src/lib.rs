@@ -15,8 +15,6 @@ mod backend;
 #[cfg(windows)]
 mod cache;
 #[cfg(windows)]
-pub mod diagnostics;
-#[cfg(windows)]
 mod handle;
 #[cfg(windows)]
 mod job;

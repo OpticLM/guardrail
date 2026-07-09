@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use guardrail_core::{Backend, Error, SandboxChild, SandboxConfig};
 
-use crate::{cache, diagnostics, job, process};
+use crate::{cache, job, process};
 
 /// The Windows sandbox backend.
 pub struct WindowsBackend {
@@ -36,9 +36,5 @@ impl Backend for WindowsBackend {
             Arc::clone(&self.appcontainer),
             self.config.network,
         )
-    }
-
-    fn explain(&self, ctx: &guardrail_core::ExplainCtx<'_>) -> Option<guardrail_core::Violation> {
-        diagnostics::explain(ctx)
     }
 }
