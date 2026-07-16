@@ -9,7 +9,7 @@ use crate::{fs, rlimit, seccomp, support};
 pub struct LinuxBackend {
     config: SandboxConfig,
     fs_rules: fs::CompiledRules,
-    seccomp_program: Option<seccompiler::BpfProgram>,
+    seccomp_programs: Vec<seccompiler::BpfProgram>,
 }
 
 impl LinuxBackend {
@@ -21,11 +21,11 @@ impl LinuxBackend {
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
-        let seccomp_program = seccomp::build(&config)?;
+        let seccomp_programs = seccomp::build(&config)?;
         Ok(Self {
             config,
             fs_rules,
-            seccomp_program,
+            seccomp_programs,
         })
     }
 }
@@ -43,7 +43,7 @@ impl Backend for LinuxBackend {
         // forked child, so it must own its inputs (no borrows of `self`).
         let limits = self.config.limits;
         let fs_rules = self.fs_rules.clone();
-        let seccomp_program = self.seccomp_program.clone();
+        let seccomp_programs = self.seccomp_programs.clone();
 
         // SAFETY: the closure runs after fork() and before execvp() in the
         // child. NO_NEW_PRIVS and the rlimit calls are async-signal-safe; the
@@ -65,13 +65,11 @@ impl Backend for LinuxBackend {
                 //     `pre_exec` closures must return `io::Result`.
                 fs::apply(&fs_rules).map_err(std::io::Error::other)?;
 
-                // (4) Seccomp is applied LAST so its filter does not interfere
+                // (4) Seccomp is applied LAST so its filters do not interfere
                 //     with Landlock's own setup syscalls.
-                //     The BPF program was built in the parent;
-                //     only install it here.
-                if let Some(program) = &seccomp_program {
-                    seccomp::apply(program).map_err(std::io::Error::other)?;
-                }
+                //     The BPF programs were built in the parent;
+                //     only install them here.
+                seccomp::apply(&seccomp_programs).map_err(std::io::Error::other)?;
 
                 Ok(())
             });

@@ -5,7 +5,7 @@
 //! Exit codes:
 //!   0   operation succeeded / allowed
 //!   3   operation failed because it was denied (the expected sandboxed result)
-//!   2   usage error / unknown command
+//!   2   usage or probe error
 //!
 //! Commands:
 //!   echo-env <NAME>   print the value of env var NAME (empty if unset), exit 0
@@ -17,6 +17,11 @@
 //!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
+//!   io-uring-setup    create an io_uring instance; exit 0 if allowed, 3 on ENOSYS
+//!   io-uring-enter    call io_uring_enter with an invalid fd; exit 0 if the
+//!                     kernel returns EBADF, 3 on ENOSYS
+//!   io-uring-register call io_uring_register with invalid arguments; exit 0
+//!                     if the kernel returns EINVAL, 3 on ENOSYS
 //!   shm               create a SysV shared-memory segment; exit 0 if allowed,
 //!                     3 if denied
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
@@ -85,6 +90,67 @@ fn main() {
             Ok(_) => exit(0),
             Err(_) => exit(3),
         },
+        "io-uring-setup" => {
+            // io_uring_setup(2) has no libc wrapper; a zeroed params block
+            // requests no optional features. [0u64; 15] matches struct
+            // io_uring_params' 120-byte size and 8-byte alignment.
+            let mut params = [0u64; 15];
+            // SAFETY: params is a valid, writable, zeroed buffer the kernel
+            // fills in; it outlives the call.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_io_uring_setup,
+                    4 as libc::c_long,
+                    params.as_mut_ptr(),
+                )
+            };
+            if fd < 0 {
+                exit_io_uring_probe_error(None);
+            }
+            // SAFETY: fd was returned by io_uring_setup above and is owned here.
+            unsafe { libc::close(fd as libc::c_int) };
+            exit(0);
+        }
+        "io-uring-enter" => {
+            // An invalid fd proves that the syscall reached the kernel when
+            // it returns EBADF; the sandbox replaces that result with ENOSYS.
+            // SAFETY: the invalid fd is intentional and all pointer lengths
+            // are zero, so the kernel does not dereference the null pointer.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_io_uring_enter,
+                    -1 as libc::c_long,
+                    0 as libc::c_long,
+                    0 as libc::c_long,
+                    0 as libc::c_long,
+                    std::ptr::null::<libc::sigset_t>(),
+                    0 as libc::c_long,
+                )
+            };
+            if rc < 0 {
+                exit_io_uring_probe_error(Some(libc::EBADF));
+            }
+            exit(0);
+        }
+        "io-uring-register" => {
+            // IORING_REGISTER_BUFFERS with zero buffers reaches the syscall
+            // and deterministically returns EINVAL when it is allowed.
+            // SAFETY: zero arguments mean the kernel does not dereference the
+            // null pointer.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_io_uring_register,
+                    -1 as libc::c_long,
+                    0 as libc::c_long,
+                    std::ptr::null::<libc::c_void>(),
+                    0 as libc::c_long,
+                )
+            };
+            if rc < 0 {
+                exit_io_uring_probe_error(Some(libc::EINVAL));
+            }
+            exit(0);
+        }
         "shm" => {
             // SAFETY: shmget with scalar args. IPC_PRIVATE creates a new segment.
             let id = unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) };
@@ -114,8 +180,24 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind|shm|ptrace-self> [arg]"
+                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind|io-uring-setup|\
+                 io-uring-enter|io-uring-register|shm|ptrace-self> [arg]"
             );
+            exit(2);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exit_io_uring_probe_error(allowed_errno: Option<libc::c_int>) -> ! {
+    use std::process::exit;
+
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOSYS) => exit(3),
+        Some(errno) if allowed_errno == Some(errno) => exit(0),
+        _ => {
+            eprintln!("unexpected io_uring error: {error}");
             exit(2);
         }
     }

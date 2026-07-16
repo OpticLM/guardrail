@@ -2,9 +2,9 @@
 //!
 //! Landlock enforcement is verified on a disposable thread, leaving the
 //! caller unrestricted. The seccomp probe is deliberately narrower:
-//! `SECCOMP_GET_ACTION_AVAIL` reports whether the kernel knows the filter's
-//! `Trap` action, but does not prove that an ambient policy will permit
-//! installing the filter.
+//! `SECCOMP_GET_ACTION_AVAIL` reports whether the kernel knows the filters'
+//! `Trap` and `Errno` actions, but does not prove that an ambient policy will
+//! permit installing the filters.
 //!
 //! [`Backend::probe_support`]: guardrail_core::Backend::probe_support
 
@@ -17,7 +17,7 @@ use guardrail_core::{Error, Result};
 /// Probe the required Linux features without changing the calling thread.
 pub(crate) fn probe_required_features() -> Result<()> {
     probe_landlock_enforcement()?;
-    probe_seccomp_trap_action_availability()?;
+    probe_seccomp_action_availability()?;
     Ok(())
 }
 
@@ -59,26 +59,31 @@ fn enforce_landlock_on_probe_thread() -> Result<()> {
     Ok(())
 }
 
-/// Query whether the kernel reports the seccomp `Trap` action used by the
-/// backend's filter. This does not install a filter and is not proof that a
-/// later `SECCOMP_SET_MODE_FILTER` call will be permitted or have resources.
-fn probe_seccomp_trap_action_availability() -> Result<()> {
-    let action: libc::c_uint = libc::SECCOMP_RET_TRAP;
-    // SAFETY: SECCOMP_GET_ACTION_AVAIL only reads `action`; no filter is
-    // installed and no process state changes.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_seccomp,
-            libc::SECCOMP_GET_ACTION_AVAIL,
-            0,
-            &action as *const libc::c_uint,
-        )
-    };
-    if rc != 0 {
-        return Err(Error::Unsupported(format!(
-            "seccomp-BPF Trap action availability probe failed; filter installation was not tested: {}",
-            std::io::Error::last_os_error()
-        )));
+/// Query whether the kernel reports the seccomp actions used by the backend's
+/// filters: `Trap` for violations and `Errno` for the io_uring denial. This
+/// does not install a filter and is not proof that a later
+/// `SECCOMP_SET_MODE_FILTER` call will be permitted or have resources.
+fn probe_seccomp_action_availability() -> Result<()> {
+    for (name, action) in [
+        ("Trap", libc::SECCOMP_RET_TRAP),
+        ("Errno", libc::SECCOMP_RET_ERRNO),
+    ] {
+        // SAFETY: SECCOMP_GET_ACTION_AVAIL only reads `action`; no filter is
+        // installed and no process state changes.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_GET_ACTION_AVAIL,
+                0,
+                &action as *const libc::c_uint,
+            )
+        };
+        if rc != 0 {
+            return Err(Error::Unsupported(format!(
+                "seccomp-BPF {name} action availability probe failed; filter installation was not tested: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
     }
     Ok(())
 }
