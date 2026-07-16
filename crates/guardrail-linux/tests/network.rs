@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 
 use guardrail_core::{Backend, NetworkPolicy, SandboxConfig};
@@ -26,6 +27,10 @@ fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
     status(config, args).success()
 }
 
+fn blocked_by_seccomp(config: &SandboxConfig, args: &[&str]) -> bool {
+    status(config, args).signal() == Some(libc::SIGSYS)
+}
+
 /// True when the host kernel itself offers io_uring; it may be absent
 /// (pre-5.1) or disabled via the `kernel.io_uring_disabled` sysctl, in which
 /// case the io_uring policy tests cannot prove anything about the filter.
@@ -44,13 +49,53 @@ fn deny_blocks_inet_socket_creation() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     assert!(
-        !allowed(&config, &["socket-inet"]),
+        blocked_by_seccomp(&config, &["socket-inet"]),
         "creating an AF_INET socket must be blocked under Deny"
     );
 }
 
 #[test]
-fn outbound_only_allows_socket_but_blocks_bind() {
+fn deny_blocks_netlink_socket_creation() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
+    assert!(
+        blocked_by_seccomp(&config, &["socket-netlink"]),
+        "creating an AF_NETLINK socket must be blocked under Deny"
+    );
+}
+
+#[test]
+fn deny_blocks_packet_socket_creation() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
+    assert!(
+        blocked_by_seccomp(&config, &["socket-packet"]),
+        "creating an AF_PACKET socket must be blocked under Deny"
+    );
+}
+
+#[test]
+fn deny_blocks_vsock_socket_creation() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
+    assert!(
+        blocked_by_seccomp(&config, &["socket-vsock"]),
+        "creating an AF_VSOCK socket must be blocked under Deny"
+    );
+}
+
+#[test]
+fn deny_allows_unix_socket_creation() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::Deny;
+    assert!(
+        allowed(&config, &["socket-unix"]),
+        "creating an AF_UNIX socket must be allowed under Deny"
+    );
+}
+
+#[test]
+fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
     assert!(
@@ -58,7 +103,17 @@ fn outbound_only_allows_socket_but_blocks_bind() {
         "AF_INET socket creation must be allowed under OutboundOnly"
     );
     assert!(
-        !allowed(&config, &["tcp-bind"]),
+        allowed(&config, &["socket-unix"]),
+        "AF_UNIX socket creation must be allowed under OutboundOnly"
+    );
+    for probe in ["socket-netlink", "socket-packet", "socket-vsock"] {
+        assert!(
+            blocked_by_seccomp(&config, &[probe]),
+            "{probe} must be blocked under OutboundOnly"
+        );
+    }
+    assert!(
+        blocked_by_seccomp(&config, &["tcp-bind"]),
         "binding/listening must be blocked under OutboundOnly"
     );
 }

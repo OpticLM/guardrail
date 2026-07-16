@@ -15,6 +15,10 @@
 //!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
 //!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
+//!   socket-netlink    create an AF_NETLINK route socket; exit 0 if allowed, 3 if denied
+//!   socket-packet     create an AF_PACKET raw socket; exit 0 if allowed, 3 if denied
+//!   socket-vsock      create an AF_VSOCK stream socket; exit 0 if allowed, 3 if denied
+//!   socket-unix       create an AF_UNIX stream socket; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
 //!   io-uring-setup    create an io_uring instance; exit 0 if allowed, 3 on ENOSYS
@@ -76,16 +80,16 @@ fn main() {
                 Err(_) => exit(3),
             }
         }
-        "socket-inet" => {
-            // SAFETY: socket() takes scalar args; close the fd if created.
-            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-            if fd < 0 {
-                exit(3);
-            }
-            // SAFETY: fd was returned by socket() above and is owned here.
-            unsafe { libc::close(fd) };
-            exit(0);
+        "socket-inet" => exit_socket_probe(libc::AF_INET, libc::SOCK_STREAM, 0),
+        "socket-netlink" => {
+            exit_socket_probe(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE)
         }
+        "socket-packet" => {
+            let protocol = libc::htons(libc::ETH_P_ALL as u16) as libc::c_int;
+            exit_socket_probe(libc::AF_PACKET, libc::SOCK_RAW, protocol);
+        }
+        "socket-vsock" => exit_socket_probe(libc::AF_VSOCK, libc::SOCK_STREAM, 0),
+        "socket-unix" => exit_socket_probe(libc::AF_UNIX, libc::SOCK_STREAM, 0),
         "tcp-bind" => match std::net::TcpListener::bind(("127.0.0.1", 0)) {
             Ok(_) => exit(0),
             Err(_) => exit(3),
@@ -180,12 +184,27 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|socket-inet|tcp-bind|io-uring-setup|\
-                 io-uring-enter|io-uring-register|shm|ptrace-self> [arg]"
+                 <echo-env|alloc|spin|read-file|write-file|socket-inet|socket-netlink|\
+                 socket-packet|socket-vsock|socket-unix|tcp-bind|io-uring-setup|io-uring-enter|\
+                 io-uring-register|shm|ptrace-self> [arg]"
             );
             exit(2);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn exit_socket_probe(domain: libc::c_int, socket_type: libc::c_int, protocol: libc::c_int) -> ! {
+    use std::process::exit;
+
+    // SAFETY: socket() takes scalar args; close the fd if created.
+    let fd = unsafe { libc::socket(domain, socket_type, protocol) };
+    if fd < 0 {
+        exit(3);
+    }
+    // SAFETY: fd was returned by socket() above and is owned here.
+    unsafe { libc::close(fd) };
+    exit(0);
 }
 
 #[cfg(target_os = "linux")]

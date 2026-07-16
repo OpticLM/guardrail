@@ -149,12 +149,23 @@ pub(crate) fn apply(programs: &[BpfProgram]) -> Result<()> {
 fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
     match policy {
         NetworkPolicy::Deny => {
-            // Block creation of IP sockets at the source.
-            add_syscall_rule(rules, libc::SYS_socket, socket_domain_rule(libc::AF_INET)?);
-            add_syscall_rule(rules, libc::SYS_socket, socket_domain_rule(libc::AF_INET6)?);
+            // Preserve Unix-domain sockets while blocking every other family,
+            // including families added by future kernels.
+            add_syscall_rule(
+                rules,
+                libc::SYS_socket,
+                socket_domain_allowlist_rule(&[libc::AF_UNIX])?,
+            );
         }
         NetworkPolicy::OutboundOnly => {
-            // IP sockets allowed; binding/listening denied (any args).
+            // Unix-domain and IP sockets are allowed; every other family is
+            // blocked.
+            add_syscall_rule(
+                rules,
+                libc::SYS_socket,
+                socket_domain_allowlist_rule(&[libc::AF_UNIX, libc::AF_INET, libc::AF_INET6])?,
+            );
+            // Binding/listening remains denied for every socket family.
             add_whole_syscall_rule(rules, libc::SYS_bind);
             add_whole_syscall_rule(rules, libc::SYS_listen);
         }
@@ -205,16 +216,21 @@ fn syscall_numbers(syscall: i64) -> impl Iterator<Item = i64> {
     [syscall].into_iter()
 }
 
-/// A rule matching `socket(domain == family, ..)`.
-fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule> {
-    let cond = SeccompCondition::new(
-        0, // arg0 = domain
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::Eq,
-        family as u64,
-    )
-    .map_err(|e| Error::confinement("seccomp", e))?;
-    SeccompRule::new(vec![cond]).map_err(|e| Error::confinement("seccomp", e))
+/// A rule matching `socket(domain not in allowed_families, ..)`.
+fn socket_domain_allowlist_rule(allowed_families: &[libc::c_int]) -> Result<SeccompRule> {
+    let mut conditions = Vec::with_capacity(allowed_families.len());
+    for &family in allowed_families {
+        conditions.push(
+            SeccompCondition::new(
+                0, // arg0 = domain
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                family as u64,
+            )
+            .map_err(|e| Error::confinement("seccomp", e))?,
+        );
+    }
+    SeccompRule::new(conditions).map_err(|e| Error::confinement("seccomp", e))
 }
 
 #[cfg(test)]

@@ -33,12 +33,14 @@ pub enum FsAccess {
 /// Default is [`NetworkPolicy::Deny`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
-    /// No network access of any kind.
+    /// Only Unix-domain sockets are allowed; every other socket family is
+    /// denied.
     #[default]
     Deny,
-    /// Outbound connections allowed; binding/listening still denied.
+    /// Unix-domain sockets and outbound IPv4/IPv6 connections are allowed.
+    /// Other socket families and binding/listening are denied.
     OutboundOnly,
-    /// Outbound connections **and** binding/listening allowed.
+    /// No network restrictions are added.
     Full,
 }
 
@@ -46,13 +48,13 @@ pub enum NetworkPolicy {
 /// Default is [`IpcPolicy::Strict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpcPolicy {
-    /// Deny cross-process IPC: SysV shared memory / message queues /
-    /// semaphores, POSIX message queues, and process inspection (`ptrace`,
-    /// `process_vm_*`). Benign same-process primitives (pipes, `socketpair`,
-    /// anonymous `mmap`) remain available.
+    /// Deny SysV shared memory / message queues / semaphores, POSIX message
+    /// queues, and process inspection (`ptrace`, `process_vm_*`). Pipes,
+    /// Unix-domain sockets (including `socketpair`), and anonymous `mmap`
+    /// remain available.
     #[default]
     Strict,
-    /// Like `Strict`, but additionally permit shared memory and POSIX message
-    /// queues. Process inspection (`ptrace`, `process_vm_*`) stays denied.
+    /// Permit SysV and POSIX IPC. Process inspection (`ptrace`,
+    /// `process_vm_*`) stays denied.
     Relaxed,
 }
