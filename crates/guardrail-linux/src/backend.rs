@@ -3,7 +3,7 @@ use std::process::Command;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
 
-use crate::{fs, rlimit, seccomp};
+use crate::{fs, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
@@ -14,7 +14,12 @@ pub struct LinuxBackend {
 
 impl LinuxBackend {
     /// Create a new Linux backend.
+    ///
+    /// Fails closed with [`Error::Unsupported`] when the running kernel cannot
+    /// enforce Landlock or fails the seccomp action-availability probe (see
+    /// [`Backend::probe_support`]).
     pub fn new(config: SandboxConfig) -> Result<Self> {
+        Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
         let seccomp_program = seccomp::build(&config)?;
         Ok(Self {
@@ -26,6 +31,10 @@ impl LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
+    fn probe_support() -> Result<()> {
+        support::probe_required_features()
+    }
+
     fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);

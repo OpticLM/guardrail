@@ -8,6 +8,14 @@ const guardrail = require('../index.js')
 test('module exposes the expected API', () => {
   assert.equal(typeof guardrail.spawn, 'function')
   assert.equal(typeof guardrail.Sandbox, 'function')
+  assert.equal(typeof guardrail.probeSupport, 'function')
+})
+
+test('probeSupport passes on CI-supported machines', () => {
+  // Throws when the kernel/OS lacks a required capability (e.g. Landlock on
+  // Linux). CI hosts and dev machines running this suite must support the
+  // sandbox — the Rust integration tests already rely on enforcement.
+  guardrail.probeSupport()
 })
 
 test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process.platform === 'win32' }, async () => {

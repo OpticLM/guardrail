@@ -2,7 +2,8 @@
 //!
 //! This crate re-exports the platform-agnostic policy and process types from
 //! `guardrail-core`, plus [`PlatformBackend`], an alias for the backend matching
-//! the current Cargo target.
+//! the current Cargo target. `PlatformBackend::probe_support()` (from
+//! [`Backend`]) performs the platform's advisory capability probe.
 
 pub use guardrail_core::*;
 

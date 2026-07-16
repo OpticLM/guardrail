@@ -25,6 +25,13 @@ impl WindowsBackend {
 }
 
 impl Backend for WindowsBackend {
+    /// AppContainer and Job Objects exist on every Windows version this crate
+    /// compiles for (std itself requires Windows 10+), so support is
+    /// unconditional.
+    fn probe_support() -> Result<()> {
+        Ok(())
+    }
+
     fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);

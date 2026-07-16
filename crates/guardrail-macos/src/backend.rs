@@ -23,6 +23,12 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
+    /// Seatbelt (`sandbox_init`) and `setrlimit` exist on every macOS version
+    /// this crate compiles for, so support is unconditional.
+    fn probe_support() -> Result<()> {
+        Ok(())
+    }
+
     fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);

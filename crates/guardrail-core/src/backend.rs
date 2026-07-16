@@ -12,6 +12,24 @@ use crate::process::SandboxChild;
 /// were constructed with. A backend must clear the command's inherited
 /// environment before applying the configuration environment.
 pub trait Backend {
+    /// Probe whether the running machine appears to support this backend.
+    ///
+    /// Returns [`Error::Unsupported`] when a required OS or kernel feature
+    /// cannot be probed. A successful probe is not proof that a later spawn
+    /// will succeed: runtime state or an ambient sandbox may still block
+    /// confinement. In particular, Linux only probes whether the kernel
+    /// reports the seccomp `Trap` action; it cannot prove that installing the
+    /// backend's filter will be permitted.
+    ///
+    /// Backends still fail closed during construction or spawn, so calling
+    /// this first is optional. It exists to let applications detect known
+    /// incompatibilities up front and degrade deliberately.
+    ///
+    /// [`Error::Unsupported`]: crate::Error::Unsupported
+    fn probe_support() -> Result<()>
+    where
+        Self: Sized;
+
     /// Spawn `command` confined according to this backend's stored config.
     fn spawn(&self, command: Command) -> Result<SandboxChild>;
 }
@@ -30,6 +48,10 @@ mod tests {
     }
 
     impl Backend for RecordingBackend {
+        fn probe_support() -> Result<()> {
+            Ok(())
+        }
+
         fn spawn(&self, mut command: std::process::Command) -> Result<SandboxChild> {
             command.env_clear();
             command.envs(&self.config.env);

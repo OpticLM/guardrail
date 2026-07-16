@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreated,
-    RulesetCreatedAttr, RulesetStatus, make_bitflags,
+    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, make_bitflags,
 };
 
 use guardrail_core::{Error, FsAccess, Result};
@@ -39,23 +39,32 @@ pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
 /// Build and enforce a Landlock ruleset for compiled positive paths.
 /// Called inside `pre_exec`.
 ///
-/// Best-effort by design: on a kernel without Landlock, `restrict_self()`
-/// returns [`RulesetStatus::NotEnforced`] rather than erroring, and we return
-/// `Ok(())` after warning — hard-failing would make the library unusable on
-/// older kernels. A genuine [`landlock::RulesetError`] is wrapped in
-/// [`Error::confinement`].
+/// Fails closed: on a kernel that cannot enforce Landlock, `handle_access`
+/// errors under [`CompatLevel::HardRequirement`] and the spawn is aborted
+/// rather than running the child unconfined. `LinuxBackend::new` already
+/// refuses to construct a backend on such kernels, so the checks here are
+/// defense in depth.
 pub(crate) fn apply(rules: &CompiledRules) -> Result<()> {
     // Pin ABI v1 for the broadest kernel support; the read/exec/write rights
     // this sandbox needs all exist in v1.
     let abi = ABI::V1;
 
     let mut ruleset = Ruleset::default()
+        // Error out instead of the default silent best-effort downgrade when
+        // the kernel cannot handle the requested access rights.
+        .set_compatibility(CompatLevel::HardRequirement)
         // We mediate ALL filesystem access rights: anything not granted below
         // is denied.
         .handle_access(AccessFs::from_all(abi))
         .map_err(|e| Error::confinement("landlock", e))?
         .create()
-        .map_err(|e| Error::confinement("landlock", e))?;
+        .map_err(|e| Error::confinement("landlock", e))?
+        // Per-path rules go back to best-effort: for a non-directory path the
+        // crate downgrades the rule to the file-legitimate subset (e.g. drops
+        // ReadDir from a file grant). That grants strictly fewer rights, never
+        // more, so it cannot fail open — while HardRequirement would reject
+        // every rule targeting an individual file.
+        .set_compatibility(CompatLevel::BestEffort);
 
     ruleset = add_path_rules(
         ruleset,
@@ -77,11 +86,15 @@ pub(crate) fn apply(rules: &CompiledRules) -> Result<()> {
         .restrict_self()
         .map_err(|e| Error::confinement("landlock", e))?;
 
+    // PartiallyEnforced is acceptable: with all V1 rights hard-required above,
+    // it can only reflect the file-path downgrades described on add_rule.
+    // NotEnforced means no rule is active at all — refuse to run the child.
     if status.ruleset == RulesetStatus::NotEnforced {
-        eprintln!(
-            "guardrail: warning — Landlock not enforced on this kernel; \
-             filesystem confinement is INACTIVE"
-        );
+        return Err(Error::Unsupported(
+            "Landlock ruleset is not enforced on this kernel; refusing to run \
+             the child without filesystem confinement"
+                .into(),
+        ));
     }
     Ok(())
 }

@@ -33,7 +33,7 @@ const sandbox = await Sandbox.build({
 
 const child = sandbox.spawn('/usr/bin/true')
 const result = await child.wait()
-// result: { code, signal, success, violation? }
+// result: { code, signal, success }
 ```
 
 `spawn(command, args, options)` is also available as a one-shot wrapper, but
@@ -856,6 +856,14 @@ policy and `network: 'outbound-only'` completed an HTTPS request to
 
 - The sandbox denies everything by default. Grant exactly the access the child
   needs.
+- The sandbox fails closed: `Sandbox.build` throws when a capability probe
+  fails, and spawning throws if confinement cannot actually be applied. A
+  child is never run unconstrained as a fallback.
+- Call `probeSupport()` to detect known incompatibilities up front. On Linux,
+  it verifies Landlock enforcement on a disposable thread, but the seccomp
+  check only queries whether the kernel reports the filter's `Trap` action.
+  Ambient policy may still prevent filter installation, so a successful probe
+  is not proof that spawning will succeed.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.
 - `stdio` is inherited from the parent process. Output capture is not yet

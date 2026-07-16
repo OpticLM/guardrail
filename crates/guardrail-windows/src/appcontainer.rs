@@ -7,7 +7,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
-use guardrail_core::{Error, Result, NetworkPolicy};
+use guardrail_core::{Error, NetworkPolicy, Result};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };

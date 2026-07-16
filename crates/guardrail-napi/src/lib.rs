@@ -313,6 +313,17 @@ impl Task for BuildSandboxTask {
     }
 }
 
+/// Probe whether this machine appears to support sandbox confinement. Throws
+/// when a required kernel/OS capability cannot be probed. On Linux, Landlock
+/// enforcement is verified, but the seccomp probe only checks whether the
+/// kernel reports the `Trap` action; it cannot prove that an ambient sandbox
+/// will permit installing the filter. Actual spawning remains authoritative
+/// and fails closed, so calling this first is optional.
+#[napi]
+pub fn probe_support() -> Result<()> {
+    PlatformBackend::probe_support().map_err(to_napi_err)
+}
+
 /// Spawn `command` (with `args`) confined by `options`. stdio is inherited from
 /// the parent process. Returns a handle to await or kill the child.
 #[napi]

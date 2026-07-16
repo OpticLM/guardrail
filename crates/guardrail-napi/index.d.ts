@@ -39,11 +39,6 @@ export interface ExitResult {
   signal?: number
   /** `true` iff the process exited cleanly with code 0. */
   success: boolean
-  /**
-   * Best-effort diagnostic when the run failed; `null` on success or when the
-   * failure could not be attributed to a policy.
-   */
-  violation?: Violation
 }
 
 export interface FsAccess {
@@ -78,6 +73,16 @@ export type IpcPolicy =  'strict'|
 export type NetworkPolicy =  'deny'|
 'outbound-only'|
 'full';
+
+/**
+ * Probe whether this machine appears to support sandbox confinement. Throws
+ * when a required kernel/OS capability cannot be probed. On Linux, Landlock
+ * enforcement is verified, but the seccomp probe only checks whether the
+ * kernel reports the `Trap` action; it cannot prove that an ambient sandbox
+ * will permit installing the filter. Actual spawning remains authoritative
+ * and fails closed, so calling this first is optional.
+ */
+export declare function probeSupport(): void
 
 /**
  * Sandbox policy. All fields optional; omitting everything
@@ -151,22 +156,3 @@ export interface SpawnOptions {
   /** Working directory for the child. Defaults to the parent's cwd. */
   cwd?: string
 }
-
-/** A heuristic explanation of a suspected policy violation. */
-export interface Violation {
-  /** The suspected category. */
-  kind: ViolationKind
-  /** One-line human summary. */
-  summary: string
-  /** Copy-pasteable next steps (which option to add to loosen the policy). */
-  suggestions: Array<string>
-}
-
-/**
- * The category of a suspected policy violation: `"seccomp"` | `"resource-limit"`
- * | `"filesystem"` | `"unknown"`. Mirrors `guardrail::ViolationKind`.
- */
-export type ViolationKind =  'seccomp'|
-'resource-limit'|
-'filesystem'|
-'unknown';
