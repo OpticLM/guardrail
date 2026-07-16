@@ -31,14 +31,17 @@ pub enum FsAccess {
 
 /// Network confinement level.
 /// Default is [`NetworkPolicy::Deny`].
+///
+/// Unix-domain sockets are host-local IPC, not network reach, so no level
+/// restricts `AF_UNIX`; whether creating Unix-domain sockets is allowed is
+/// decided by [`IpcPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
-    /// Only Unix-domain sockets are allowed; every other socket family is
-    /// denied.
+    /// Every socket family except `AF_UNIX` is denied.
     #[default]
     Deny,
-    /// Unix-domain sockets and outbound IPv4/IPv6 connections are allowed.
-    /// Other socket families and binding/listening are denied.
+    /// Outbound IPv4/IPv6 connections are allowed. Every other socket family
+    /// except `AF_UNIX`, and binding/listening, are denied.
     OutboundOnly,
     /// No network restrictions are added.
     Full,
@@ -49,12 +52,14 @@ pub enum NetworkPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpcPolicy {
     /// Deny SysV shared memory / message queues / semaphores, POSIX message
-    /// queues, and process inspection (`ptrace`, `process_vm_*`). Pipes,
-    /// Unix-domain sockets (including `socketpair`), and anonymous `mmap`
-    /// remain available.
+    /// queues, process inspection (`ptrace`, `process_vm_*`), and creating
+    /// Unix-domain sockets (`socket(AF_UNIX)`, pathname or abstract) and
+    /// datagram `socketpair`s, whose endpoints can be redirected to named
+    /// sockets. Pipes, connection-oriented `socketpair`s, anonymous `mmap`,
+    /// and descriptors inherited from the parent remain available.
     #[default]
     Strict,
-    /// Permit SysV and POSIX IPC. Process inspection (`ptrace`,
-    /// `process_vm_*`) stays denied.
+    /// Permit SysV / POSIX IPC and Unix-domain sockets. Process inspection
+    /// (`ptrace`, `process_vm_*`) stays denied.
     Relaxed,
 }

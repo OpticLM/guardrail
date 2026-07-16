@@ -6,15 +6,25 @@
 //! Network rules live here; IPC rules are added to the same filter via
 //! `add_ipc_rules`.
 //!
-//! io_uring is denied by a second, stacked filter: ring-submitted operations
-//! (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not
-//! syscalls, so leaving io_uring available would bypass the network rules
-//! above. Unless the network policy is `Full`, the io_uring syscalls fail with
-//! `ENOSYS` — not Trap — so runtimes that probe io_uring for file I/O (libuv/
-//! Node, tokio-uring) see a kernel without io_uring and fall back to plain
-//! syscalls, which the violation filter does govern. The kernel runs every
-//! installed filter and applies the highest-precedence action (Trap > Errno >
-//! Allow), so stacking keeps both behaviours intact.
+//! Two more filters are stacked as needed; the kernel runs every installed
+//! filter and applies the highest-precedence action (Trap > Errno > Allow):
+//!
+//! * Under `IpcPolicy::Strict`, creating a Unix-domain socket — the road to
+//!   local services such as D-Bus or container engines, whether by pathname
+//!   or abstract name — fails with `EAFNOSUPPORT`. Errno rather than Trap
+//!   because well-behaved tools opportunistically probe optional local
+//!   sockets (nscd, syslog, ssh-agent) and must fall back instead of dying.
+//!   Datagram `socketpair`s are denied too because either endpoint can be
+//!   redirected to a named socket with `connect` or `sendto`.
+//!   Connection-oriented `socketpair`s stay available.
+//!
+//! * io_uring is denied with `ENOSYS` unless both policies are at their most
+//!   permissive level: ring-submitted operations (`IORING_OP_SOCKET`,
+//!   `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not syscalls, so leaving
+//!   io_uring available would bypass the socket rules above. With `ENOSYS` —
+//!   not Trap — runtimes that probe io_uring for file I/O (libuv/Node,
+//!   tokio-uring) see a kernel without io_uring and fall back to plain
+//!   syscalls, which the other filters do govern.
 
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -29,6 +39,10 @@ use seccompiler::{
 /// by the parent). Change to `SeccompAction::Errno(libc::EACCES as u32)` for
 /// graceful per-call failure instead of process termination.
 const VIOLATION_ACTION: SeccompAction = SeccompAction::Trap;
+
+/// Low bits containing the base socket type. `SOCK_NONBLOCK` and
+/// `SOCK_CLOEXEC` live above this mask and may be ORed into the type argument.
+const SOCKET_TYPE_MASK: u64 = 0xf;
 
 type RuleMap = BTreeMap<i64, Vec<SeccompRule>>;
 
@@ -82,10 +96,10 @@ const ALWAYS_BLOCKED_IPC: &[i64] = &[
 ];
 
 /// io_uring syscalls, denied with `ENOSYS` unless the network policy is
-/// `Full`. Operations submitted through a ring never pass the syscall
-/// filter, so the `SYS_socket`/`SYS_bind` rules cannot see them. `enter` and
-/// `register` are included besides `setup` so an inherited or fd-passed ring
-/// is equally unusable.
+/// `Full` and the IPC policy is `Relaxed`. Operations submitted through a
+/// ring never pass the syscall filter, so neither the socket-family rules nor
+/// the `AF_UNIX` rule can see them. `enter` and `register` are included
+/// besides `setup` so an inherited or fd-passed ring is equally unusable.
 const IO_URING_SYSCALLS: &[i64] = &[
     libc::SYS_io_uring_setup,
     libc::SYS_io_uring_enter,
@@ -104,7 +118,16 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
         programs.push(compile(violations, VIOLATION_ACTION)?);
     }
 
-    if config.network != NetworkPolicy::Full {
+    if config.ipc == IpcPolicy::Strict {
+        programs.push(compile(
+            unix_socket_rules()?,
+            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
+        )?);
+    }
+
+    // io_uring can recreate any denied socket operation, so it stays denied
+    // unless both policies sit at their most permissive level.
+    if config.network != NetworkPolicy::Full || config.ipc == IpcPolicy::Strict {
         programs.push(compile(
             io_uring_rules(),
             SeccompAction::Errno(libc::ENOSYS as u32),
@@ -112,6 +135,46 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
     }
 
     Ok(programs)
+}
+
+/// Unix socket creation denials under `IpcPolicy::Strict`. Kept out of the
+/// Trap filter so tools probing optional local sockets get a graceful errno.
+fn unix_socket_rules() -> Result<RuleMap> {
+    let mut rules = RuleMap::new();
+    add_syscall_rule(
+        &mut rules,
+        libc::SYS_socket,
+        socket_domain_rule(libc::AF_UNIX)?,
+    );
+    add_syscall_rule(
+        &mut rules,
+        libc::SYS_socketpair,
+        unix_datagram_socketpair_rule()?,
+    );
+    Ok(rules)
+}
+
+/// A rule matching `socketpair(AF_UNIX, SOCK_DGRAM | flags, ..)`. Unlike
+/// connection-oriented pairs, Unix datagram endpoints can be redirected to
+/// pathname or abstract sockets outside the sandbox.
+fn unix_datagram_socketpair_rule() -> Result<SeccompRule> {
+    let conditions = vec![
+        SeccompCondition::new(
+            0, // arg0 = domain
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            libc::AF_UNIX as u64,
+        )
+        .map_err(|e| Error::confinement("seccomp", e))?,
+        SeccompCondition::new(
+            1, // arg1 = type
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(SOCKET_TYPE_MASK),
+            libc::SOCK_DGRAM as u64,
+        )
+        .map_err(|e| Error::confinement("seccomp", e))?,
+    ];
+    SeccompRule::new(conditions).map_err(|e| Error::confinement("seccomp", e))
 }
 
 fn io_uring_rules() -> RuleMap {
@@ -149,8 +212,8 @@ pub(crate) fn apply(programs: &[BpfProgram]) -> Result<()> {
 fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
     match policy {
         NetworkPolicy::Deny => {
-            // Preserve Unix-domain sockets while blocking every other family,
-            // including families added by future kernels.
+            // Block every non-Unix family, including families added by future
+            // kernels. AF_UNIX itself is IpcPolicy's decision (see `build`).
             add_syscall_rule(
                 rules,
                 libc::SYS_socket,
@@ -158,8 +221,8 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
             );
         }
         NetworkPolicy::OutboundOnly => {
-            // Unix-domain and IP sockets are allowed; every other family is
-            // blocked.
+            // IP sockets pass this filter and AF_UNIX is IpcPolicy's decision
+            // (see `build`); every other family is blocked.
             add_syscall_rule(
                 rules,
                 libc::SYS_socket,
@@ -233,6 +296,18 @@ fn socket_domain_allowlist_rule(allowed_families: &[libc::c_int]) -> Result<Secc
     SeccompRule::new(conditions).map_err(|e| Error::confinement("seccomp", e))
 }
 
+/// A rule matching `socket(domain == family, ..)`.
+fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule> {
+    let condition = SeccompCondition::new(
+        0, // arg0 = domain
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        family as u64,
+    )
+    .map_err(|e| Error::confinement("seccomp", e))?;
+    SeccompRule::new(vec![condition]).map_err(|e| Error::confinement("seccomp", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,28 +345,54 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_selects_the_io_uring_filter() {
-        let restricted = SandboxConfig::default();
-        let restricted_programs = build(&restricted).expect("restricted filters");
-        let expected = compile(io_uring_rules(), SeccompAction::Errno(libc::ENOSYS as u32))
-            .expect("io_uring filter");
-        assert_program_eq(
-            restricted_programs.last().expect("io_uring filter present"),
-            &expected,
-        );
+    fn strict_ipc_selects_the_unix_socket_filter() {
+        let expected = compile(
+            unix_socket_rules().expect("unix socket rules"),
+            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
+        )
+        .expect("unix socket filter");
 
-        let mut full = restricted;
-        full.network = NetworkPolicy::Full;
-        assert_eq!(build(&full).expect("Full filters").len(), 1);
+        let strict = build(&SandboxConfig::default()).expect("strict filters");
+        assert!(strict.iter().any(|p| program_eq(p, &expected)));
+
+        let relaxed_config = SandboxConfig {
+            ipc: IpcPolicy::Relaxed,
+            ..SandboxConfig::default()
+        };
+        let relaxed = build(&relaxed_config).expect("relaxed filters");
+        assert!(!relaxed.iter().any(|p| program_eq(p, &expected)));
     }
 
-    fn assert_program_eq(actual: &BpfProgram, expected: &BpfProgram) {
-        assert_eq!(actual.len(), expected.len());
-        for (actual, expected) in actual.iter().zip(expected) {
+    #[test]
+    fn io_uring_filter_requires_full_network_and_relaxed_ipc() {
+        let expected = compile(io_uring_rules(), SeccompAction::Errno(libc::ENOSYS as u32))
+            .expect("io_uring filter");
+
+        for (network, ipc, denied) in [
+            (NetworkPolicy::Deny, IpcPolicy::Strict, true),
+            (NetworkPolicy::Deny, IpcPolicy::Relaxed, true),
+            (NetworkPolicy::Full, IpcPolicy::Strict, true),
+            (NetworkPolicy::Full, IpcPolicy::Relaxed, false),
+        ] {
+            let config = SandboxConfig {
+                network,
+                ipc,
+                ..SandboxConfig::default()
+            };
+            let programs = build(&config).expect("filters");
             assert_eq!(
-                (actual.code, actual.jt, actual.jf, actual.k),
-                (expected.code, expected.jt, expected.jf, expected.k)
+                programs.iter().any(|p| program_eq(p, &expected)),
+                denied,
+                "io_uring filter presence for network={network:?} ipc={ipc:?}"
             );
         }
+    }
+
+    fn program_eq(actual: &BpfProgram, expected: &BpfProgram) -> bool {
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| (a.code, a.jt, a.jf, a.k) == (e.code, e.jt, e.jf, e.k))
     }
 }

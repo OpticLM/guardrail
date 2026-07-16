@@ -19,6 +19,11 @@
 //!   socket-packet     create an AF_PACKET raw socket; exit 0 if allowed, 3 if denied
 //!   socket-vsock      create an AF_VSOCK stream socket; exit 0 if allowed, 3 if denied
 //!   socket-unix       create an AF_UNIX stream socket; exit 0 if allowed, 3 if denied
+//!   socketpair-unix   create a connected AF_UNIX socketpair; exit 0 if
+//!                     allowed, 3 if denied
+//!   socketpair-unix-dgram-sendto <NAME>
+//!                     create an AF_UNIX datagram socketpair and send to the
+//!                     abstract socket NAME; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
 //!   io-uring-setup    create an io_uring instance; exit 0 if allowed, 3 on ENOSYS
@@ -90,6 +95,39 @@ fn main() {
         }
         "socket-vsock" => exit_socket_probe(libc::AF_VSOCK, libc::SOCK_STREAM, 0),
         "socket-unix" => exit_socket_probe(libc::AF_UNIX, libc::SOCK_STREAM, 0),
+        "socketpair-unix" => {
+            let mut fds = [-1 as libc::c_int; 2];
+            // SAFETY: socketpair writes the two descriptors into `fds`.
+            let rc =
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+            if rc < 0 {
+                exit(3);
+            }
+            // SAFETY: both fds were created above and are owned here.
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            exit(0);
+        }
+        "socketpair-unix-dgram-sendto" => {
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+            let Some(name) = args.get(2) else {
+                exit(2);
+            };
+            let Ok(addr) = SocketAddr::from_abstract_name(name.as_bytes()) else {
+                exit(2);
+            };
+            let Ok((socket, _peer)) = UnixDatagram::pair() else {
+                exit(3);
+            };
+            match socket.send_to_addr(b"x", &addr) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
         "tcp-bind" => match std::net::TcpListener::bind(("127.0.0.1", 0)) {
             Ok(_) => exit(0),
             Err(_) => exit(3),
@@ -185,7 +223,8 @@ fn main() {
             eprintln!(
                 "usage: guardrail-probe \
                  <echo-env|alloc|spin|read-file|write-file|socket-inet|socket-netlink|\
-                 socket-packet|socket-vsock|socket-unix|tcp-bind|io-uring-setup|io-uring-enter|\
+                 socket-packet|socket-vsock|socket-unix|socketpair-unix|\
+                 socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|io-uring-enter|\
                  io-uring-register|shm|ptrace-self> [arg]"
             );
             exit(2);

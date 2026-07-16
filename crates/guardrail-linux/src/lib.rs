@@ -5,11 +5,21 @@
 //! rules and seccomp-BPF filters for network and IPC. No external sandboxing
 //! binary is used.
 //!
-//! Unless the network policy is `Full`, the `io_uring_*` syscalls fail with
-//! `ENOSYS`: ring-submitted operations (`IORING_OP_SOCKET`,
-//! `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not syscalls, so an open
-//! ring would bypass the network rules. Runtimes that probe io_uring for file
-//! I/O see a kernel without io_uring and fall back to plain syscalls.
+//! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
+//! pathname or abstract — fails with `EAFNOSUPPORT`, so the child cannot reach
+//! local services (D-Bus, container engines, agent sockets) or proxy data
+//! through them. Unix datagram `socketpair`s fail too because their endpoints
+//! can be redirected to named sockets. The graceful errno lets tools that
+//! merely probe optional sockets (nscd, syslog, ssh-agent) fall back;
+//! connection-oriented `socketpair`s and descriptors inherited from the
+//! parent keep working.
+//!
+//! Unless the network policy is `Full` and the IPC policy is `Relaxed`, the
+//! `io_uring_*` syscalls fail with `ENOSYS`: ring-submitted operations
+//! (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not
+//! syscalls, so an open ring would bypass the socket rules. Runtimes that
+//! probe io_uring for file I/O see a kernel without io_uring and fall back to
+//! plain syscalls.
 //!
 //! Fails closed: constructing a [`LinuxBackend`] returns `Error::Unsupported`
 //! when Landlock enforcement or the seccomp action-availability probe fails;
