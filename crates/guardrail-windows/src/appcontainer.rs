@@ -8,12 +8,14 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
 use guardrail_core::{Error, NetworkPolicy, Result};
+use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, FreeSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-    WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
+    CopySid, CreateWellKnownSid, DeriveCapabilitySidsFromName, FreeSid, GetLengthSid, PSID,
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
+    WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
 };
 
 const SE_GROUP_ENABLED: u32 = 4;
@@ -133,6 +135,56 @@ impl Sid {
         })
     }
 
+    fn named_capability(name: &str) -> io::Result<Self> {
+        let name_wide = wide_null(OsStr::new(name));
+        let mut group_sids: *mut PSID = ptr::null_mut();
+        let mut group_count = 0u32;
+        let mut capability_sids: *mut PSID = ptr::null_mut();
+        let mut capability_count = 0u32;
+        let derived = unsafe {
+            DeriveCapabilitySidsFromName(
+                name_wide.as_ptr(),
+                &mut group_sids,
+                &mut group_count,
+                &mut capability_sids,
+                &mut capability_count,
+            )
+        };
+        if derived == 0 {
+            let err = io::Error::last_os_error();
+            free_local_sid_array(group_sids, group_count);
+            free_local_sid_array(capability_sids, capability_count);
+            return Err(err);
+        }
+
+        let result = if capability_count == 1 && !capability_sids.is_null() {
+            let raw = unsafe { *capability_sids };
+            let len = unsafe { GetLengthSid(raw) };
+            if len == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                let mut storage = vec![0u8; len as usize];
+                let copied = unsafe { CopySid(len, storage.as_mut_ptr().cast(), raw) };
+                if copied == 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(Self {
+                        storage: SidStorage::Bytes(storage),
+                    })
+                }
+            }
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("capability {name} produced {capability_count} SIDs"),
+            ))
+        };
+
+        free_local_sid_array(group_sids, group_count);
+        free_local_sid_array(capability_sids, capability_count);
+        result
+    }
+
     pub(crate) fn as_psid(&self) -> PSID {
         match &self.storage {
             SidStorage::FreeSid(raw) => *raw,
@@ -153,6 +205,23 @@ impl Drop for Sid {
     }
 }
 
+fn free_local_sid_array(sids: *mut PSID, count: u32) {
+    if sids.is_null() {
+        return;
+    }
+    for index in 0..count as usize {
+        let sid = unsafe { *sids.add(index) };
+        if !sid.is_null() {
+            unsafe {
+                LocalFree(sid as HLOCAL);
+            }
+        }
+    }
+    unsafe {
+        LocalFree(sids.cast::<core::ffi::c_void>() as HLOCAL);
+    }
+}
+
 pub(crate) struct CapabilitySet {
     sids: Vec<Sid>,
     attributes: Vec<SID_AND_ATTRIBUTES>,
@@ -168,9 +237,11 @@ impl CapabilitySet {
         match network {
             NetworkPolicy::Deny => {}
             NetworkPolicy::OutboundOnly => {
+                set.push_named("registryRead")?;
                 set.push(WinCapabilityInternetClientSid)?;
             }
             NetworkPolicy::Full => {
+                set.push_named("registryRead")?;
                 set.push(WinCapabilityInternetClientSid)?;
                 set.push(WinCapabilityInternetClientServerSid)?;
             }
@@ -180,7 +251,15 @@ impl CapabilitySet {
     }
 
     fn push(&mut self, kind: WELL_KNOWN_SID_TYPE) -> io::Result<()> {
-        self.sids.push(Sid::well_known(kind)?);
+        self.push_sid(Sid::well_known(kind)?)
+    }
+
+    fn push_named(&mut self, name: &str) -> io::Result<()> {
+        self.push_sid(Sid::named_capability(name)?)
+    }
+
+    fn push_sid(&mut self, sid: Sid) -> io::Result<()> {
+        self.sids.push(sid);
         let sid = self.sids.last().expect("just pushed").as_psid();
         self.attributes.push(SID_AND_ATTRIBUTES {
             Sid: sid,
@@ -261,7 +340,7 @@ mod tests {
     #[test]
     fn outbound_network_has_client_capability() {
         let set = CapabilitySet::for_network(NetworkPolicy::OutboundOnly).expect("capabilities");
-        assert_eq!(set.len(), 1);
+        assert_eq!(set.len(), 2);
         assert_eq!(set.attributes[0].Attributes, SE_GROUP_ENABLED);
         assert!(!set.attributes[0].Sid.is_null());
     }
@@ -269,7 +348,7 @@ mod tests {
     #[test]
     fn full_network_is_distinct_from_outbound() {
         let set = CapabilitySet::for_network(NetworkPolicy::Full).expect("capabilities");
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 3);
     }
 
     #[test]

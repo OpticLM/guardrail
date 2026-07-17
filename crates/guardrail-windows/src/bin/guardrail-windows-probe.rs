@@ -65,13 +65,14 @@ fn main() {
             }
         }
         "tcp-bind" => {
-            if TcpListener::bind(("127.0.0.1", 0)).is_err() {
+            let host = args.get(2).map(String::as_str).unwrap_or("127.0.0.1");
+            if TcpListener::bind((host, 0)).is_err() {
                 exit(3);
             }
         }
         _ => {
             eprintln!(
-                "usage: guardrail-windows-probe <echo-env|check-env|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind> ..."
+                "usage: guardrail-windows-probe <echo-env|check-env|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind [host]> ..."
             );
             exit(2);
         }

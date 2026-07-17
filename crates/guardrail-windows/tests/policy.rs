@@ -186,7 +186,7 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
 }
 
 #[test]
-fn package_sid_deny_vetoes_appcontainer_side_allows() {
+fn lpac_removes_all_packages_but_keeps_package_and_capability_allows() {
     let temp = TempPath::new();
     fs::create_dir_all(temp.path()).expect("create temp dir");
     let control = temp.path().join("control.txt");
@@ -250,8 +250,8 @@ fn package_sid_deny_vetoes_appcontainer_side_allows() {
     let capability_allowed = probe_file_allowed(&config, "read-file", &capability_grant);
 
     assert!(
-        !package_allowed && !all_packages_allowed && !capability_allowed,
-        "package-SID deny results: package allow={package_allowed}, \
+        package_allowed && !all_packages_allowed && capability_allowed,
+        "LPAC results: package allow={package_allowed}, \
          ALL APPLICATION PACKAGES allow={all_packages_allowed}, \
          capability allow={capability_allowed}"
     );
@@ -414,12 +414,12 @@ fn outbound_only_allows_loopback_connect_when_host_allows_appcontainer_loopback(
 }
 
 #[test]
-fn full_network_allows_tcp_bind() {
+fn full_network_allows_non_loopback_tcp_bind() {
     let mut config = builder_with_system_root();
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.network = NetworkPolicy::Full;
     let mut command = probe();
-    command.arg("tcp-bind");
+    command.args(["tcp-bind", "0.0.0.0"]);
     command.env_clear();
     command.envs(&config.env);
 
@@ -428,7 +428,8 @@ fn full_network_allows_tcp_bind() {
 
     assert!(
         status.success(),
-        "full network policy should allow TCP bind"
+        "full network policy should allow a non-loopback TCP bind: {status:?}, code={:#x}",
+        status.code().unwrap_or_default() as u32,
     );
 }
 

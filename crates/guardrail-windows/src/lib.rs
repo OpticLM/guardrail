@@ -22,13 +22,17 @@
 //!   directory, and its writable profile state lives under the profile's
 //!   `AppData\Local\Packages\<profile>\AC` directory.
 //!
-//! Two limits of that boundary:
+//! Limits of that boundary:
 //!
-//! * The child is a regular AppContainer, not an LPAC. Some system files,
-//!   registry keys, and COM/RPC endpoints deliberately grant regular
-//!   AppContainers access, often through `ALL APPLICATION PACKAGES`. Such a
-//!   grant only satisfies the AppContainer side of the dual-principal check;
-//!   the user's normal SIDs, integrity level, and other policy still apply.
+//! * The child is a Less-Privileged AppContainer (LPAC), so grants to
+//!   `ALL APPLICATION PACKAGES` do not satisfy its AppContainer-side access
+//!   check. Network-enabled policies add the required `registryRead` and
+//!   network capability SIDs; any host object that explicitly grants one of
+//!   those capabilities can still be reached when the user side also passes.
+//! * AppContainer-side access checks do not honor deny ACEs. Filesystem deny
+//!   rules can remove package-SID grants from existing objects, but cannot
+//!   override a capability-SID grant or prevent a recreated object from
+//!   inheriting an allowed ancestor's package grant.
 //! * Children sharing a cached profile (same host process,
 //!   `windows_cache_namespace`, and filesystem policy) share one package SID
 //!   and profile directory, so they are not isolated from each other.

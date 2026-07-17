@@ -17,9 +17,11 @@ use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, Terminate
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTUPINFOEXW,
     TerminateProcess, UpdateProcThreadAttribute,
 };
+use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
 
 use crate::cache::{CachedAppContainer, raw_security_capabilities};
 use crate::handle::{bool_result, owned_handle_from_raw, resume_then_close_thread};
@@ -48,11 +50,18 @@ pub(crate) fn launch(
         },
         ..STARTUPINFOEXW::default()
     };
-    let mut attributes =
-        AttributeList::new(1).map_err(|err| Error::confinement("appcontainer", err))?;
+    // UpdateProcThreadAttribute retains these pointers until the attribute list
+    // is destroyed, so both pointees must be declared before the list.
     let mut security_capabilities = appcontainer.security_capabilities(network)?;
+    let mut all_application_packages_policy =
+        Box::new(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT);
+    let mut attributes =
+        AttributeList::new(2).map_err(|err| Error::confinement("appcontainer", err))?;
     attributes
         .update_security_capabilities(raw_security_capabilities(&mut security_capabilities))
+        .map_err(|err| Error::confinement("appcontainer", err))?;
+    attributes
+        .opt_out_all_application_packages(all_application_packages_policy.as_mut())
         .map_err(|err| Error::confinement("appcontainer", err))?;
     startup.lpAttributeList = attributes.as_mut_ptr();
 
@@ -152,6 +161,21 @@ impl AttributeList {
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
                 security_capabilities.cast(),
                 mem::size_of::<SECURITY_CAPABILITIES>(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        bool_result(ok)
+    }
+
+    fn opt_out_all_application_packages(&mut self, policy: &mut u32) -> io::Result<()> {
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
+                ptr::from_mut(policy).cast(),
+                mem::size_of::<u32>(),
                 ptr::null_mut(),
                 ptr::null(),
             )

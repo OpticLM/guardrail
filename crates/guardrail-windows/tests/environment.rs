@@ -43,10 +43,13 @@ fn inherited_env_is_cleared() {
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
+    let code = status.code();
 
-    assert!(
-        !status.success(),
-        "inherited env var must not reach the sandboxed child"
+    assert_eq!(
+        code,
+        Some(3),
+        "probe did not report the inherited variable absent: {status:?}, code={:#010x}",
+        code.unwrap_or_default() as u32
     );
 }
 
@@ -62,8 +65,13 @@ fn explicitly_added_env_reaches_child() {
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
+    let code = status.code();
 
-    assert!(status.success(), "explicit env var should reach the child");
+    assert!(
+        status.success(),
+        "explicit env var should reach the child: {status:?}, code={:#010x}",
+        code.unwrap_or_default() as u32
+    );
 }
 
 fn builder_with_windows_runtime_env() -> SandboxConfig {
