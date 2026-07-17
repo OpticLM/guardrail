@@ -454,10 +454,16 @@ fn win32_bool(ok: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    use guardrail_core::{Backend, SandboxConfig};
+    use windows_sys::Win32::Security::Authorization::DENY_ACCESS;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_EXECUTE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA,
         FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL, SYNCHRONIZE,
     };
+
+    use crate::{WindowsBackend, cache};
 
     #[test]
     fn read_access_grants_file_read_without_write_or_execute() {
@@ -519,6 +525,45 @@ mod tests {
             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
         );
         assert_eq!(access.Trustee.ptstrName as usize, sid as usize);
+    }
+
+    #[test]
+    fn package_sid_deny_does_not_override_package_sid_allow() {
+        let dir = temp_dir("package-deny-access-check");
+        let file = dir.join("input.txt");
+        std::fs::write(&file, b"guardrail").unwrap();
+
+        let mut env = std::collections::BTreeMap::new();
+        for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
+            if let Ok(value) = std::env::var(key) {
+                env.insert(key.into(), value);
+            }
+        }
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow(file.clone())],
+            env,
+            windows_cache_namespace: Some(format!("deny-check-{}", std::process::id())),
+            ..SandboxConfig::default()
+        };
+
+        let appcontainer = cache::get(&config).expect("create AppContainer");
+        let deny_guard = install_explicit_package_deny(&file, appcontainer.sid());
+        assert_canonical_package_read_deny_then_allow(&file, appcontainer.sid());
+        let backend = WindowsBackend::new(config).expect("backend");
+        let mut command = Command::new("cmd");
+        command.args(["/C", "type"]).arg(&file);
+
+        let mut child = backend.spawn(command).expect("spawn");
+        let status = child.wait().expect("wait");
+
+        assert!(
+            status.success(),
+            "a package-SID deny ACE unexpectedly overrode the package-SID allow ACE; \
+             report this Windows behavior for issue #10"
+        );
+
+        drop(deny_guard);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -746,6 +791,74 @@ mod tests {
         ));
         std::fs::create_dir(&path).unwrap();
         path
+    }
+
+    fn install_explicit_package_deny(path: &Path, sid: PSID) -> AclGuard {
+        let original = OriginalDacl::capture(path).expect("capture file DACL");
+        let mut explicit = explicit_access(sid, read_rights());
+        explicit.grfAccessMode = DENY_ACCESS;
+        explicit.grfInheritance = 0;
+
+        let mut new_acl = ptr::null_mut();
+        let status =
+            unsafe { SetEntriesInAclW(1, &explicit, original.dacl.cast_const(), &mut new_acl) };
+        win32_status(status).expect("add package-SID deny ACE");
+
+        let set_status = unsafe {
+            SetNamedSecurityInfoW(
+                original.path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                new_acl,
+                ptr::null_mut(),
+            )
+        };
+        let set_result = win32_status(set_status);
+        unsafe {
+            LocalFree(new_acl.cast::<core::ffi::c_void>() as HLOCAL);
+        }
+        set_result.expect("install package-SID deny ACE");
+
+        AclGuard {
+            originals: vec![original],
+        }
+    }
+
+    fn assert_canonical_package_read_deny_then_allow(path: &Path, sid: PSID) {
+        let current = OriginalDacl::capture(path).expect("capture characterized DACL");
+        let dacl = unsafe { &*current.dacl };
+        let mut deny_index = None;
+        let mut allow_index = None;
+
+        for index in 0..dacl.AceCount as u32 {
+            let mut ace = ptr::null_mut();
+            let got_ace = unsafe { GetAce(current.dacl, index, &mut ace) };
+            win32_bool(got_ace).expect("read characterized ACE");
+            if !standard_ace_matches_sid(ace, sid) {
+                continue;
+            }
+
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            let bytes = unsafe { slice::from_raw_parts(ace.cast::<u8>(), header.AceSize as usize) };
+            if read_standard_ace_mask(bytes) & FILE_READ_DATA == 0 {
+                continue;
+            }
+
+            match header.AceType {
+                ACCESS_DENIED_ACE_TYPE => deny_index.get_or_insert(index),
+                ACCESS_ALLOWED_ACE_TYPE => allow_index.get_or_insert(index),
+                _ => unreachable!(),
+            };
+        }
+
+        let deny_index = deny_index.expect("package-SID read deny ACE");
+        let allow_index = allow_index.expect("package-SID read allow ACE");
+        assert!(
+            deny_index < allow_index,
+            "package-SID deny ACE must precede its allow ACE"
+        );
     }
 
     fn unique_suffix() -> u128 {
