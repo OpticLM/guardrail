@@ -4,6 +4,24 @@
 //! `guardrail-core`, plus [`PlatformBackend`], an alias for the backend matching
 //! the current Cargo target. `PlatformBackend::probe_support()` (from
 //! [`Backend`]) performs the platform's advisory capability probe.
+//!
+//! # Platform capability matrix
+//!
+//! Each [`SandboxConfig`] field is enforced by a different mechanism per
+//! backend; a field marked *ignored* is an honest no-op on that platform.
+//!
+//! | Field | Linux | macOS | Windows |
+//! |---|---|---|---|
+//! | `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
+//! | `network` | seccomp socket-family filter | Seatbelt network rules | AppContainer capabilities |
+//! | `limits` | `setrlimit` | `setrlimit` | Job Object |
+//! | `env` | cleared, then set | cleared, then set | cleared, then set |
+//! | `linux_ipc` | seccomp (SysV/POSIX IPC, `AF_UNIX`, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
+//! | `darwin_sandbox_profiles` | ignored | `.sb` imports ahead of the generated profile | ignored |
+//! | `windows_cache_namespace` | ignored | ignored | AppContainer/ACL cache key |
+//!
+//! See each backend crate's documentation for the platform's exact semantics
+//! and limits.
 
 pub use guardrail_core::*;
 

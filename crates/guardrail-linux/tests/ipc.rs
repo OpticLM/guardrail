@@ -32,7 +32,7 @@ fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
 #[test]
 fn strict_blocks_shared_memory() {
     let mut config = common::base();
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
     assert!(
         !allowed(&config, &["shm"]),
         "SysV shared memory must be blocked under Strict IPC"
@@ -42,7 +42,7 @@ fn strict_blocks_shared_memory() {
 #[test]
 fn relaxed_allows_shared_memory() {
     let mut config = common::base();
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
     assert!(
         allowed(&config, &["shm"]),
         "shared memory must be allowed under Relaxed IPC"
@@ -53,7 +53,7 @@ fn relaxed_allows_shared_memory() {
 fn ptrace_is_blocked_at_both_levels() {
     for level in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
         let mut config = common::base();
-        config.ipc = level;
+        config.linux_ipc = level;
         assert!(
             !allowed(&config, &["ptrace-self"]),
             "ptrace must be blocked under {level:?} IPC"
@@ -64,7 +64,7 @@ fn ptrace_is_blocked_at_both_levels() {
 #[test]
 fn strict_blocks_unix_socket_creation_with_a_graceful_errno() {
     let mut config = common::base();
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
     // Exit 3, not SIGSYS: the denial is Errno(EAFNOSUPPORT) so tools probing
     // optional local sockets fall back instead of dying.
     assert_eq!(
@@ -78,7 +78,7 @@ fn strict_blocks_unix_socket_creation_with_a_graceful_errno() {
 fn strict_blocks_unix_socket_creation_even_with_full_network() {
     let mut config = common::base();
     config.network = NetworkPolicy::Full;
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
     assert_eq!(
         status(&config, &["socket-unix"]).code(),
         Some(3),
@@ -89,7 +89,7 @@ fn strict_blocks_unix_socket_creation_even_with_full_network() {
 #[test]
 fn relaxed_allows_unix_socket_creation() {
     let mut config = common::base();
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
     assert!(
         allowed(&config, &["socket-unix"]),
         "creating an AF_UNIX socket must be allowed under Relaxed IPC"
@@ -99,7 +99,7 @@ fn relaxed_allows_unix_socket_creation() {
 #[test]
 fn strict_allows_unix_socketpair() {
     let mut config = common::base();
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
     assert!(
         allowed(&config, &["socketpair-unix"]),
         "socketpair must stay available under Strict IPC"
@@ -112,7 +112,7 @@ fn strict_blocks_unix_datagram_socketpair_escape() {
     let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract address");
     let _receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract socket");
     let mut config = common::base();
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
 
     assert_eq!(
         status(&config, &["socketpair-unix-dgram-sendto", &name]).code(),
@@ -127,7 +127,7 @@ fn relaxed_allows_unix_datagram_socketpair_sendto() {
     let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract address");
     let receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract socket");
     let mut config = common::base();
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
 
     assert!(
         allowed(&config, &["socketpair-unix-dgram-sendto", &name]),

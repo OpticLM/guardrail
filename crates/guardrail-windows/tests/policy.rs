@@ -354,7 +354,7 @@ fn builder_with_system_root() -> SandboxConfig {
     SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,
-        ipc: IpcPolicy::Strict,
+        linux_ipc: IpcPolicy::Strict,
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],

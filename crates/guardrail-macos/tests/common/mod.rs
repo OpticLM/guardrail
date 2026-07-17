@@ -30,7 +30,7 @@ pub fn base() -> SandboxConfig {
     SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
-        ipc: IpcPolicy::Strict,
+        linux_ipc: IpcPolicy::Strict,
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![runtime_profile()],
@@ -46,7 +46,7 @@ pub fn read_only_base() -> SandboxConfig {
     SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
-        ipc: IpcPolicy::Strict,
+        linux_ipc: IpcPolicy::Strict,
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![runtime_profile()],

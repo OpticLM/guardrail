@@ -89,7 +89,7 @@ fn deny_leaves_unix_sockets_to_the_ipc_policy() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     // Relaxed IPC isolates the network filter: AF_UNIX must pass it.
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
     assert!(
         allowed(&config, &["socket-unix"]),
         "the network Deny filter must not block AF_UNIX; that is IpcPolicy's job"
@@ -101,7 +101,7 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind()
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
     // Relaxed IPC isolates the network filter for the AF_UNIX probe.
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
     assert!(
         allowed(&config, &["socket-inet"]),
         "AF_INET socket creation must be allowed under OutboundOnly"
@@ -166,7 +166,7 @@ fn full_network_and_relaxed_ipc_allow_io_uring_syscalls() {
     }
     let mut config = common::base();
     config.network = NetworkPolicy::Full;
-    config.ipc = IpcPolicy::Relaxed;
+    config.linux_ipc = IpcPolicy::Relaxed;
     for &probe in IO_URING_PROBES {
         assert!(
             allowed(&config, &[probe]),
@@ -185,7 +185,7 @@ fn strict_ipc_blocks_io_uring_despite_full_network() {
     // syscall filter, so Strict IPC must keep io_uring at ENOSYS.
     let mut config = common::base();
     config.network = NetworkPolicy::Full;
-    config.ipc = IpcPolicy::Strict;
+    config.linux_ipc = IpcPolicy::Strict;
     for &probe in IO_URING_PROBES {
         assert_eq!(
             status(&config, &[probe]).code(),

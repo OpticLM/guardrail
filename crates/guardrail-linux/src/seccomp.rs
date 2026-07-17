@@ -113,12 +113,12 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
 
     let mut violations: RuleMap = BTreeMap::new();
     add_network_rules(&mut violations, config.network)?;
-    add_ipc_rules(&mut violations, config.ipc)?;
+    add_ipc_rules(&mut violations, config.linux_ipc)?;
     if !violations.is_empty() {
         programs.push(compile(violations, VIOLATION_ACTION)?);
     }
 
-    if config.ipc == IpcPolicy::Strict {
+    if config.linux_ipc == IpcPolicy::Strict {
         programs.push(compile(
             unix_socket_rules()?,
             SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
@@ -127,7 +127,7 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
 
     // io_uring can recreate any denied socket operation, so it stays denied
     // unless both policies sit at their most permissive level.
-    if config.network != NetworkPolicy::Full || config.ipc == IpcPolicy::Strict {
+    if config.network != NetworkPolicy::Full || config.linux_ipc == IpcPolicy::Strict {
         programs.push(compile(
             io_uring_rules(),
             SeccompAction::Errno(libc::ENOSYS as u32),
@@ -356,7 +356,7 @@ mod tests {
         assert!(strict.iter().any(|p| program_eq(p, &expected)));
 
         let relaxed_config = SandboxConfig {
-            ipc: IpcPolicy::Relaxed,
+            linux_ipc: IpcPolicy::Relaxed,
             ..SandboxConfig::default()
         };
         let relaxed = build(&relaxed_config).expect("relaxed filters");
@@ -376,7 +376,7 @@ mod tests {
         ] {
             let config = SandboxConfig {
                 network,
-                ipc,
+                linux_ipc: ipc,
                 ..SandboxConfig::default()
             };
             let programs = build(&config).expect("filters");

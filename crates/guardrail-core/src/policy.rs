@@ -33,8 +33,8 @@ pub enum FsAccess {
 /// Default is [`NetworkPolicy::Deny`].
 ///
 /// Unix-domain sockets are host-local IPC, not network reach, so no level
-/// restricts `AF_UNIX`; whether creating Unix-domain sockets is allowed is
-/// decided by [`IpcPolicy`].
+/// restricts `AF_UNIX`; on Linux, whether creating Unix-domain sockets is
+/// allowed is decided by [`IpcPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
     /// Every socket family except `AF_UNIX` is denied.
@@ -49,6 +49,15 @@ pub enum NetworkPolicy {
 
 /// Inter-process-communication confinement level.
 /// Default is [`IpcPolicy::Strict`].
+///
+/// **Linux-only.** This policy is enforced with seccomp by the Linux backend;
+/// the macOS and Windows backends ignore [`SandboxConfig::linux_ipc`]. On
+/// macOS, IPC confinement follows the generated and imported Seatbelt rules,
+/// including any Unix-domain socket access enabled by network grants. On
+/// Windows, AppContainer baseline isolation applies independently. See each
+/// backend crate's documentation.
+///
+/// [`SandboxConfig::linux_ipc`]: crate::SandboxConfig::linux_ipc
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpcPolicy {
     /// Deny SysV shared memory / message queues / semaphores, POSIX message

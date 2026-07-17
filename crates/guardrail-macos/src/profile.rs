@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, SandboxConfig};
+use guardrail_core::{FsAccess, NetworkPolicy, SandboxConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SeatbeltProfile {
@@ -83,14 +83,9 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
         }
     }
 
-    match config.ipc {
-        IpcPolicy::Strict => {}
-        IpcPolicy::Relaxed => {
-            // Keep this intentionally narrow until plan 010 validates the exact
-            // Seatbelt operations on macOS. Custom `.sb` profile imports are
-            // the escape hatch for workloads that need more IPC.
-        }
-    }
+    // `linux_ipc` is Linux-only and deliberately not consulted here: under
+    // `(deny default)` IPC is already denied, and custom `.sb` profile imports
+    // are the escape hatch for workloads that need more IPC.
 
     source
 }
@@ -260,7 +255,7 @@ mod tests {
         SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -283,7 +278,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -329,7 +324,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -363,7 +358,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(future_alias.clone())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -404,7 +399,7 @@ mod tests {
                 FsAccess::ReadDeny(secret_alias.clone()),
             ],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -429,7 +424,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadDeny("/tmp/secret".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -449,7 +444,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::WriteAllow("/tmp/work".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -470,7 +465,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::WriteDeny("/tmp/work".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -491,7 +486,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ExecuteAllow("/tmp/bin".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -517,7 +512,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ExecuteDeny("/tmp/bin".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -548,7 +543,7 @@ mod tests {
                 FsAccess::WriteAllow("/tmp/out".into()),
             ],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -585,7 +580,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::OutboundOnly,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -602,7 +597,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Full,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -619,7 +614,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(r#"/tmp/name"with-quote"#.into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -639,7 +634,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(r"/tmp/name\with-slash".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],

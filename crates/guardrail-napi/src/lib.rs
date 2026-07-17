@@ -41,8 +41,9 @@ impl From<JsNetworkPolicy> for NetworkPolicy {
     }
 }
 
-/// IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
-/// `guardrail::IpcPolicy`.
+/// Linux-only IPC confinement level for the child: `"strict"` | `"relaxed"`.
+/// Mirrors `guardrail::IpcPolicy`. Ignored on macOS and Windows (see
+/// `linuxIpc` on the options objects).
 #[napi(string_enum, js_name = "IpcPolicy")]
 pub enum JsIpcPolicy {
     #[napi(value = "strict")]
@@ -86,8 +87,8 @@ pub struct JsFsAccess {
 }
 
 /// Sandbox policy. All fields optional; omitting everything
-/// yields the maximally restrictive default (no fs, no network, strict IPC,
-/// empty environment).
+/// yields the maximally restrictive default (no fs, no network, strict Linux
+/// IPC, empty environment).
 #[napi(object)]
 #[derive(Default)]
 pub struct SandboxOptions {
@@ -97,8 +98,9 @@ pub struct SandboxOptions {
     pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
-    /// IPC confinement level; `"strict"` (default) if omitted.
-    pub ipc: Option<JsIpcPolicy>,
+    /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
+    /// Ignored on macOS and Windows.
+    pub linux_ipc: Option<JsIpcPolicy>,
     /// Address-space cap in megabytes.
     pub memory_limit_mb: Option<u32>,
     /// CPU-time cap in seconds.
@@ -124,8 +126,9 @@ pub struct SpawnOptions {
     pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
-    /// IPC confinement level; `"strict"` (default) if omitted.
-    pub ipc: Option<JsIpcPolicy>,
+    /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
+    /// Ignored on macOS and Windows.
+    pub linux_ipc: Option<JsIpcPolicy>,
     /// Address-space cap in megabytes.
     pub memory_limit_mb: Option<u32>,
     /// CPU-time cap in seconds.
@@ -221,9 +224,12 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .network
             .map(|n| n.into())
             .unwrap_or(NetworkPolicy::Deny),
-        ipc: opts.ipc.map(|i| i.into()).unwrap_or(IpcPolicy::Strict),
         limits,
         env,
+        linux_ipc: opts
+            .linux_ipc
+            .map(|i| i.into())
+            .unwrap_or(IpcPolicy::Strict),
         darwin_sandbox_profiles,
         windows_cache_namespace: opts.windows_cache_namespace,
     })
@@ -235,7 +241,7 @@ impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
             SandboxOptions {
                 fs: options.fs,
                 network: options.network,
-                ipc: options.ipc,
+                linux_ipc: options.linux_ipc,
                 memory_limit_mb: options.memory_limit_mb,
                 cpu_time_limit_secs: options.cpu_time_limit_secs,
                 max_processes: options.max_processes,

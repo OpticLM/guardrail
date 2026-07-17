@@ -101,7 +101,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/generated-read".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![first.clone(), second.clone()],
@@ -131,7 +131,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/has\0nul".into())],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
@@ -161,7 +161,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![path.clone()],

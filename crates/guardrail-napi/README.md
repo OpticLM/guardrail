@@ -20,7 +20,7 @@ const sandbox = await Sandbox.build({
     { kind: 'execute-allow', path: '/tmp/work' },
   ],
   network: 'deny', // 'deny' | 'outbound-only' | 'full'
-  ipc: 'strict', // 'strict' | 'relaxed'
+  linuxIpc: 'strict', // Linux-only: 'strict' | 'relaxed'
   memoryLimitMb: 256,
   env: {
     PATH: '/usr/bin:/bin',
@@ -128,7 +128,7 @@ const sandbox = await Sandbox.build({
   fs,
   env,
   network: 'deny',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await sandbox.spawn('/usr/bin/grep', ['-q', 'needle', 'alpha.txt'], {
@@ -163,7 +163,7 @@ const cargoSandbox = await Sandbox.build({
     CARGO_TERM_COLOR: 'never',
   },
   network: 'deny',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await cargoSandbox.spawn(`${rustSysroot}/bin/cargo`, ['build', '--offline'], {
@@ -222,7 +222,7 @@ const pnpmSandbox = await Sandbox.build({
     CI: '1',
   },
   network: 'full',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await pnpmSandbox.spawn(
@@ -269,7 +269,7 @@ const goSandbox = await Sandbox.build({
     GOTOOLCHAIN: 'local',
   },
   network: 'deny',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await goSandbox.spawn('/usr/bin/go', ['build', './...'], {
@@ -298,7 +298,7 @@ const gitSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await gitSandbox.spawn('/usr/bin/git', ['init'], {
@@ -334,7 +334,7 @@ const jjSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await jjSandbox.spawn(jjBin, ['--ignore-working-copy', 'status'], {
@@ -373,7 +373,7 @@ const ghSandbox = await Sandbox.build({
     // Add GH_TOKEN here if you want authenticated API calls.
   },
   network: 'outbound-only',
-  ipc: 'strict',
+  linuxIpc: 'strict',
 })
 
 await ghSandbox.spawn('/usr/bin/gh', ['api', 'rate_limit', '--jq', '.resources.core.limit'], {
@@ -392,7 +392,7 @@ This section is macOS-specific. It was tested on Darwin 24.6.0 arm64 with Node
 GitHub CLI 2.96.0.
 
 macOS uses Seatbelt profiles. Guardrail still generates a literal `(deny
-default)` profile from your `fs`, `network`, and `ipc` options, but macOS
+default)` profile from your `fs` and `network` options, but macOS
 developer tools also need a few runtime operations that are not filesystem
 paths. Use `darwinSandboxProfiles` to import those explicit `.sb` grants.
 
@@ -489,8 +489,11 @@ Notes:
   real home directory unless you want the sandboxed tool to read or mutate it.
 - `network: 'outbound-only'` is enough for HTTPS client requests on macOS in
   these tests. Use `network: 'full'` only for tools that need inbound sockets.
-- `IpcPolicy` is effectively a no-op on macOS today. Use an imported `.sb`
-  profile for macOS-specific IPC or Mach permissions.
+- `linuxIpc` is Linux-only and ignored on macOS. Seatbelt starts from `(deny
+  default)`, so Mach lookups and POSIX/SysV IPC need explicit imported `.sb`
+  grants.
+  Note that `network: 'outbound-only'` and `'full'` also permit connecting to
+  local Unix-domain sockets — Seatbelt treats those as network operations.
 
 ### Developer Tool Profile
 
@@ -532,7 +535,6 @@ const sandbox = await Sandbox.build({
   fs,
   env,
   network: 'deny',
-  ipc: 'strict',
   darwinSandboxProfiles: [darwinRuntimeProfile],
 })
 
@@ -584,7 +586,6 @@ const cargoSandbox = await Sandbox.build({
       clang,
   },
   network: 'deny',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -642,7 +643,6 @@ const pnpmSandbox = await Sandbox.build({
     CI: '1',
   },
   network: 'outbound-only',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -696,7 +696,6 @@ const goSandbox = await Sandbox.build({
     CGO_ENABLED: '0',
   },
   network: 'deny',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -733,7 +732,6 @@ const gitSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -779,7 +777,6 @@ const jjSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -835,7 +832,6 @@ const ghSandbox = await Sandbox.build({
   ],
   env: ghEnv,
   network: 'outbound-only',
-  ipc: 'strict',
   darwinSandboxProfiles: darwinDeveloperProfiles,
 })
 
@@ -851,6 +847,30 @@ This test host had no `GH_TOKEN`, so `gh api rate_limit` exited with GitHub
 CLI's authentication prompt both outside and inside Guardrail. The same macOS
 policy and `network: 'outbound-only'` completed an HTTPS request to
 `https://api.github.com/rate_limit` with `/usr/bin/curl`.
+
+## Platform Capability Matrix
+
+Each option is enforced by a different mechanism per platform; an option
+marked *ignored* is an honest no-op there.
+
+| Option | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
+| `network` | seccomp socket-family filter | Seatbelt network rules | AppContainer capabilities |
+| `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` | `setrlimit` | Job Object |
+| `env` | cleared, then set | cleared, then set | cleared, then set |
+| `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
+| `darwinSandboxProfiles` | ignored | `.sb` imports ahead of the generated profile | ignored |
+| `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
+
+On Windows there is no configurable IPC option, but AppContainer baseline
+isolation still applies. Access to a securable object requires both the normal
+user/group side and the package/capability side of the child's token; effective
+access is their intersection and remains subject to integrity level and other
+policy. Some system resources deliberately grant regular AppContainers access,
+often through `ALL APPLICATION PACKAGES`, so they remain potentially reachable.
+Children sharing one `windowsCacheNamespace` (and filesystem policy) share a
+package SID and are not isolated from each other.
 
 ## API Notes
 
@@ -881,5 +901,6 @@ policy and `network: 'outbound-only'` completed an HTTPS request to
 
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
   Unix and is unsupported on Windows in that state.
+- `linuxIpc` is Linux-only and ignored on macOS and Windows.
 - `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS.
 - `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows.

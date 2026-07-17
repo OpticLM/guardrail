@@ -60,8 +60,9 @@ export type FsAccessKind =  'read-allow'|
 'execute-deny';
 
 /**
- * IPC confinement level for the child: `"strict"` | `"relaxed"`. Mirrors
- * `guardrail::IpcPolicy`.
+ * Linux-only IPC confinement level for the child: `"strict"` | `"relaxed"`.
+ * Mirrors `guardrail::IpcPolicy`. Ignored on macOS and Windows (see
+ * `linuxIpc` on the options objects).
  */
 export type IpcPolicy =  'strict'|
 'relaxed';
@@ -87,8 +88,8 @@ export declare function probeSupport(): void
 
 /**
  * Sandbox policy. All fields optional; omitting everything
- * yields the maximally restrictive default (no fs, no network, strict IPC,
- * empty environment).
+ * yields the maximally restrictive default (no fs, no network, strict Linux
+ * IPC, empty environment).
  */
 export interface SandboxOptions {
   /**
@@ -99,8 +100,11 @@ export interface SandboxOptions {
   fs?: Array<FsAccess>
   /** Network confinement level; `"deny"` (default) if omitted. */
   network?: NetworkPolicy
-  /** IPC confinement level; `"strict"` (default) if omitted. */
-  ipc?: IpcPolicy
+  /**
+   * Linux-only IPC confinement level; `"strict"` (default) if omitted.
+   * Ignored on macOS and Windows.
+   */
+  linuxIpc?: IpcPolicy
   /** Address-space cap in megabytes. */
   memoryLimitMb?: number
   /** CPU-time cap in seconds. */
@@ -141,8 +145,11 @@ export interface SpawnOptions {
   fs?: Array<FsAccess>
   /** Network confinement level; `"deny"` (default) if omitted. */
   network?: NetworkPolicy
-  /** IPC confinement level; `"strict"` (default) if omitted. */
-  ipc?: IpcPolicy
+  /**
+   * Linux-only IPC confinement level; `"strict"` (default) if omitted.
+   * Ignored on macOS and Windows.
+   */
+  linuxIpc?: IpcPolicy
   /** Address-space cap in megabytes. */
   memoryLimitMb?: number
   /** CPU-time cap in seconds. */

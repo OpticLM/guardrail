@@ -179,7 +179,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
+            linux_ipc: IpcPolicy::Strict,
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],

@@ -30,9 +30,9 @@ pub struct ResourceLimits {
 /// let config = SandboxConfig {
 ///     fs: vec![],
 ///     network: NetworkPolicy::Deny,
-///     ipc: IpcPolicy::Strict,
 ///     limits: ResourceLimits::default(),
 ///     env: BTreeMap::new(),
+///     linux_ipc: IpcPolicy::Strict,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
 /// };
@@ -43,18 +43,23 @@ pub struct SandboxConfig {
     pub fs: Vec<FsAccess>,
     /// Network confinement level.
     pub network: NetworkPolicy,
-    /// IPC confinement level.
-    pub ipc: IpcPolicy,
     /// Resource limits.
     pub limits: ResourceLimits,
     /// The **only** environment variables the child will see. The child's
     /// inherited environment is unconditionally cleared before these are
     /// applied by the backend.
     pub env: BTreeMap<String, String>,
+    /// Linux-only IPC confinement level. Non-Linux backends ignore this field.
+    ///
+    /// Enforced with seccomp by the Linux backend. On macOS it is ignored: IPC
+    /// follows the generated and imported Seatbelt rules, and network grants
+    /// can permit Unix-domain socket connections. On Windows it is ignored:
+    /// AppContainer baseline isolation applies independently of this field.
+    pub linux_ipc: IpcPolicy,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending
-    /// the generated profile from the portable `fs`/`network`/`ipc` policies.
+    /// the generated profile from the portable `fs`/`network` policies.
     pub darwin_sandbox_profiles: Vec<PathBuf>,
     /// Windows-only cache namespace for reusable AppContainer profiles and ACLs.
     ///

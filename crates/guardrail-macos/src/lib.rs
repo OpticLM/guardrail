@@ -22,6 +22,17 @@
 //!   by the runtime and well-known libraries.
 //! - `security.mac.lockdown_mode_state` is read by some system frameworks.
 //!
+//! **IPC**
+//! - The Linux-only `linux_ipc` policy is ignored on macOS. IPC confinement
+//!   comes from `(deny default)`, which denies Mach bootstrap lookups
+//!   (`mach-lookup`), POSIX and SysV IPC (`ipc-posix-*`, `ipc-sysv-*`), and
+//!   Unix-domain socket connections. Grant exactly what a workload needs
+//!   through an imported `.sb` profile, e.g.
+//!   `(allow mach-lookup (global-name "..."))`.
+//! - `NetworkPolicy::OutboundOnly` and `Full` emit an unqualified
+//!   `(allow network-outbound)`, which also permits `connect` to local
+//!   Unix-domain sockets — Seatbelt treats those as network operations.
+//!
 //! Use `.fs([FsAccess::ReadAllow(...), FsAccess::ExecuteAllow(...)])` for
 //! binary and dylib paths, and grant sysctl access via a custom `.sb` profile
 //! import or a manual `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule

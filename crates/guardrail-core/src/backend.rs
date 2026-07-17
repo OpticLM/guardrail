@@ -80,7 +80,7 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: crate::policy::NetworkPolicy::Deny,
-            ipc: crate::policy::IpcPolicy::Strict,
+            linux_ipc: crate::policy::IpcPolicy::Strict,
             limits: crate::config::ResourceLimits::default(),
             env: BTreeMap::from([("FOO".into(), "bar".into())]),
             darwin_sandbox_profiles: vec![],
