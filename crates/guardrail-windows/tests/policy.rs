@@ -15,13 +15,14 @@ use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
-    SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
-    TRUSTEE_W,
+    ACCESS_MODE, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation, PSID,
-    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, WELL_KNOWN_SID_TYPE,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid,
+    GetAce, GetLengthSid, GetSidIdentifierAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    INHERITED_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_APPCONTAINER_INFORMATION,
+    TOKEN_GROUPS, TOKEN_QUERY, TokenAppContainerSid, TokenRestrictedSids, WELL_KNOWN_SID_TYPE,
     WinBuiltinAnyPackageSid, WinCapabilityInternetClientSid,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -199,7 +200,7 @@ fn lpac_removes_all_packages_but_keeps_package_and_capability_allows() {
         &all_packages_grant,
         &capability_grant,
     ] {
-        fs::write(file, "guardrail").expect("write characterization file");
+        fs::write(file, "guardrail").expect("write test file");
     }
 
     let mut config = builder_with_system_root();
@@ -224,26 +225,14 @@ fn lpac_removes_all_packages_but_keeps_package_and_capability_allows() {
     let all_packages_sid = well_known_sid(WinBuiltinAnyPackageSid);
     let capability_sid = well_known_sid(WinCapabilityInternetClientSid);
 
-    install_explicit_read_aces(
-        &package_grant,
-        &[
-            (package_sid.as_psid(), DENY_ACCESS),
-            (package_sid.as_psid(), GRANT_ACCESS),
-        ],
-    );
+    install_explicit_read_aces(&package_grant, &[(package_sid.as_psid(), GRANT_ACCESS)]);
     install_explicit_read_aces(
         &all_packages_grant,
-        &[
-            (package_sid.as_psid(), DENY_ACCESS),
-            (all_packages_sid.as_psid(), GRANT_ACCESS),
-        ],
+        &[(all_packages_sid.as_psid(), GRANT_ACCESS)],
     );
     install_explicit_read_aces(
         &capability_grant,
-        &[
-            (package_sid.as_psid(), DENY_ACCESS),
-            (capability_sid.as_psid(), GRANT_ACCESS),
-        ],
+        &[(capability_sid.as_psid(), GRANT_ACCESS)],
     );
     let package_allowed = package_child.wait().expect("wait").success();
     let all_packages_allowed = probe_file_allowed(&config, "read-file", &all_packages_grant);
@@ -255,6 +244,28 @@ fn lpac_removes_all_packages_but_keeps_package_and_capability_allows() {
          ALL APPLICATION PACKAGES allow={all_packages_allowed}, \
          capability allow={capability_allowed}"
     );
+}
+
+#[test]
+fn filesystem_deny_vetoes_capability_allow() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let capability_grant = temp.path().join("capability.txt");
+    fs::write(&capability_grant, "guardrail").expect("write capability file");
+    let capability_sid = well_known_sid(WinCapabilityInternetClientSid);
+    install_explicit_read_aces(
+        &capability_grant,
+        &[(capability_sid.as_psid(), GRANT_ACCESS)],
+    );
+
+    let mut config = builder_with_system_root();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadDeny(capability_grant.clone()),
+    ]);
+
+    assert!(!probe_file_allowed(&config, "read-file", &capability_grant));
 }
 
 #[test]
@@ -288,23 +299,147 @@ fn read_allow_with_read_deny_keeps_parent_inheritance_for_future_sibling() {
 }
 
 #[test]
-fn read_deny_then_read_allow_reopens_child_only() {
+fn future_child_of_denied_directory_inherits_deny() {
     let temp = TempPath::new();
-    fs::create_dir_all(temp.path()).expect("create temp dir");
-    let public = temp.path().join("public.txt");
-    let other = temp.path().join("other.txt");
-    fs::write(&public, "public").expect("write public");
-    fs::write(&other, "other").expect("write other");
+    let denied = temp.path().join("denied");
+    fs::create_dir_all(&denied).expect("create denied dir");
+    let future = denied.join("future.txt");
 
     let mut config = builder_with_system_root();
     config.fs.extend([
         FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(denied),
+    ]);
+    let mut command = probe();
+    command.args(["delayed-read-file", "750"]).arg(&future);
+    command.env_clear();
+    command.envs(&config.env);
+    let mut child = spawn_child(&config, command);
+    fs::write(&future, "secret").expect("write future denied child");
+
+    assert!(!child.wait().expect("wait").success());
+}
+
+#[test]
+fn nested_reallow_is_rejected() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let public = temp.path().join("public.txt");
+    fs::write(&public, "public").expect("write public");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
         FsAccess::ReadDeny(temp.path().into()),
-        FsAccess::ReadAllow(public.clone()),
+        FsAccess::ReadAllow(public),
     ]);
 
-    assert!(probe_file_allowed(&config, "read-file", &public));
-    assert!(!probe_file_allowed(&config, "read-file", &other));
+    let err = match WindowsBackend::new(config) {
+        Ok(_) => panic!("nested re-allow must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("cannot re-allow read access"));
+    assert!(matches!(
+        err,
+        guardrail_core::Error::Confinement { stage: "acl", .. }
+    ));
+}
+
+#[test]
+fn dropping_backend_and_child_removes_filesystem_deny_ace() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let secret = temp.path().join("secret.txt");
+    let public = temp.path().join("public.txt");
+    fs::write(&secret, "secret").expect("write secret");
+    fs::write(&public, "public").expect("write public");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(public.clone()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
+    let backend = WindowsBackend::new(config.clone()).expect("backend");
+    let mut command = probe();
+    command.args(["delayed-read-file", "250"]).arg(&secret);
+    command.env_clear();
+    command.envs(&config.env);
+    let mut child = backend.spawn(command).expect("spawn");
+    let package_sid = appcontainer_sid(child.id());
+    let filesystem_sid = filesystem_restricting_sid(child.id());
+
+    assert!(dacl_has_explicit_sid(&public, package_sid.as_psid()));
+    assert!(dacl_has_explicit_sid(&secret, filesystem_sid.as_psid()));
+    assert!(!child.wait().expect("wait").success());
+    drop(child);
+    drop(backend);
+    assert!(!dacl_has_explicit_sid(&public, package_sid.as_psid()));
+    assert!(!dacl_has_explicit_sid(&secret, filesystem_sid.as_psid()));
+}
+
+#[test]
+fn deny_tree_with_junction_is_rejected() {
+    let tree = TempPath::new();
+    let denied = tree.path().join("denied");
+    fs::create_dir_all(&denied).expect("create denied dir");
+    let outside = TempPath::new();
+    fs::create_dir_all(outside.path()).expect("create junction target");
+    let junction = denied.join("junction");
+    let linked = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(outside.path())
+        .status()
+        .expect("run mklink");
+    assert!(linked.success(), "create directory junction");
+
+    let mut config = builder_with_system_root();
+    config
+        .fs
+        .extend([FsAccess::ReadAllow(probe_dir()), FsAccess::ReadDeny(denied)]);
+    let err = match WindowsBackend::new(config) {
+        Ok(_) => panic!("deny tree containing a junction must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("reparse point"));
+    fs::remove_dir(&junction).expect("remove directory junction");
+}
+
+#[test]
+fn deny_tree_with_protected_descendant_is_rejected() {
+    let temp = TempPath::new();
+    let child = temp.path().join("protected.txt");
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    fs::write(&child, "protected").expect("write protected child");
+    protect_dacl(&child);
+
+    let mut config = builder_with_system_root();
+    config.fs.push(FsAccess::ReadDeny(temp.path().into()));
+    let err = match WindowsBackend::new(config) {
+        Ok(_) => panic!("deny tree containing a protected DACL must be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("protected DACL"));
+}
+
+#[test]
+fn deny_tree_with_null_dacl_descendant_is_rejected() {
+    let temp = TempPath::new();
+    let child = temp.path().join("null-dacl.txt");
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    fs::write(&child, "null").expect("write null-DACL child");
+    set_null_dacl(&child);
+
+    let mut config = builder_with_system_root();
+    config.fs.push(FsAccess::ReadDeny(temp.path().into()));
+    let err = match WindowsBackend::new(config) {
+        Ok(_) => panic!("deny tree containing a null DACL must be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("null DACL"));
 }
 
 #[test]
@@ -553,6 +688,59 @@ fn appcontainer_sid(pid: u32) -> OwnedSid {
     sid
 }
 
+fn filesystem_restricting_sid(pid: u32) -> OwnedSid {
+    let process = TestHandle::new(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) },
+        "open probe process",
+    );
+    let mut token = ptr::null_mut();
+    let opened = unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) };
+    win32_bool(opened, "open probe token");
+    let token = TestHandle::new(token, "open probe token");
+
+    let mut groups_len = 0;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenRestrictedSids,
+            ptr::null_mut(),
+            0,
+            &mut groups_len,
+        );
+    }
+    assert_ne!(groups_len, 0, "measure TokenRestrictedSids");
+    let mut groups_storage = vec![0usize; (groups_len as usize).div_ceil(mem::size_of::<usize>())];
+    let queried = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenRestrictedSids,
+            groups_storage.as_mut_ptr().cast(),
+            groups_len,
+            &mut groups_len,
+        )
+    };
+    win32_bool(queried, "query TokenRestrictedSids");
+    let groups = unsafe { &*groups_storage.as_ptr().cast::<TOKEN_GROUPS>() };
+    let restricted =
+        unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize) };
+    let filesystem_sid = restricted
+        .iter()
+        .map(|entry| entry.Sid)
+        .find(|sid| unsafe {
+            let authority = GetSidIdentifierAuthority(*sid);
+            let count = GetSidSubAuthorityCount(*sid);
+            !authority.is_null() && !count.is_null() && (*authority).Value == [0; 6] && *count == 4
+        })
+        .expect("filesystem restricting SID");
+
+    let sid_len = unsafe { GetLengthSid(filesystem_sid) };
+    let sid = OwnedSid::with_byte_len(sid_len);
+    let copied =
+        unsafe { windows_sys::Win32::Security::CopySid(sid_len, sid.as_psid(), filesystem_sid) };
+    win32_bool(copied, "copy filesystem restricting SID");
+    sid
+}
+
 fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> OwnedSid {
     let mut len = 0;
     unsafe {
@@ -580,7 +768,7 @@ fn install_explicit_read_aces(path: &Path, entries: &[(PSID, ACCESS_MODE)]) {
             &mut descriptor,
         )
     };
-    win32_status(captured, "capture characterization DACL");
+    win32_status(captured, "capture test DACL");
 
     let explicit = entries
         .iter()
@@ -600,7 +788,7 @@ fn install_explicit_read_aces(path: &Path, entries: &[(PSID, ACCESS_MODE)]) {
     let mut new_acl = ptr::null_mut();
     let built =
         unsafe { SetEntriesInAclW(explicit.len() as u32, explicit.as_ptr(), dacl, &mut new_acl) };
-    win32_status(built, "build characterization DACL");
+    win32_status(built, "build test DACL");
     let installed = unsafe {
         SetNamedSecurityInfoW(
             path_wide.as_ptr(),
@@ -616,7 +804,108 @@ fn install_explicit_read_aces(path: &Path, entries: &[(PSID, ACCESS_MODE)]) {
         LocalFree(new_acl.cast::<core::ffi::c_void>() as HLOCAL);
         LocalFree(descriptor.cast::<core::ffi::c_void>() as HLOCAL);
     }
-    win32_status(installed, "install characterization DACL");
+    win32_status(installed, "install test DACL");
+}
+
+fn protect_dacl(path: &Path) {
+    let path_wide = wide_null(path.as_os_str());
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let captured = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    win32_status(captured, "capture DACL to protect");
+    let protected = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+    unsafe {
+        LocalFree(descriptor.cast::<core::ffi::c_void>() as HLOCAL);
+    }
+    win32_status(protected, "protect DACL");
+}
+
+fn set_null_dacl(path: &Path) {
+    let path_wide = wide_null(path.as_os_str());
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    win32_status(status, "set null DACL");
+}
+
+fn dacl_has_explicit_sid(path: &Path, sid: PSID) -> bool {
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+
+    let path_wide = wide_null(path.as_os_str());
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let captured = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    win32_status(captured, "capture DACL");
+
+    let found = if dacl.is_null() {
+        false
+    } else {
+        let count = unsafe { (*dacl).AceCount };
+        (0..u32::from(count)).any(|index| {
+            let mut ace = ptr::null_mut();
+            let got = unsafe { GetAce(dacl, index, &mut ace) };
+            win32_bool(got, "get ACE");
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            if u32::from(header.AceFlags) & INHERITED_ACE != 0
+                || (header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                    && header.AceType != ACCESS_DENIED_ACE_TYPE)
+            {
+                return false;
+            }
+            let ace_sid = unsafe {
+                ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
+                    .cast_mut()
+                    .cast()
+            };
+            unsafe { EqualSid(ace_sid, sid) != 0 }
+        })
+    };
+
+    unsafe {
+        LocalFree(descriptor.cast::<core::ffi::c_void>() as HLOCAL);
+    }
+    found
 }
 
 fn wide_null(value: &OsStr) -> Vec<u16> {

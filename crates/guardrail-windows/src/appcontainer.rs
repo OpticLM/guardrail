@@ -4,18 +4,22 @@
 
 use std::ffi::OsStr;
 use std::io;
+use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
 use guardrail_core::{Error, NetworkPolicy, Result};
-use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+use windows_sys::Win32::Foundation::{HLOCAL, LocalFree, RtlNtStatusToDosError};
+use windows_sys::Win32::Security::Cryptography::{
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    CopySid, CreateWellKnownSid, DeriveCapabilitySidsFromName, FreeSid, GetLengthSid, PSID,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
-    WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
+    AllocateAndInitializeSid, CopySid, CreateWellKnownSid, DeriveCapabilitySidsFromName, FreeSid,
+    GetLengthSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY,
+    WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
 };
 
 const SE_GROUP_ENABLED: u32 = 4;
@@ -24,6 +28,7 @@ const ERROR_ALREADY_EXISTS: i32 = 183;
 pub(crate) struct AppContainerProfile {
     name: Vec<u16>,
     sid: Sid,
+    restricting_sid: Sid,
 }
 
 unsafe impl Send for AppContainerProfile {}
@@ -31,9 +36,13 @@ unsafe impl Sync for AppContainerProfile {}
 
 impl AppContainerProfile {
     pub(crate) fn create(name: &str) -> Result<Self> {
-        let name_wide = wide_null(OsStr::new(name));
+        let restricting_sid =
+            Sid::random_restricting().map_err(|err| Error::confinement("appcontainer", err))?;
+        let nonce = random_u64().map_err(|err| Error::confinement("appcontainer", err))?;
+        let name = format!("{name}-{nonce:016x}");
+        let name_wide = wide_null(OsStr::new(&name));
         let display = wide_null(OsStr::new("guardrail sandbox"));
-        let description = wide_null(OsStr::new("Reusable guardrail AppContainer profile"));
+        let description = wide_null(OsStr::new("guardrail sandbox"));
         let capabilities = CapabilitySet::for_network(NetworkPolicy::Full)
             .map_err(|err| Error::confinement("appcontainer", err))?;
         let mut created_sid = ptr::null_mut();
@@ -63,11 +72,16 @@ impl AppContainerProfile {
         Ok(Self {
             name: name_wide,
             sid,
+            restricting_sid,
         })
     }
 
     pub(crate) fn sid(&self) -> PSID {
         self.sid.as_psid()
+    }
+
+    pub(crate) fn restricting_sid(&self) -> PSID {
+        self.restricting_sid.as_psid()
     }
 
     pub(crate) fn security_capabilities(
@@ -102,6 +116,35 @@ enum SidStorage {
 }
 
 impl Sid {
+    fn random_restricting() -> io::Result<Self> {
+        let mut sub_authorities = [0u32; 4];
+        random_bytes(&mut sub_authorities)?;
+
+        let authority = SID_IDENTIFIER_AUTHORITY { Value: [0; 6] };
+        let mut raw = ptr::null_mut();
+        let allocated = unsafe {
+            AllocateAndInitializeSid(
+                &authority,
+                sub_authorities.len() as u8,
+                sub_authorities[0],
+                sub_authorities[1],
+                sub_authorities[2],
+                sub_authorities[3],
+                0,
+                0,
+                0,
+                0,
+                &mut raw,
+            )
+        };
+        if allocated == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            storage: SidStorage::FreeSid(raw),
+        })
+    }
+
     fn derive_appcontainer(name: &[u16]) -> io::Result<Self> {
         let mut raw = ptr::null_mut();
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut raw) };
@@ -190,6 +233,29 @@ impl Sid {
             SidStorage::FreeSid(raw) => *raw,
             SidStorage::Bytes(storage) => storage.as_ptr().cast::<core::ffi::c_void>() as PSID,
         }
+    }
+}
+
+fn random_u64() -> io::Result<u64> {
+    let mut value = 0u64;
+    random_bytes(std::slice::from_mut(&mut value))?;
+    Ok(value)
+}
+
+fn random_bytes<T>(values: &mut [T]) -> io::Result<()> {
+    let status = unsafe {
+        BCryptGenRandom(
+            ptr::null_mut(),
+            values.as_mut_ptr().cast(),
+            mem::size_of_val(values) as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status < 0 {
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        Err(io::Error::from_raw_os_error(error as i32))
+    } else {
+        Ok(())
     }
 }
 

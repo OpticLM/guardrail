@@ -11,12 +11,17 @@ use std::sync::Arc;
 use std::{io, mem, ptr};
 
 use guardrail_core::{Error, NetworkPolicy, Result, SandboxChild};
-use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
+use windows_sys::Win32::Security::{
+    CreateRestrictedToken, GetTokenInformation, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenGroups,
+    TokenUser,
+};
 use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken,
     PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTUPINFOEXW,
     TerminateProcess, UpdateProcThreadAttribute,
@@ -25,6 +30,8 @@ use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_ALL_APPLICA
 
 use crate::cache::{CachedAppContainer, raw_security_capabilities};
 use crate::handle::{bool_result, owned_handle_from_raw, resume_then_close_thread};
+
+const SE_GROUP_INTEGRITY: u32 = 0x20;
 
 pub(crate) fn launch(
     command: Command,
@@ -64,15 +71,19 @@ pub(crate) fn launch(
         .opt_out_all_application_packages(all_application_packages_policy.as_mut())
         .map_err(|err| Error::confinement("appcontainer", err))?;
     startup.lpAttributeList = attributes.as_mut_ptr();
+    let restricted_token = restricted_token(appcontainer.restricting_sid())
+        .map_err(|err| Error::confinement("restricted-token", err))?;
 
     let mut process_info = PROCESS_INFORMATION::default();
 
     // SAFETY: all pointers either are null or point to nul-terminated UTF-16
     // buffers that outlive the call. `command_line` is mutable because
-    // CreateProcessW may rewrite its command-line buffer. The extended startup
-    // attribute list and SECURITY_CAPABILITIES outlive the call.
+    // CreateProcessAsUserW may rewrite its command-line buffer. The restricted
+    // token, extended startup attribute list, and SECURITY_CAPABILITIES outlive
+    // the call.
     let created = unsafe {
-        CreateProcessW(
+        CreateProcessAsUserW(
+            restricted_token.as_raw_handle(),
             application_name_ptr,
             command_line.as_mut_ptr(),
             ptr::null(),
@@ -117,6 +128,112 @@ pub(crate) fn launch(
     // above and are transferred into SandboxChild. The cleanup guards only own
     // AppContainer/ACL cleanup state and are dropped after the raw handles.
     Ok(unsafe { SandboxChild::from_windows_handles_with_guards(process, job, pid, guards) })
+}
+
+fn restricted_token(filesystem_sid: windows_sys::Win32::Security::PSID) -> io::Result<OwnedHandle> {
+    let mut current_token = ptr::null_mut();
+    let opened = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+            &mut current_token,
+        )
+    };
+    bool_result(opened)?;
+    let current_token = unsafe { owned_handle_from_raw(current_token) }?;
+
+    let mut user_bytes = 0;
+    unsafe {
+        GetTokenInformation(
+            current_token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut user_bytes,
+        );
+    }
+    if user_bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut user_storage = vec![0usize; (user_bytes as usize).div_ceil(mem::size_of::<usize>())];
+    let queried = unsafe {
+        GetTokenInformation(
+            current_token.as_raw_handle(),
+            TokenUser,
+            user_storage.as_mut_ptr().cast(),
+            user_bytes,
+            &mut user_bytes,
+        )
+    };
+    bool_result(queried)?;
+    let user_sid = unsafe { (*user_storage.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+    let mut group_bytes = 0;
+    unsafe {
+        GetTokenInformation(
+            current_token.as_raw_handle(),
+            TokenGroups,
+            ptr::null_mut(),
+            0,
+            &mut group_bytes,
+        );
+    }
+    if group_bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut group_storage = vec![0usize; (group_bytes as usize).div_ceil(mem::size_of::<usize>())];
+    let queried = unsafe {
+        GetTokenInformation(
+            current_token.as_raw_handle(),
+            TokenGroups,
+            group_storage.as_mut_ptr().cast(),
+            group_bytes,
+            &mut group_bytes,
+        )
+    };
+    bool_result(queried)?;
+    let groups = unsafe { &*group_storage.as_ptr().cast::<TOKEN_GROUPS>() };
+    let groups =
+        unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize) };
+
+    // Mirroring Chromium's USER_RESTRICTED_SAME_ACCESS level, copying the
+    // source token's user and non-integrity group SIDs lets normal runtime
+    // resources pass the second check. The extra filesystem SID adds only a
+    // deny-ACE veto and cannot broaden access because both checks must pass.
+    let mut restricting_sids = Vec::with_capacity(groups.len() + 2);
+    restricting_sids.push(SID_AND_ATTRIBUTES {
+        Sid: user_sid,
+        Attributes: 0,
+    });
+    restricting_sids.extend(
+        groups
+            .iter()
+            .filter(|group| group.Attributes & SE_GROUP_INTEGRITY == 0)
+            .map(|group| SID_AND_ATTRIBUTES {
+                Sid: group.Sid,
+                Attributes: 0,
+            }),
+    );
+    restricting_sids.push(SID_AND_ATTRIBUTES {
+        Sid: filesystem_sid,
+        Attributes: 0,
+    });
+    let mut token = ptr::null_mut();
+    let created = unsafe {
+        CreateRestrictedToken(
+            current_token.as_raw_handle(),
+            0,
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            restricting_sids.len() as u32,
+            restricting_sids.as_ptr(),
+            &mut token,
+        )
+    };
+    bool_result(created)?;
+    unsafe { owned_handle_from_raw(token) }
 }
 
 struct AttributeList {
