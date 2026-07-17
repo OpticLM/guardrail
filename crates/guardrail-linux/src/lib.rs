@@ -2,7 +2,10 @@
 //!
 //! Applies confinement entirely in-process inside [`std::process::Command`]'s
 //! `pre_exec` hook: resource limits via `setrlimit`, plus Landlock filesystem
-//! rules and seccomp-BPF filters for network and IPC. No external sandboxing
+//! rules and seccomp-BPF filters for network and IPC. Every parent file
+//! descriptor above stderr is marked close-on-exec, so only stdio crosses
+//! into the child — policies cannot revoke access to descriptors that are
+//! already open, so inheriting one would bypass them. No external sandboxing
 //! binary is used.
 //!
 //! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
@@ -11,8 +14,7 @@
 //! through them. Unix datagram `socketpair`s fail too because their endpoints
 //! can be redirected to named sockets. The graceful errno lets tools that
 //! merely probe optional sockets (nscd, syslog, ssh-agent) fall back;
-//! connection-oriented `socketpair`s and descriptors inherited from the
-//! parent keep working.
+//! connection-oriented `socketpair`s created by the child keep working.
 //!
 //! Unless the network policy is `Full` and the IPC policy is `Relaxed`, the
 //! `io_uring_*` syscalls fail with `ENOSYS`: ring-submitted operations

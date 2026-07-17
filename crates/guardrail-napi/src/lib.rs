@@ -270,7 +270,8 @@ impl Sandbox {
     }
 
     /// Spawn `command` (with `args`) inside this sandbox. stdio is inherited
-    /// from the parent process.
+    /// from the parent process; every other parent file descriptor or handle
+    /// is kept out of the child.
     #[napi]
     pub fn spawn(
         &self,
@@ -325,7 +326,8 @@ pub fn probe_support() -> Result<()> {
 }
 
 /// Spawn `command` (with `args`) confined by `options`. stdio is inherited from
-/// the parent process. Returns a handle to await or kill the child.
+/// the parent process; every other parent file descriptor or handle is kept
+/// out of the child. Returns a handle to await or kill the child.
 #[napi]
 pub fn spawn(
     command: String,

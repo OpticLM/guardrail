@@ -1,8 +1,15 @@
+use std::ffi::CString;
 use std::io;
+use std::ptr;
 
 use guardrail_core::{Error, Result, SandboxConfig};
 
 use crate::profile::SeatbeltProfile;
+
+/// A Seatbelt profile encoded in the parent so applying it after `fork` does
+/// not need to allocate a temporary `CString`.
+#[derive(Clone)]
+pub(crate) struct PreparedProfile(CString);
 
 pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     let profile = if config.darwin_sandbox_profiles.is_empty() {
@@ -25,9 +32,31 @@ pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     Ok(profile)
 }
 
-pub(crate) fn apply(profile: &SeatbeltProfile) -> Result<()> {
-    painless_belt::ffi::sandbox_init(&profile.source, 0)
-        .map_err(|err| Error::confinement("seatbelt", io::Error::other(err.to_string())))
+pub(crate) fn prepare(profile: SeatbeltProfile) -> Result<PreparedProfile> {
+    CString::new(profile.source)
+        .map(PreparedProfile)
+        .map_err(|err| Error::confinement("seatbelt-profile", err))
+}
+
+pub(crate) fn apply(profile: &PreparedProfile) -> io::Result<()> {
+    let mut error_buffer = ptr::null_mut();
+    // SAFETY: profile is a live, nul-terminated C string and error_buffer is a
+    // valid out-pointer. On failure the child immediately reports the raw error
+    // and exits, so any diagnostic buffer allocated by sandbox_init can be left
+    // for the kernel to reclaim without calling free after fork.
+    let rc = unsafe { sandbox_init(profile.0.as_ptr(), 0, &mut error_buffer) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(())
+}
+
+unsafe extern "C" {
+    fn sandbox_init(
+        profile: *const libc::c_char,
+        flags: u64,
+        error_buffer: *mut *mut libc::c_char,
+    ) -> libc::c_int;
 }
 
 fn validate(source: &str) -> Result<()> {
@@ -50,18 +79,6 @@ mod tests {
     use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 
     use super::*;
-
-    fn empty_config() -> SandboxConfig {
-        SandboxConfig {
-            fs: vec![],
-            network: NetworkPolicy::Deny,
-            ipc: IpcPolicy::Strict,
-            limits: ResourceLimits::default(),
-            env: BTreeMap::new(),
-            darwin_sandbox_profiles: vec![],
-            windows_cache_namespace: None,
-        }
-    }
 
     #[test]
     fn custom_profile_paths_are_imported_before_generated_policy() {

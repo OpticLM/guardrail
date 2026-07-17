@@ -65,7 +65,13 @@ impl Backend for LinuxBackend {
                 //     `pre_exec` closures must return `io::Result`.
                 fs::apply(&fs_rules).map_err(std::io::Error::other)?;
 
-                // (4) Seccomp is applied LAST so its filters do not interfere
+                // (4) Descriptor hygiene: mark everything above stderr
+                //     close-on-exec. Runs after the steps above so descriptors
+                //     they open along the way are covered too, and before
+                //     seccomp so the filter cannot interfere with the syscall.
+                scrub_inherited_fds()?;
+
+                // (5) Seccomp is applied LAST so its filters do not interfere
                 //     with Landlock's own setup syscalls.
                 //     The BPF programs were built in the parent;
                 //     only install them here.
@@ -84,6 +90,35 @@ impl Backend for LinuxBackend {
 fn set_no_new_privs() -> std::io::Result<()> {
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS takes scalar args only.
     let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Mark every descriptor above stderr close-on-exec so `execve` closes them
+/// atomically. Landlock and seccomp cannot revoke access to descriptors the
+/// parent already holds open (files, sockets, pipes), so an inherited
+/// descriptor would bypass the whole policy.
+///
+/// Descriptors are flagged rather than closed because the standard library's
+/// fork/exec machinery still needs its (already close-on-exec) exec-error
+/// pipe after this closure returns; stdio was `dup2`ed onto 0–2 before any
+/// `pre_exec` closure runs, so it is unaffected. `close_range(2)` is
+/// async-signal-safe; `CLOSE_RANGE_CLOEXEC` exists since Linux 5.11, and every
+/// kernel that passes the Landlock probe (5.13+) has it, so there is no
+/// fallback path — fail closed instead. The raw syscall avoids the glibc
+/// 2.34+ / musl wrapper requirement.
+fn scrub_inherited_fds() -> std::io::Result<()> {
+    // SAFETY: close_range takes scalar args only and touches no memory.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }

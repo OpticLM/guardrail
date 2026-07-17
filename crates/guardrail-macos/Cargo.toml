@@ -9,6 +9,3 @@ license.workspace = true
 [dependencies]
 guardrail-core.workspace = true
 libc.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-painless-belt = "0.2.3"

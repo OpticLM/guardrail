@@ -10,7 +10,11 @@ use crate::process::SandboxChild;
 /// Implementors apply OS-level confinement (filesystem, network, IPC, resource
 /// limits) and spawn the child according to the immutable configuration they
 /// were constructed with. A backend must clear the command's inherited
-/// environment before applying the configuration environment.
+/// environment before applying the configuration environment, and must keep
+/// the parent's file descriptors or handles from leaking into the child:
+/// only the standard streams may cross the sandbox boundary. Policies cannot
+/// revoke access to descriptors that are already open, so an inherited
+/// descriptor would bypass them.
 pub trait Backend {
     /// Probe whether the running machine appears to support this backend.
     ///

@@ -9,7 +9,8 @@ export declare class Sandbox {
   static build(options?: SandboxOptions | undefined | null): Promise<Sandbox>
   /**
    * Spawn `command` (with `args`) inside this sandbox. stdio is inherited
-   * from the parent process.
+   * from the parent process; every other parent file descriptor or handle
+   * is kept out of the child.
    */
   spawn(command: string, args?: Array<string> | undefined | null, options?: SandboxSpawnOptions | undefined | null): SandboxChild
 }
@@ -122,7 +123,8 @@ export interface SandboxSpawnOptions {
 
 /**
  * Spawn `command` (with `args`) confined by `options`. stdio is inherited from
- * the parent process. Returns a handle to await or kill the child.
+ * the parent process; every other parent file descriptor or handle is kept
+ * out of the child. Returns a handle to await or kill the child.
  */
 export declare function spawn(command: string, args?: Array<string> | undefined | null, options?: SpawnOptions | undefined | null): SandboxChild
 

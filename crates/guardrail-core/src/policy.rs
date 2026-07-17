@@ -55,8 +55,8 @@ pub enum IpcPolicy {
     /// queues, process inspection (`ptrace`, `process_vm_*`), and creating
     /// Unix-domain sockets (`socket(AF_UNIX)`, pathname or abstract) and
     /// datagram `socketpair`s, whose endpoints can be redirected to named
-    /// sockets. Pipes, connection-oriented `socketpair`s, anonymous `mmap`,
-    /// and descriptors inherited from the parent remain available.
+    /// sockets. Pipes, connection-oriented `socketpair`s, and anonymous
+    /// `mmap` remain available to the child.
     #[default]
     Strict,
     /// Permit SysV / POSIX IPC and Unix-domain sockets. Process inspection

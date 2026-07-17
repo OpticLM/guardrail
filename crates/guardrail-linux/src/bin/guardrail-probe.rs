@@ -14,6 +14,10 @@
 //!   spin              busy-loop forever (for CPU-time-limit tests)
 //!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
+//!   read-fd <FD> <EXPECTED>
+//!                     read from the (supposedly inherited) descriptor FD;
+//!                     exit 0 if it yields EXPECTED, 3 if the read fails or
+//!                     the content differs
 //!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
 //!   socket-netlink    create an AF_NETLINK route socket; exit 0 if allowed, 3 if denied
 //!   socket-packet     create an AF_PACKET raw socket; exit 0 if allowed, 3 if denied
@@ -84,6 +88,25 @@ fn main() {
                 Ok(_) => exit(0),
                 Err(_) => exit(3),
             }
+        }
+        "read-fd" => {
+            let Some(fd) = args.get(2).and_then(|s| s.parse::<libc::c_int>().ok()) else {
+                exit(2);
+            };
+            let Some(expected) = args.get(3) else {
+                exit(2);
+            };
+            // One extra byte so trailing content beyond EXPECTED is detected.
+            let mut buf = vec![0u8; expected.len() + 1];
+            // SAFETY: buf is a valid writable buffer of the given length.
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                exit(3);
+            }
+            if &buf[..n as usize] == expected.as_bytes() {
+                exit(0);
+            }
+            exit(3);
         }
         "socket-inet" => exit_socket_probe(libc::AF_INET, libc::SOCK_STREAM, 0),
         "socket-netlink" => {
@@ -222,8 +245,8 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|socket-inet|socket-netlink|\
-                 socket-packet|socket-vsock|socket-unix|socketpair-unix|\
+                 <echo-env|alloc|spin|read-file|write-file|read-fd|socket-inet|\
+                 socket-netlink|socket-packet|socket-vsock|socket-unix|socketpair-unix|\
                  socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|io-uring-enter|\
                  io-uring-register|shm|ptrace-self> [arg]"
             );
