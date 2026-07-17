@@ -1,14 +1,34 @@
 #![cfg(windows)]
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::mem;
 use std::net::TcpListener;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 use guardrail_windows::WindowsBackend;
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
+use windows_sys::Win32::Security::Authorization::{
+    ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    TRUSTEE_W,
+};
+use windows_sys::Win32::Security::{
+    CreateWellKnownSid, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation, PSID,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TokenAppContainerSid, WELL_KNOWN_SID_TYPE,
+    WinBuiltinAnyPackageSid, WinCapabilityInternetClientSid,
+};
+use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::core::PWSTR;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +183,78 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
 
     assert!(probe_file_allowed(&config, "read-file", &public));
     assert!(!probe_file_allowed(&config, "read-file", &secret));
+}
+
+#[test]
+fn package_sid_deny_vetoes_appcontainer_side_allows() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let control = temp.path().join("control.txt");
+    let package_grant = temp.path().join("package.txt");
+    let all_packages_grant = temp.path().join("all-packages.txt");
+    let capability_grant = temp.path().join("capability.txt");
+    for file in [
+        &control,
+        &package_grant,
+        &all_packages_grant,
+        &capability_grant,
+    ] {
+        fs::write(file, "guardrail").expect("write characterization file");
+    }
+
+    let mut config = builder_with_system_root();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(control.clone()),
+    ]);
+    assert!(
+        probe_file_allowed(&config, "read-file", &control),
+        "probe control read failed"
+    );
+
+    let mut command = probe();
+    command
+        .args(["delayed-read-file", "5000"])
+        .arg(&package_grant);
+    command.env_clear();
+    command.envs(&config.env);
+    let mut package_child = spawn_child(&config, command);
+    let package_sid = appcontainer_sid(package_child.id());
+    let all_packages_sid = well_known_sid(WinBuiltinAnyPackageSid);
+    let capability_sid = well_known_sid(WinCapabilityInternetClientSid);
+
+    install_explicit_read_aces(
+        &package_grant,
+        &[
+            (package_sid.as_psid(), DENY_ACCESS),
+            (package_sid.as_psid(), GRANT_ACCESS),
+        ],
+    );
+    install_explicit_read_aces(
+        &all_packages_grant,
+        &[
+            (package_sid.as_psid(), DENY_ACCESS),
+            (all_packages_sid.as_psid(), GRANT_ACCESS),
+        ],
+    );
+    install_explicit_read_aces(
+        &capability_grant,
+        &[
+            (package_sid.as_psid(), DENY_ACCESS),
+            (capability_sid.as_psid(), GRANT_ACCESS),
+        ],
+    );
+    let package_allowed = package_child.wait().expect("wait").success();
+    let all_packages_allowed = probe_file_allowed(&config, "read-file", &all_packages_grant);
+    let capability_allowed = probe_file_allowed(&config, "read-file", &capability_grant);
+
+    assert!(
+        !package_allowed && !all_packages_allowed && !capability_allowed,
+        "package-SID deny results: package allow={package_allowed}, \
+         ALL APPLICATION PACKAGES allow={all_packages_allowed}, \
+         capability allow={capability_allowed}"
+    );
 }
 
 #[test]
@@ -369,6 +461,178 @@ fn probe_file_allowed(config: &SandboxConfig, operation: &str, path: &Path) -> b
     command.envs(&config.env);
     let mut child = spawn_child(config, command);
     child.wait().expect("wait").success()
+}
+
+struct OwnedSid {
+    storage: Vec<usize>,
+}
+
+impl OwnedSid {
+    fn with_byte_len(len: u32) -> Self {
+        assert_ne!(len, 0, "SID length");
+        Self {
+            storage: vec![0; (len as usize).div_ceil(mem::size_of::<usize>())],
+        }
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.storage.as_ptr().cast_mut().cast()
+    }
+}
+
+struct TestHandle(HANDLE);
+
+impl TestHandle {
+    fn new(raw: HANDLE, operation: &str) -> Self {
+        assert!(
+            !raw.is_null(),
+            "{operation}: {}",
+            std::io::Error::last_os_error()
+        );
+        Self(raw)
+    }
+}
+
+impl Drop for TestHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+fn appcontainer_sid(pid: u32) -> OwnedSid {
+    let process = TestHandle::new(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) },
+        "open probe process",
+    );
+    let mut token = ptr::null_mut();
+    let opened = unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) };
+    win32_bool(opened, "open probe token");
+    let token = TestHandle::new(token, "open probe token");
+
+    let mut info_len = 0;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenAppContainerSid,
+            ptr::null_mut(),
+            0,
+            &mut info_len,
+        );
+    }
+    assert_ne!(info_len, 0, "measure TokenAppContainerSid");
+    let mut info_storage = vec![0usize; (info_len as usize).div_ceil(mem::size_of::<usize>())];
+    let queried = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenAppContainerSid,
+            info_storage.as_mut_ptr().cast(),
+            info_len,
+            &mut info_len,
+        )
+    };
+    win32_bool(queried, "query TokenAppContainerSid");
+    let info = unsafe {
+        &*info_storage
+            .as_ptr()
+            .cast::<TOKEN_APPCONTAINER_INFORMATION>()
+    };
+    assert!(
+        !info.TokenAppContainer.is_null(),
+        "probe is not an AppContainer"
+    );
+
+    let sid_len = unsafe { GetLengthSid(info.TokenAppContainer) };
+    let sid = OwnedSid::with_byte_len(sid_len);
+    let copied = unsafe {
+        windows_sys::Win32::Security::CopySid(sid_len, sid.as_psid(), info.TokenAppContainer)
+    };
+    win32_bool(copied, "copy AppContainer SID");
+    sid
+}
+
+fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> OwnedSid {
+    let mut len = 0;
+    unsafe {
+        CreateWellKnownSid(kind, ptr::null_mut(), ptr::null_mut(), &mut len);
+    }
+    let sid = OwnedSid::with_byte_len(len);
+    let created = unsafe { CreateWellKnownSid(kind, ptr::null_mut(), sid.as_psid(), &mut len) };
+    win32_bool(created, "create well-known SID");
+    sid
+}
+
+fn install_explicit_read_aces(path: &Path, entries: &[(PSID, ACCESS_MODE)]) {
+    let path_wide = wide_null(path.as_os_str());
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let captured = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    win32_status(captured, "capture characterization DACL");
+
+    let explicit = entries
+        .iter()
+        .map(|(sid, mode)| EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_GENERIC_READ,
+            grfAccessMode: *mode,
+            grfInheritance: 0,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: ptr::null_mut(),
+                MultipleTrusteeOperation: 0,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_UNKNOWN,
+                ptstrName: sid.cast::<u16>() as PWSTR,
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut new_acl = ptr::null_mut();
+    let built =
+        unsafe { SetEntriesInAclW(explicit.len() as u32, explicit.as_ptr(), dacl, &mut new_acl) };
+    win32_status(built, "build characterization DACL");
+    let installed = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            new_acl,
+            ptr::null_mut(),
+        )
+    };
+    unsafe {
+        LocalFree(new_acl.cast::<core::ffi::c_void>() as HLOCAL);
+        LocalFree(descriptor.cast::<core::ffi::c_void>() as HLOCAL);
+    }
+    win32_status(installed, "install characterization DACL");
+}
+
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn win32_bool(ok: i32, operation: &str) {
+    assert_ne!(ok, 0, "{operation}: {}", std::io::Error::last_os_error());
+}
+
+fn win32_status(status: u32, operation: &str) {
+    assert_eq!(
+        status,
+        ERROR_SUCCESS,
+        "{operation}: {}",
+        std::io::Error::from_raw_os_error(status as i32)
+    );
 }
 
 impl TempPath {

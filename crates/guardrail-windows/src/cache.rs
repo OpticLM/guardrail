@@ -43,11 +43,6 @@ impl CachedAppContainer {
     ) -> Result<AppContainerSecurityCapabilities> {
         self.profile.security_capabilities(network)
     }
-
-    #[cfg(test)]
-    pub(crate) fn sid(&self) -> windows_sys::Win32::Security::PSID {
-        self.profile.sid()
-    }
 }
 
 pub(crate) fn get(config: &SandboxConfig) -> Result<Arc<CachedAppContainer>> {

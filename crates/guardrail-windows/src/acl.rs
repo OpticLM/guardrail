@@ -454,20 +454,10 @@ fn win32_bool(ok: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-
-    use guardrail_core::{Backend, NetworkPolicy, SandboxConfig};
-    use windows_sys::Win32::Security::Authorization::{ACCESS_MODE, DENY_ACCESS};
-    use windows_sys::Win32::Security::{
-        CreateWellKnownSid, WELL_KNOWN_SID_TYPE, WinBuiltinAnyPackageSid,
-        WinCapabilityInternetClientSid,
-    };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_EXECUTE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA,
         FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL, SYNCHRONIZE,
     };
-
-    use crate::{WindowsBackend, cache};
 
     #[test]
     fn read_access_grants_file_read_without_write_or_execute() {
@@ -529,91 +519,6 @@ mod tests {
             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
         );
         assert_eq!(access.Trustee.ptstrName as usize, sid as usize);
-    }
-
-    #[test]
-    fn package_sid_deny_vetoes_appcontainer_side_allows() {
-        let dir = temp_dir("package-deny-access-check");
-        let control = dir.join("control.txt");
-        let package_grant = dir.join("package.txt");
-        let all_packages_grant = dir.join("all-packages.txt");
-        let capability_grant = dir.join("capability.txt");
-        for file in [
-            &control,
-            &package_grant,
-            &all_packages_grant,
-            &capability_grant,
-        ] {
-            std::fs::write(file, b"guardrail").unwrap();
-        }
-
-        let mut env = std::collections::BTreeMap::new();
-        for key in ["SystemRoot", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"] {
-            if let Ok(value) = std::env::var(key) {
-                env.insert(key.into(), value);
-            }
-        }
-        let config = SandboxConfig {
-            fs: vec![FsAccess::ReadAllow(control.clone())],
-            network: NetworkPolicy::OutboundOnly,
-            env,
-            windows_cache_namespace: Some(format!("deny-check-{}", std::process::id())),
-            ..SandboxConfig::default()
-        };
-
-        let appcontainer = cache::get(&config).expect("create AppContainer");
-        let package_sid = appcontainer.sid();
-        let all_packages_sid = well_known_sid(WinBuiltinAnyPackageSid);
-        let capability_sid = well_known_sid(WinCapabilityInternetClientSid);
-        let all_packages_sid_ptr = sid_ptr(&all_packages_sid);
-        let capability_sid_ptr = sid_ptr(&capability_sid);
-
-        let guards = [
-            install_explicit_read_aces(
-                &package_grant,
-                &[(package_sid, DENY_ACCESS), (package_sid, GRANT_ACCESS)],
-            ),
-            install_explicit_read_aces(
-                &all_packages_grant,
-                &[
-                    (package_sid, DENY_ACCESS),
-                    (all_packages_sid_ptr, GRANT_ACCESS),
-                ],
-            ),
-            install_explicit_read_aces(
-                &capability_grant,
-                &[
-                    (package_sid, DENY_ACCESS),
-                    (capability_sid_ptr, GRANT_ACCESS),
-                ],
-            ),
-        ];
-        assert_canonical_read_deny_then_allow(&package_grant, package_sid, package_sid);
-        assert_canonical_read_deny_then_allow(
-            &all_packages_grant,
-            package_sid,
-            all_packages_sid_ptr,
-        );
-        assert_canonical_read_deny_then_allow(&capability_grant, package_sid, capability_sid_ptr);
-
-        let backend = WindowsBackend::new(config).expect("backend");
-        assert!(
-            cmd_can_read(&backend, &control),
-            "control read failed before testing package-SID deny behavior"
-        );
-        let package_allowed = cmd_can_read(&backend, &package_grant);
-        let all_packages_allowed = cmd_can_read(&backend, &all_packages_grant);
-        let capability_allowed = cmd_can_read(&backend, &capability_grant);
-
-        assert!(
-            !package_allowed && !all_packages_allowed && !capability_allowed,
-            "package-SID deny results: package allow={package_allowed}, \
-             ALL APPLICATION PACKAGES allow={all_packages_allowed}, \
-             capability allow={capability_allowed}"
-        );
-
-        drop(guards);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -841,116 +746,6 @@ mod tests {
         ));
         std::fs::create_dir(&path).unwrap();
         path
-    }
-
-    fn install_explicit_read_aces(path: &Path, entries: &[(PSID, ACCESS_MODE)]) -> AclGuard {
-        let original = OriginalDacl::capture(path).expect("capture file DACL");
-        let explicit = entries
-            .iter()
-            .map(|(sid, mode)| {
-                let mut explicit = explicit_access(*sid, read_rights());
-                explicit.grfAccessMode = *mode;
-                explicit.grfInheritance = 0;
-                explicit
-            })
-            .collect::<Vec<_>>();
-
-        let mut new_acl = ptr::null_mut();
-        let status = unsafe {
-            SetEntriesInAclW(
-                explicit.len() as u32,
-                explicit.as_ptr(),
-                original.dacl.cast_const(),
-                &mut new_acl,
-            )
-        };
-        win32_status(status).expect("add characterization ACEs");
-
-        let set_status = unsafe {
-            SetNamedSecurityInfoW(
-                original.path_wide.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                new_acl,
-                ptr::null_mut(),
-            )
-        };
-        let set_result = win32_status(set_status);
-        unsafe {
-            LocalFree(new_acl.cast::<core::ffi::c_void>() as HLOCAL);
-        }
-        set_result.expect("install characterization ACEs");
-
-        AclGuard {
-            originals: vec![original],
-        }
-    }
-
-    fn assert_canonical_read_deny_then_allow(path: &Path, deny_sid: PSID, allow_sid: PSID) {
-        let current = OriginalDacl::capture(path).expect("capture characterized DACL");
-        let dacl = unsafe { &*current.dacl };
-        let mut deny_index = None;
-        let mut allow_index = None;
-
-        for index in 0..dacl.AceCount as u32 {
-            let mut ace = ptr::null_mut();
-            let got_ace = unsafe { GetAce(current.dacl, index, &mut ace) };
-            win32_bool(got_ace).expect("read characterized ACE");
-            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-            if header.AceType != ACCESS_DENIED_ACE_TYPE && header.AceType != ACCESS_ALLOWED_ACE_TYPE
-            {
-                continue;
-            }
-            let bytes = unsafe { slice::from_raw_parts(ace.cast::<u8>(), header.AceSize as usize) };
-            if read_standard_ace_mask(bytes) & FILE_READ_DATA == 0 {
-                continue;
-            }
-
-            match header.AceType {
-                ACCESS_DENIED_ACE_TYPE if standard_ace_matches_sid(ace, deny_sid) => {
-                    deny_index.get_or_insert(index)
-                }
-                ACCESS_ALLOWED_ACE_TYPE if standard_ace_matches_sid(ace, allow_sid) => {
-                    allow_index.get_or_insert(index)
-                }
-                _ => continue,
-            };
-        }
-
-        let deny_index = deny_index.expect("characterized read deny ACE");
-        let allow_index = allow_index.expect("characterized read allow ACE");
-        assert!(
-            deny_index < allow_index,
-            "characterized deny ACE must precede its allow ACE"
-        );
-    }
-
-    fn cmd_can_read(backend: &WindowsBackend, path: &Path) -> bool {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "type"]).arg(path);
-        let mut child = backend.spawn(command).expect("spawn");
-        child.wait().expect("wait").success()
-    }
-
-    fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> Vec<u8> {
-        let mut len = 0;
-        unsafe {
-            CreateWellKnownSid(kind, ptr::null_mut(), ptr::null_mut(), &mut len);
-        }
-        assert_ne!(len, 0, "measure well-known SID");
-
-        let mut storage = vec![0u8; len as usize];
-        let created = unsafe {
-            CreateWellKnownSid(kind, ptr::null_mut(), storage.as_mut_ptr().cast(), &mut len)
-        };
-        win32_bool(created).expect("create well-known SID");
-        storage
-    }
-
-    fn sid_ptr(storage: &[u8]) -> PSID {
-        storage.as_ptr().cast_mut().cast()
     }
 
     fn unique_suffix() -> u128 {
