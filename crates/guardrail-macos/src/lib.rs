@@ -61,11 +61,12 @@
 //!   `(allow network-outbound)`, which also permits `connect` to local
 //!   Unix-domain sockets — Seatbelt treats those as network operations.
 //!
-//! Use `.fs([FsAccess::ReadAllow(...), FsAccess::ExecuteAllow(...)])` for
-//! binary and dylib paths, and grant sysctl access via a custom `.sb` profile
-//! import or a manual `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule
-//! in your profile. Set `darwin_sandbox_profiles` on `SandboxConfig` for the
-//! custom-profile escape hatch.
+//! Add `FsAccess::ReadAllow(...)` and `FsAccess::ExecuteAllow(...)` rules to
+//! [`guardrail_core::SandboxConfig::fs`] for binary and dylib paths, and grant
+//! sysctl access via a custom `.sb` profile import or a manual
+//! `(allow sysctl-read (sysctl-name "kern.bootargs"))` rule in your profile.
+//! Set `darwin_sandbox_profiles` on `SandboxConfig` for the custom-profile
+//! escape hatch.
 
 #![cfg(target_os = "macos")]
 
