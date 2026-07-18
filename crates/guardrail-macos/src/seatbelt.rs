@@ -1,15 +1,119 @@
-use std::ffi::CString;
+use std::collections::BTreeMap;
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
-use std::ptr;
+use std::os::unix::ffi::OsStrExt;
+use std::process::Command;
 
 use guardrail_core::{Error, Result, SandboxConfig};
 
 use crate::profile::SeatbeltProfile;
 
-/// A Seatbelt profile encoded in the parent so applying it after `fork` does
-/// not need to allocate a temporary `CString`.
+pub(crate) const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
+const SANDBOX_EXEC: &CStr = c"/usr/bin/sandbox-exec";
+
+/// A Seatbelt profile encoded in the parent for the launcher's argv.
 #[derive(Clone)]
 pub(crate) struct PreparedProfile(CString);
+
+/// Parent-built argv and envp for the dedicated Seatbelt launcher.
+///
+/// The raw pointer tables refer into the owned `CString` buffers. Moving this
+/// struct does not move those buffers, and neither table nor storage is
+/// mutated after construction.
+pub(crate) struct PreparedLaunch {
+    _argv_storage: Vec<CString>,
+    argv: Box<[*const libc::c_char]>,
+    _env_storage: Vec<CString>,
+    envp: Box<[*const libc::c_char]>,
+}
+
+// SAFETY: the pointer tables are immutable and point only into CString
+// allocations owned by the same struct, whose addresses remain stable when
+// the struct moves between threads or into the pre_exec closure.
+unsafe impl Send for PreparedLaunch {}
+// SAFETY: as above; shared access cannot mutate either storage or pointers.
+unsafe impl Sync for PreparedLaunch {}
+
+pub(crate) fn probe_launcher() -> io::Result<()> {
+    // SAFETY: SANDBOX_EXEC is a live, nul-terminated absolute path.
+    let rc = unsafe { libc::access(SANDBOX_EXEC.as_ptr(), libc::X_OK) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+impl PreparedLaunch {
+    /// Build a `sandbox-exec -p PROFILE -- PROGRAM ARGS...` invocation and the
+    /// exact environment declared by the sandbox configuration.
+    pub(crate) fn new(
+        profile: &PreparedProfile,
+        command: &Command,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<Self> {
+        let mut argv_storage = Vec::with_capacity(command.get_args().len() + 5);
+        argv_storage.push(SANDBOX_EXEC.to_owned());
+        argv_storage.push(c"-p".to_owned());
+        argv_storage.push(profile.0.clone());
+        argv_storage.push(c"--".to_owned());
+        argv_storage.push(os_string(command.get_program())?);
+        for arg in command.get_args() {
+            argv_storage.push(os_string(arg)?);
+        }
+        let argv = pointer_table(&argv_storage);
+
+        let mut env_storage = Vec::with_capacity(env.len());
+        for (key, value) in env {
+            let mut entry = Vec::with_capacity(key.len() + value.len() + 1);
+            entry.extend_from_slice(key.as_bytes());
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_bytes());
+            env_storage.push(c_string(entry)?);
+        }
+        let envp = pointer_table(&env_storage);
+
+        Ok(Self {
+            _argv_storage: argv_storage,
+            argv,
+            _env_storage: env_storage,
+            envp,
+        })
+    }
+
+    /// Replace the fork child with the dedicated Seatbelt launcher.
+    ///
+    /// `execve` is async-signal-safe. On success this never returns; the fresh
+    /// sandbox-exec image parses and applies the profile while single-threaded,
+    /// then execs the requested command.
+    pub(crate) fn exec(&self) -> io::Result<()> {
+        // SAFETY: both pointer tables are null-terminated and every preceding
+        // pointer names a live, nul-terminated CString owned by self.
+        unsafe {
+            libc::execve(
+                SANDBOX_EXEC.as_ptr(),
+                self.argv.as_ptr(),
+                self.envp.as_ptr(),
+            );
+        }
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn os_string(value: &OsStr) -> io::Result<CString> {
+    c_string(value.as_bytes().to_vec())
+}
+
+fn c_string(bytes: Vec<u8>) -> io::Result<CString> {
+    CString::new(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
+}
+
+fn pointer_table(strings: &[CString]) -> Box<[*const libc::c_char]> {
+    strings
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect()
+}
 
 pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     let profile = if config.darwin_sandbox_profiles.is_empty() {
@@ -38,27 +142,6 @@ pub(crate) fn prepare(profile: SeatbeltProfile) -> Result<PreparedProfile> {
         .map_err(|err| Error::confinement("seatbelt-profile", err))
 }
 
-pub(crate) fn apply(profile: &PreparedProfile) -> io::Result<()> {
-    let mut error_buffer = ptr::null_mut();
-    // SAFETY: profile is a live, nul-terminated C string and error_buffer is a
-    // valid out-pointer. On failure the child immediately reports the raw error
-    // and exits, so any diagnostic buffer allocated by sandbox_init can be left
-    // for the kernel to reclaim without calling free after fork.
-    let rc = unsafe { sandbox_init(profile.0.as_ptr(), 0, &mut error_buffer) };
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(libc::EPERM));
-    }
-    Ok(())
-}
-
-unsafe extern "C" {
-    fn sandbox_init(
-        profile: *const libc::c_char,
-        flags: u64,
-        error_buffer: *mut *mut libc::c_char,
-    ) -> libc::c_int;
-}
-
 fn validate(source: &str) -> Result<()> {
     if source.contains('\0') {
         return Err(Error::confinement(
@@ -79,6 +162,54 @@ mod tests {
     use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
 
     use super::*;
+
+    #[test]
+    fn launcher_argv_and_env_are_fully_prepared() {
+        let profile = PreparedProfile(CString::new("(version 1)\n(deny default)\n").unwrap());
+        let mut command = Command::new("/tmp/program");
+        command.args(["first", "two words"]);
+        let env = BTreeMap::from([
+            ("EMPTY".to_owned(), String::new()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+        ]);
+
+        let launcher = PreparedLaunch::new(&profile, &command, &env).unwrap();
+
+        let argv = launcher
+            ._argv_storage
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            argv,
+            [
+                SANDBOX_EXEC_PATH,
+                "-p",
+                "(version 1)\n(deny default)\n",
+                "--",
+                "/tmp/program",
+                "first",
+                "two words",
+            ]
+        );
+        let envp = launcher
+            ._env_storage
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(envp, ["EMPTY=", "PATH=/usr/bin:/bin"]);
+
+        assert_eq!(launcher.argv.len(), launcher._argv_storage.len() + 1);
+        assert!(launcher.argv.last().unwrap().is_null());
+        for (pointer, value) in launcher.argv.iter().zip(&launcher._argv_storage) {
+            assert_eq!(*pointer, value.as_ptr());
+        }
+        assert_eq!(launcher.envp.len(), launcher._env_storage.len() + 1);
+        assert!(launcher.envp.last().unwrap().is_null());
+        for (pointer, value) in launcher.envp.iter().zip(&launcher._env_storage) {
+            assert_eq!(*pointer, value.as_ptr());
+        }
+    }
 
     #[test]
     fn custom_profile_paths_are_imported_before_generated_policy() {

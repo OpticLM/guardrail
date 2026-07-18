@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use guardrail_core::Backend;
 use guardrail_linux::LinuxBackend;
@@ -92,9 +92,13 @@ fn spawns_survive_contended_multithreaded_parent() {
     }
     drop(tx);
 
+    // One deadline covers every spawner. Giving each receive a fresh timeout
+    // could make two stuck spawners take almost 2 * WATCHDOG to fail.
+    let deadline = Instant::now() + WATCHDOG;
     let mut timed_out = false;
     for _ in 0..SPAWNER_THREADS {
-        match rx.recv_timeout(WATCHDOG) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
             Ok(()) => {}
             Err(RecvTimeoutError::Timeout) => {
                 timed_out = true;

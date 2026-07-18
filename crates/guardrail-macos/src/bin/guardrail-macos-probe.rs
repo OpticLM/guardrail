@@ -12,6 +12,11 @@ fn main() {
 
     match cmd {
         "noop" => exit(0),
+        "echo-env" => {
+            let name = args.get(2).map(String::as_str).unwrap_or("");
+            print!("{}", std::env::var(name).unwrap_or_default());
+            exit(0);
+        }
         "read-file" => {
             let path = args.get(2).map(String::as_str).unwrap_or("");
             match std::fs::read(path) {
@@ -97,7 +102,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: guardrail-macos-probe <noop|read-file|read-fd|socket-inet|tcp-connect|apply-profile> [arg]"
+                "usage: guardrail-macos-probe <noop|echo-env|read-file|read-fd|socket-inet|tcp-connect|apply-profile> [arg]"
             );
             exit(2);
         }

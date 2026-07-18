@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
 import { createRequire } from 'node:module'
+import { Worker } from 'node:worker_threads'
 
 const require = createRequire(import.meta.url)
 const guardrail = require('../index.js')
@@ -50,6 +52,37 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   }
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
   assert.equal(result.code, 0)
+})
+
+test('reuses a sandbox while Node workers churn allocations (Unix)', { skip: process.platform === 'win32' }, async () => {
+  const sandbox = await guardrail.Sandbox.build({
+    fs: [
+      { kind: 'read-allow', path: '/' },
+      { kind: 'execute-allow', path: '/' },
+    ],
+    network: 'full',
+  })
+  const workers = Array.from({ length: 2 }, () => new Worker(`
+    let sink = []
+    function churn() {
+      for (let i = 0; i < 256; i += 1) sink.push(Buffer.alloc((i % 4096) + 17))
+      if (sink.length > 2048) sink = []
+      setImmediate(churn)
+    }
+    churn()
+  `, { eval: true }))
+  await Promise.all(workers.map((worker) => once(worker, 'online')))
+
+  try {
+    const children = Array.from({ length: 16 }, () => sandbox.spawn('/usr/bin/true'))
+    const results = await Promise.all(children.map((child) => child.wait()))
+    for (const result of results) {
+      assert.equal(typeof result.success, 'boolean')
+      if (process.platform !== 'darwin') assert.equal(result.success, true)
+    }
+  } finally {
+    await Promise.all(workers.map((worker) => worker.terminate()))
+  }
 })
 
 test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: process.platform !== 'win32' }, async () => {

@@ -1,6 +1,9 @@
 //! macOS backend support for `guardrail`.
 //!
-//! Profile generation is pure Rust; Seatbelt application is native macOS.
+//! Profile generation is pure Rust. The fork child performs only
+//! async-signal-safe setup, then execs `/usr/bin/sandbox-exec`; Seatbelt
+//! profile parsing and application happen in that fresh, single-threaded
+//! launcher process before it execs the requested command.
 //!
 //! # Security: imported profiles are authoritative
 //!

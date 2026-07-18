@@ -15,6 +15,7 @@ pub struct MacosBackend {
 impl MacosBackend {
     /// Create a new macOS backend.
     pub fn new(config: SandboxConfig) -> Result<Self> {
+        Self::probe_support()?;
         let seatbelt_profile = seatbelt::prepare(seatbelt::resolve(&config)?)?;
         Ok(Self {
             config,
@@ -24,33 +25,40 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
-    /// Seatbelt (`sandbox_init`) and `setrlimit` exist on every macOS version
-    /// this crate compiles for, so support is unconditional.
+    /// Verify that the system Seatbelt launcher is executable.
     fn probe_support() -> Result<()> {
-        Ok(())
+        seatbelt::probe_launcher().map_err(|err| {
+            Error::Unsupported(format!(
+                "{} is required to apply Seatbelt profiles: {err}",
+                seatbelt::SANDBOX_EXEC_PATH
+            ))
+        })
     }
 
     fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
         command.env_clear();
         command.envs(&self.config.env);
 
-        let seatbelt_profile = self.seatbelt_profile.clone();
+        let launcher =
+            seatbelt::PreparedLaunch::new(&self.seatbelt_profile, &command, &self.config.env)
+                .map_err(Error::Spawn)?;
         let limits = self.config.limits;
         let mut inherited_fds = InheritedFdTable::new()
             .map_err(|err| Error::confinement("file-descriptor hygiene", err))?;
 
         // SAFETY: the closure runs after fork() and before execvp() in the
-        // child. All buffers and the Seatbelt C string were allocated in the
-        // parent; the closure itself only calls libc functions over captured
-        // storage and returns io::Error values with raw OS codes.
+        // child. All argv/envp buffers were allocated in the parent; the
+        // closure only calls libc functions over captured storage, then
+        // replaces itself with the single-threaded sandbox-exec launcher.
+        // Seatbelt profile parsing and sandbox_init therefore happen after
+        // exec, never in the fork child of the multithreaded caller.
         unsafe {
             command.pre_exec(move || {
                 // Descriptor hygiene first: it must precede Seatbelt, whose
                 // profile may deny process-info queries.
                 inherited_fds.scrub()?;
                 rlimit::apply(&limits)?;
-                seatbelt::apply(&seatbelt_profile)?;
-                Ok(())
+                launcher.exec()
             });
         }
 

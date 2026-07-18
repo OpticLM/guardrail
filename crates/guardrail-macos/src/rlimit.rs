@@ -7,7 +7,7 @@ use guardrail_core::ResourceLimits;
 type RlimitResource = libc::c_int;
 
 /// Apply `limits` to the current process. Called from within `pre_exec` in the
-/// freshly-forked child, before `execvp`.
+/// freshly-forked child, before the Seatbelt launcher is execed.
 pub(crate) fn apply(limits: &ResourceLimits) -> io::Result<()> {
     if let Some(bytes) = limits.memory_bytes {
         set_one(libc::RLIMIT_AS, bytes)?;
