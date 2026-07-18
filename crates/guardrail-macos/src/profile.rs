@@ -274,7 +274,9 @@ fn invalid_path(message: &str, path: &Path) -> Error {
 mod tests {
     use std::collections::BTreeMap;
 
-    use guardrail_core::{IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+    use guardrail_core::{
+        IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    };
 
     use super::*;
 
@@ -286,6 +288,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         }
     }
@@ -309,6 +312,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build_with_imports(
@@ -357,6 +361,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -391,6 +396,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -432,6 +438,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -457,6 +464,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -477,6 +485,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -498,6 +507,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -519,6 +529,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -545,6 +556,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -576,6 +588,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -613,6 +626,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -630,6 +644,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -647,6 +662,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();
@@ -667,6 +683,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = build(&config).unwrap();

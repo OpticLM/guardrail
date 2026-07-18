@@ -81,6 +81,7 @@ mod tests {
             fs: vec![],
             network: crate::policy::NetworkPolicy::Deny,
             linux_ipc: crate::policy::IpcPolicy::Strict,
+            linux_user_namespaces: crate::policy::UserNamespacePolicy::Deny,
             limits: crate::config::ResourceLimits::default(),
             env: BTreeMap::from([("FOO".into(), "bar".into())]),
             darwin_sandbox_profiles: vec![],

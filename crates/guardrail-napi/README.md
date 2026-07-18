@@ -21,6 +21,7 @@ const sandbox = await Sandbox.build({
   ],
   network: 'deny', // 'deny' | 'outbound-only' | 'full'
   linuxIpc: 'strict', // Linux-only: 'strict' | 'relaxed'
+  linuxUserNamespaces: 'deny', // Linux-only: 'deny' | 'allow'
   memoryLimitMb: 256,
   env: {
     PATH: '/usr/bin:/bin',
@@ -876,6 +877,7 @@ marked *ignored* is an honest no-op there.
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
+| `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 

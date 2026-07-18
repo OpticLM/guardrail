@@ -47,6 +47,37 @@ pub enum NetworkPolicy {
     Full,
 }
 
+/// Linux user-namespace policy.
+/// Default is [`UserNamespacePolicy::Deny`].
+///
+/// **Linux-only.** Enforced with seccomp by the Linux backend; the macOS and
+/// Windows backends ignore [`SandboxConfig::linux_user_namespaces`] (neither
+/// platform has an equivalent unprivileged facility).
+///
+/// Creating a user namespace grants the child ambient capabilities inside it,
+/// unlocking kernel interfaces (mount machinery, further namespace kinds)
+/// that considerably widen the kernel attack surface. No ordinary tool needs
+/// this; the notable exception is a child that sets up its own nested sandbox
+/// — Chromium/Electron's sandbox, bubblewrap/Flatpak, rootless containers.
+///
+/// [`SandboxConfig::linux_user_namespaces`]: crate::SandboxConfig::linux_user_namespaces
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserNamespacePolicy {
+    /// Deny creating or joining namespaces: `unshare(CLONE_NEWUSER)`,
+    /// `clone(CLONE_NEWUSER)`, and `setns` fail with `EPERM`; `clone3` fails
+    /// with `ENOSYS` (seccomp cannot read its flags struct, and the `ENOSYS`
+    /// makes runtimes fall back to `clone`, which it can inspect). The mount
+    /// machinery (`mount`, `pivot_root`, `chroot`, ...) — only reachable by
+    /// unprivileged code inside a user namespace it owns — is denied too.
+    #[default]
+    Deny,
+    /// Permit user-namespace creation and the mount machinery, which the
+    /// kernel's own capability checks still deny outside a namespace the
+    /// child owns. Set this only when the child runs its own sandbox
+    /// (Chromium/Electron, bubblewrap, rootless containers).
+    Allow,
+}
+
 /// Inter-process-communication confinement level.
 /// Default is [`IpcPolicy::Strict`].
 ///

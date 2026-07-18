@@ -180,7 +180,9 @@ impl InheritedFdTable {
 mod tests {
     use std::collections::BTreeMap;
 
-    use guardrail_core::{IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+    use guardrail_core::{
+        IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    };
 
     #[test]
     fn crate_smoke_test_builds_a_default_config() {
@@ -191,6 +193,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         assert!(config.fs.is_empty());

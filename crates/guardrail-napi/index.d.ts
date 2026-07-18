@@ -107,6 +107,14 @@ export interface SandboxOptions {
    */
   linuxIpc?: IpcPolicy
   /**
+   * Linux-only user-namespace policy; `"deny"` (default) if omitted.
+   * Ignored on macOS and Windows. Set `"allow"` only when the child runs
+   * its own nested sandbox (Chromium/Electron, bubblewrap, rootless
+   * containers): it re-enables user-namespace creation and the mount
+   * machinery such a sandbox needs.
+   */
+  linuxUserNamespaces?: UserNamespacePolicy
+  /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
    * descendants but not aggregated across forks.
@@ -169,6 +177,14 @@ export interface SpawnOptions {
    */
   linuxIpc?: IpcPolicy
   /**
+   * Linux-only user-namespace policy; `"deny"` (default) if omitted.
+   * Ignored on macOS and Windows. Set `"allow"` only when the child runs
+   * its own nested sandbox (Chromium/Electron, bubblewrap, rootless
+   * containers): it re-enables user-namespace creation and the mount
+   * machinery such a sandbox needs.
+   */
+  linuxUserNamespaces?: UserNamespacePolicy
+  /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
    * descendants but not aggregated across forks.
@@ -200,3 +216,11 @@ export interface SpawnOptions {
   /** Working directory for the child. Defaults to the parent's cwd. */
   cwd?: string
 }
+
+/**
+ * Linux-only user-namespace policy for the child: `"deny"` | `"allow"`.
+ * Mirrors `guardrail::UserNamespacePolicy`. Ignored on macOS and Windows
+ * (see `linuxUserNamespaces` on the options objects).
+ */
+export type UserNamespacePolicy =  'deny'|
+'allow';

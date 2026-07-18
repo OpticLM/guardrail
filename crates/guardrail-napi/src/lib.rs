@@ -15,7 +15,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig, SharedSandboxChild,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig,
+    SharedSandboxChild, UserNamespacePolicy,
 };
 
 /// Network confinement level for the child: `"deny"` | `"outbound-only"` |
@@ -61,6 +62,26 @@ impl From<JsIpcPolicy> for IpcPolicy {
     }
 }
 
+/// Linux-only user-namespace policy for the child: `"deny"` | `"allow"`.
+/// Mirrors `guardrail::UserNamespacePolicy`. Ignored on macOS and Windows
+/// (see `linuxUserNamespaces` on the options objects).
+#[napi(string_enum, js_name = "UserNamespacePolicy")]
+pub enum JsUserNamespacePolicy {
+    #[napi(value = "deny")]
+    Deny,
+    #[napi(value = "allow")]
+    Allow,
+}
+
+impl From<JsUserNamespacePolicy> for UserNamespacePolicy {
+    fn from(p: JsUserNamespacePolicy) -> Self {
+        match p {
+            JsUserNamespacePolicy::Deny => UserNamespacePolicy::Deny,
+            JsUserNamespacePolicy::Allow => UserNamespacePolicy::Allow,
+        }
+    }
+}
+
 #[napi(string_enum, js_name = "FsAccessKind")]
 pub enum JsFsAccessKind {
     #[napi(value = "read-allow")]
@@ -101,6 +122,12 @@ pub struct SandboxOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
+    /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
+    /// Ignored on macOS and Windows. Set `"allow"` only when the child runs
+    /// its own nested sandbox (Chromium/Electron, bubblewrap, rootless
+    /// containers): it re-enables user-namespace creation and the mount
+    /// machinery such a sandbox needs.
+    pub linux_user_namespaces: Option<JsUserNamespacePolicy>,
     /// Address-space cap in megabytes. Windows: aggregate Job Object budget
     /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
     /// descendants but not aggregated across forks.
@@ -138,6 +165,12 @@ pub struct SpawnOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
+    /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
+    /// Ignored on macOS and Windows. Set `"allow"` only when the child runs
+    /// its own nested sandbox (Chromium/Electron, bubblewrap, rootless
+    /// containers): it re-enables user-namespace creation and the mount
+    /// machinery such a sandbox needs.
+    pub linux_user_namespaces: Option<JsUserNamespacePolicy>,
     /// Address-space cap in megabytes. Windows: aggregate Job Object budget
     /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
     /// descendants but not aggregated across forks.
@@ -248,6 +281,10 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .linux_ipc
             .map(|i| i.into())
             .unwrap_or(IpcPolicy::Strict),
+        linux_user_namespaces: opts
+            .linux_user_namespaces
+            .map(|u| u.into())
+            .unwrap_or(UserNamespacePolicy::Deny),
         darwin_sandbox_profiles,
         windows_cache_namespace: opts.windows_cache_namespace,
     })
@@ -260,6 +297,7 @@ impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
                 fs: options.fs,
                 network: options.network,
                 linux_ipc: options.linux_ipc,
+                linux_user_namespaces: options.linux_user_namespaces,
                 memory_limit_mb: options.memory_limit_mb,
                 cpu_time_limit_secs: options.cpu_time_limit_secs,
                 max_processes: options.max_processes,

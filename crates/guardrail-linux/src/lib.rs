@@ -28,6 +28,33 @@
 //! probe io_uring for file I/O see a kernel without io_uring and fall back to
 //! plain syscalls.
 //!
+//! # Kernel attack surface and threat model
+//!
+//! Kernel interfaces no shell tool legitimately calls are denied regardless
+//! of policy: kernel code loading (`kexec_*`, module loaders), the kernel
+//! keyring (`add_key`, `request_key`, `keyctl`), host-state interference
+//! (`reboot`, `swapon`/`swapoff`, `acct`), and the probed-by-tooling trio
+//! `bpf`, `perf_event_open`, and `userfaultfd` (denied with `EPERM`, the
+//! errno a hardened kernel gives unprivileged callers, so tools fall back
+//! gracefully).
+//!
+//! Under `UserNamespacePolicy::Deny` (the default), creating or joining
+//! namespaces is denied too — `unshare(CLONE_NEWUSER)`, `clone(CLONE_NEWUSER)`,
+//! and `setns` with `EPERM`, `clone3` with `ENOSYS` so runtimes fall back to
+//! the inspectable `clone` — along with the mount machinery (`mount`,
+//! `pivot_root`, `chroot`, the new mount API), which unprivileged code can
+//! only exercise inside a user namespace it owns. Set
+//! `SandboxConfig::linux_user_namespaces` to `Allow` only when the child runs
+//! its own nested sandbox (Chromium/Electron, bubblewrap, rootless
+//! containers).
+//!
+//! The result is policy enforcement and harm reduction against opportunistic
+//! and most deliberate misbehavior, not Chromium-grade isolation: the child
+//! still shares the host kernel, and the seccomp layer is a denylist over a
+//! default-allow filter, so a kernel vulnerability reachable through ordinary
+//! syscalls remains reachable. Run code that is hostile *by design* in a
+//! virtual machine instead.
+//!
 //! Fails closed: constructing a [`LinuxBackend`] returns `Error::Unsupported`
 //! when Landlock enforcement or the seccomp action-availability probe fails;
 //! spawning aborts if actual filter installation fails. Probe known

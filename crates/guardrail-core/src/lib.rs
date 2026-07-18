@@ -15,5 +15,5 @@ mod process;
 pub use backend::Backend;
 pub use config::{ResourceLimits, SandboxConfig};
 pub use error::{Error, Result};
-pub use policy::{FsAccess, IpcPolicy, NetworkPolicy};
+pub use policy::{FsAccess, IpcPolicy, NetworkPolicy, UserNamespacePolicy};
 pub use process::{SandboxChild, SharedSandboxChild};

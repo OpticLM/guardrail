@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy};
+use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy, UserNamespacePolicy};
 
 /// Resource limits applied to the sandboxed child.
 ///
@@ -48,6 +48,7 @@ pub struct ResourceLimits {
 ///     limits: ResourceLimits::default(),
 ///     env: BTreeMap::new(),
 ///     linux_ipc: IpcPolicy::Strict,
+///     linux_user_namespaces: UserNamespacePolicy::Deny,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
 /// };
@@ -71,6 +72,12 @@ pub struct SandboxConfig {
     /// can permit Unix-domain socket connections. On Windows it is ignored:
     /// AppContainer baseline isolation applies independently of this field.
     pub linux_ipc: IpcPolicy,
+    /// Linux-only user-namespace policy. Non-Linux backends ignore this field.
+    ///
+    /// Enforced with seccomp by the Linux backend. Denied by default; allow it
+    /// only when the child runs its own nested sandbox (Chromium/Electron,
+    /// bubblewrap, rootless containers). See [`UserNamespacePolicy`].
+    pub linux_user_namespaces: UserNamespacePolicy,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending

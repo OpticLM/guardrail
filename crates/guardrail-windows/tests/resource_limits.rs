@@ -9,7 +9,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+use guardrail_core::{
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+};
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
@@ -180,6 +182,7 @@ fn builder_with_windows_runtime_env() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],
+        linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: Some(unique_namespace("resource-limits")),
     }
 }

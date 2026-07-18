@@ -159,7 +159,9 @@ fn validate(source: &str) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+    use guardrail_core::{
+        FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    };
 
     use super::*;
 
@@ -236,6 +238,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![first.clone(), second.clone()],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let profile = resolve(&config).unwrap();
@@ -266,6 +269,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
 
@@ -296,6 +300,7 @@ mod tests {
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![path.clone()],
+            linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
         };
         let err = resolve(&config).unwrap_err();

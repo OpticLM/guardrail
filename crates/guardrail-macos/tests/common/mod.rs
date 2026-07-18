@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use guardrail_core::{FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+use guardrail_core::{
+    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+};
 
 pub fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_guardrail-macos-probe"))
@@ -34,6 +36,7 @@ pub fn base() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![runtime_profile()],
+        linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: None,
     }
 }
@@ -50,6 +53,7 @@ pub fn read_only_base() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![runtime_profile()],
+        linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: None,
     }
 }

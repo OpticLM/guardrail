@@ -11,7 +11,9 @@ use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig};
+use guardrail_core::{
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+};
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
@@ -586,6 +588,7 @@ fn builder_with_system_root() -> SandboxConfig {
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],
+        linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: Some(unique_namespace("policy")),
     }
 }

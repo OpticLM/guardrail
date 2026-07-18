@@ -11,6 +11,13 @@ use std::io;
 
 use guardrail_core::ResourceLimits;
 
+// libc declares setrlimit's resource as c_int on musl and as this target type
+// on GNU/uClibc.
+#[cfg(target_env = "musl")]
+type RlimitResource = libc::c_int;
+#[cfg(not(target_env = "musl"))]
+type RlimitResource = libc::__rlimit_resource_t;
+
 /// Apply `limits` to the current process. Called from within `pre_exec` in the
 /// freshly-forked child, before `execvp`.
 ///
@@ -29,7 +36,7 @@ pub(crate) fn apply(limits: &ResourceLimits) -> io::Result<()> {
 }
 
 /// Set soft = hard = `value` for one resource.
-fn set_one(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
+fn set_one(resource: RlimitResource, value: u64) -> io::Result<()> {
     let rl = libc::rlimit {
         rlim_cur: value as libc::rlim_t,
         rlim_max: value as libc::rlim_t,

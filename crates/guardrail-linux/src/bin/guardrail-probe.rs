@@ -40,6 +40,18 @@
 //!   shm               create a SysV shared-memory segment; exit 0 if allowed,
 //!                     3 if denied
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
+//!   unshare-user      call unshare(CLONE_NEWUSER); exit 0 if allowed, 3 if denied
+//!   mount             call mount(2) with unprivileged-safe arguments; exit 0
+//!                     if the syscall reaches the kernel (any errno), never
+//!                     returns under the sandbox (SIGSYS)
+//!   mount-setattr     call mount_setattr(2) with inert arguments; exit 0 if
+//!                     the syscall reaches the kernel (any errno), never
+//!                     returns under the sandbox (SIGSYS)
+//!   kexec-load        call kexec_load(2) with null arguments; exit 0 if the
+//!                     syscall reaches the kernel (any errno), never returns
+//!                     under the sandbox (SIGSYS)
+//!   bpf               call bpf(2); exit 0 if the syscall reaches the kernel,
+//!                     3 if denied with EPERM
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -262,13 +274,95 @@ fn main() {
                 exit(0);
             }
         }
+        "unshare-user" => {
+            // SAFETY: unshare takes only a scalar flags argument.
+            let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+            if rc == 0 { exit(0) } else { exit(3) }
+        }
+        "mount" => {
+            // Unprivileged-safe: outside a sandbox this fails with EPERM (or
+            // ENOENT) without mounting anything. Any returned errno proves the
+            // syscall reached the kernel; the sandbox's Trap never returns.
+            // SAFETY: all pointers are valid NUL-terminated strings.
+            unsafe {
+                libc::mount(
+                    c"none".as_ptr(),
+                    c"/nonexistent-guardrail-probe".as_ptr(),
+                    c"tmpfs".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            exit(0);
+        }
+        "mount-setattr" => {
+            // A zeroed attribute structure requests no changes, and the path
+            // does not exist. Any returned errno proves the syscall reached
+            // the kernel; the sandbox's Trap never returns.
+            let attr = libc::mount_attr {
+                attr_set: 0,
+                attr_clr: 0,
+                propagation: 0,
+                userns_fd: 0,
+            };
+            // SAFETY: the path and attribute pointers are valid for the
+            // lengths passed, and the inert request cannot change mount state.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_mount_setattr,
+                    libc::AT_FDCWD,
+                    c"/nonexistent-guardrail-probe".as_ptr(),
+                    0 as libc::c_uint,
+                    &attr,
+                    std::mem::size_of_val(&attr),
+                )
+            };
+            exit(0);
+        }
+        "kexec-load" => {
+            // Zero segments and null pointers: outside a sandbox this fails
+            // with EPERM without CAP_SYS_BOOT. Reaching the kernel at all
+            // (any errno) means the syscall was not trapped.
+            // SAFETY: zero counts mean the kernel dereferences no pointers.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_kexec_load,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    std::ptr::null::<libc::c_void>(),
+                    0 as libc::c_ulong,
+                )
+            };
+            exit(0);
+        }
+        "bpf" => {
+            // Command 0 (BPF_MAP_CREATE) with a null attr pointer: never
+            // creates anything. EPERM = denied (sandbox filter, or a host with
+            // kernel.unprivileged_bpf_disabled); other errnos (EINVAL, EFAULT)
+            // prove the syscall reached the kernel.
+            // SAFETY: a null attr pointer is rejected by the kernel, not
+            // dereferenced blindly.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_bpf,
+                    0 as libc::c_int,
+                    std::ptr::null::<libc::c_void>(),
+                    0 as libc::c_uint,
+                )
+            };
+            if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                exit(3);
+            }
+            exit(0);
+        }
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
                  <echo-env|alloc|spin|fork|read-file|write-file|read-fd|socket-inet|\
                  socket-netlink|socket-packet|socket-vsock|socket-unix|socketpair-unix|\
                  socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|io-uring-enter|\
-                 io-uring-register|shm|ptrace-self> [arg]"
+                 io-uring-register|shm|ptrace-self|unshare-user|mount|mount-setattr|\
+                 kexec-load|bpf> [arg]"
             );
             exit(2);
         }
