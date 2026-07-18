@@ -113,7 +113,12 @@ export interface SandboxOptions {
   maxProcesses?: number
   /** The ONLY environment variables the child sees (inherited env is cleared). */
   env?: Record<string, string>
-  /** macOS-only Seatbelt `.sb` profile paths; ignored on other platforms. */
+  /**
+   * macOS-only trusted Seatbelt policy imports; ignored on other platforms.
+   * Imported `allow` rules can grant access absent from `fs` and `network`,
+   * including filesystem paths not listed in `fs`. Review profiles and their
+   * transitive imports, and keep them outside child-writable paths.
+   */
   darwinSandboxProfiles?: Array<string>
   /** Windows-only AppContainer cache namespace; ignored on other platforms. */
   windowsCacheNamespace?: string
@@ -158,7 +163,12 @@ export interface SpawnOptions {
   maxProcesses?: number
   /** The ONLY environment variables the child sees (inherited env is cleared). */
   env?: Record<string, string>
-  /** macOS-only Seatbelt `.sb` profile paths; ignored on other platforms. */
+  /**
+   * macOS-only trusted Seatbelt policy imports; ignored on other platforms.
+   * Imported `allow` rules can grant access absent from `fs` and `network`,
+   * including filesystem paths not listed in `fs`. Review profiles and their
+   * transitive imports, and keep them outside child-writable paths.
+   */
   darwinSandboxProfiles?: Array<string>
   /** Windows-only AppContainer cache namespace; ignored on other platforms. */
   windowsCacheNamespace?: string

@@ -60,6 +60,15 @@ pub struct SandboxConfig {
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending
     /// the generated profile from the portable `fs`/`network` policies.
+    ///
+    /// # Security
+    ///
+    /// Imported profiles are trusted policy extensions, not policy fragments
+    /// constrained by `fs` or `network`. An imported `allow` can grant access
+    /// absent from the portable policy, including filesystem paths omitted from
+    /// `fs`; the later generated `(deny default)` does not revoke that access.
+    /// Review every profile and its transitive imports, and keep profile files
+    /// outside paths writable by the sandboxed child.
     pub darwin_sandbox_profiles: Vec<PathBuf>,
     /// Windows-only cache namespace for reusable AppContainer profiles and ACLs.
     ///

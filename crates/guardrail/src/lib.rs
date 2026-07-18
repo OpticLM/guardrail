@@ -17,7 +17,7 @@
 //! | `limits` | `setrlimit` | `setrlimit` | Job Object |
 //! | `env` | cleared, then set | cleared, then set | cleared, then set |
 //! | `linux_ipc` | seccomp (SysV/POSIX IPC, `AF_UNIX`, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
-//! | `darwin_sandbox_profiles` | ignored | `.sb` imports ahead of the generated profile | ignored |
+//! | `darwin_sandbox_profiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 //! | `windows_cache_namespace` | ignored | ignored | AppContainer/ACL cache key |
 //!
 //! See each backend crate's documentation for the platform's exact semantics

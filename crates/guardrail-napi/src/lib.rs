@@ -109,7 +109,10 @@ pub struct SandboxOptions {
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
     pub env: Option<HashMap<String, String>>,
-    /// macOS-only Seatbelt `.sb` profile paths; ignored on other platforms.
+    /// macOS-only trusted Seatbelt policy imports; ignored on other platforms.
+    /// Imported `allow` rules can grant access absent from `fs` and `network`,
+    /// including filesystem paths not listed in `fs`. Review profiles and their
+    /// transitive imports, and keep them outside child-writable paths.
     pub darwin_sandbox_profiles: Option<Vec<String>>,
     /// Windows-only AppContainer cache namespace; ignored on other platforms.
     pub windows_cache_namespace: Option<String>,
@@ -137,7 +140,10 @@ pub struct SpawnOptions {
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
     pub env: Option<HashMap<String, String>>,
-    /// macOS-only Seatbelt `.sb` profile paths; ignored on other platforms.
+    /// macOS-only trusted Seatbelt policy imports; ignored on other platforms.
+    /// Imported `allow` rules can grant access absent from `fs` and `network`,
+    /// including filesystem paths not listed in `fs`. Review profiles and their
+    /// transitive imports, and keep them outside child-writable paths.
     pub darwin_sandbox_profiles: Option<Vec<String>>,
     /// Windows-only AppContainer cache namespace; ignored on other platforms.
     pub windows_cache_namespace: Option<String>,

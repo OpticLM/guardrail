@@ -2,6 +2,22 @@
 //!
 //! Profile generation is pure Rust; Seatbelt application is native macOS.
 //!
+//! # Security: imported profiles are authoritative
+//!
+//! Profiles named by [`guardrail_core::SandboxConfig::darwin_sandbox_profiles`]
+//! are emitted before Guardrail's generated `(deny default)` and portable
+//! filesystem and network rules. An `allow` in an imported profile can
+//! therefore grant access absent from the portable policy, including filesystem
+//! paths omitted from [`guardrail_core::SandboxConfig::fs`]. The generated
+//! rules do not narrow or revoke that access.
+//!
+//! Treat imported profiles and all of their transitive imports as trusted
+//! sandbox policy. Prefer portable [`guardrail_core::FsAccess`] rules for
+//! filesystem access, keep custom imports narrowly scoped to operations such as
+//! required sysctls and Mach lookups, and store imported files outside paths
+//! writable by the sandboxed child. Broad built-in profiles can import further
+//! rules and should be audited for the target macOS release before use.
+//!
 //! # Tips: common macOS runtime grants
 //!
 //! Guardrail generates only the rules you explicitly declare — no implicit

@@ -396,6 +396,19 @@ default)` profile from your `fs` and `network` options, but macOS
 developer tools also need a few runtime operations that are not filesystem
 paths. Use `darwinSandboxProfiles` to import those explicit `.sb` grants.
 
+### Imported Profiles Are Authoritative
+
+Treat every imported profile as trusted sandbox policy. Guardrail emits imports
+before its generated `(deny default)`, `fs`, and `network` rules. An imported
+`allow` can therefore grant access absent from the portable options, including
+filesystem paths not listed in `fs`; the generated rules do not narrow or
+revoke that access.
+
+Audit every rule and transitive import. Prefer `fs` for filesystem access and
+keep custom profiles limited to narrow runtime grants such as specific sysctls
+and Mach lookups. A broad built-in profile can import additional broad policy,
+so re-audit it on every macOS release you support.
+
 ### Built-in Profile Choice
 
 Use Apple's built-in `dyld-support.sb` as the first imported profile:
@@ -484,6 +497,9 @@ Notes:
 - Keep imported `.sb` files outside any path the child can write. The backend
   validates imports during `Sandbox.build()`, but Seatbelt still imports by path
   when each child applies the profile.
+- Imported profiles are not constrained by `fs` or `network`. An imported
+  `allow` remains authoritative even when the portable options omit or deny the
+  same access.
 - Keep mutable tool state under `workRoot`. Do not point `HOME`, `CARGO_HOME`,
   `GOCACHE`, `GOMODCACHE`, `PNPM_HOME`, npm cache, or XDG cache/config at your
   real home directory unless you want the sandboxed tool to read or mutate it.
@@ -860,7 +876,7 @@ marked *ignored* is an honest no-op there.
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` | `setrlimit` | Job Object |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
-| `darwinSandboxProfiles` | ignored | `.sb` imports ahead of the generated profile | ignored |
+| `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 
 On Windows there is no configurable IPC option, but AppContainer baseline
@@ -903,4 +919,6 @@ package SID and are not isolated from each other.
   Unix and is unsupported on Windows in that state.
 - `linuxIpc` is Linux-only and ignored on macOS and Windows.
 - `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS.
-- `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows.
+- `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows. On
+  macOS, imports are trusted policy that can grant access absent from `fs` and
+  `network`.
