@@ -12,6 +12,8 @@
 //!   alloc <MB>        try to allocate and touch <MB> megabytes; exit 0 if it
 //!                     succeeds, exit 3 if allocation fails
 //!   spin              busy-loop forever (for CPU-time-limit tests)
+//!   fork              fork one child that exits immediately; exit 0 if the
+//!                     fork succeeds, exit 3 if it is denied
 //!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
 //!   read-fd <FD> <EXPECTED>
@@ -75,6 +77,24 @@ fn main() {
         "spin" => loop {
             std::hint::spin_loop();
         },
+        "fork" => {
+            // SAFETY: fork takes no arguments; the child calls only the
+            // async-signal-safe `_exit`.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                exit(3);
+            }
+            if pid == 0 {
+                // SAFETY: immediate exit without running any Rust cleanup.
+                unsafe { libc::_exit(0) };
+            }
+            let mut status: libc::c_int = 0;
+            // SAFETY: `status` is a valid out-pointer; pid is our child.
+            if unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+                exit(2);
+            }
+            exit(0);
+        }
         "read-file" => {
             let path = args.get(2).map(String::as_str).unwrap_or("");
             match std::fs::read(path) {
@@ -245,7 +265,7 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|read-file|write-file|read-fd|socket-inet|\
+                 <echo-env|alloc|spin|fork|read-file|write-file|read-fd|socket-inet|\
                  socket-netlink|socket-packet|socket-vsock|socket-unix|socketpair-unix|\
                  socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|io-uring-enter|\
                  io-uring-register|shm|ptrace-self> [arg]"

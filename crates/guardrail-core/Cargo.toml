@@ -9,8 +9,9 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 
-# `libc::kill` is the only OS-specific call in this crate: it backs the
-# kill-during-wait fallback in `SharedSandboxChild` on Unix. Core is otherwise
-# platform-agnostic.
-[target."cfg(unix)".dependencies]
+# `libc::sigaction` verifies that child status stays waitable, `libc::waitid`
+# preserves it until `SharedSandboxChild` can reap under the kill mutex, and
+# `libc::kill` signals it while that wait is in flight. Other platforms reject
+# kill-during-wait instead.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc.workspace = true

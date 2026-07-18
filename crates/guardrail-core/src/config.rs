@@ -7,10 +7,25 @@ use std::path::PathBuf;
 
 use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy};
 
-/// Resource limits applied to the sandboxed process tree.
+/// Resource limits applied to the sandboxed child.
 ///
 /// `None` means "do not impose this limit". Units are chosen to be unambiguous
 /// at the API boundary; backends convert to the platform representation.
+///
+/// # Platform semantics
+///
+/// What a limit actually bounds differs per platform:
+///
+/// - **Windows** applies all three fields to the Job Object, so they are
+///   aggregate budgets for the entire sandboxed process tree.
+/// - **Linux and macOS** apply per-process `setrlimit(2)` caps in the child
+///   before exec. Descendants inherit the same caps, but each process is
+///   limited independently: a child that forks N workers can consume up to
+///   N times `memory_bytes` / `cpu_time_secs` in aggregate.
+/// - On Linux and macOS `max_processes` maps to `RLIMIT_NPROC`, which counts
+///   all processes (on Linux, also threads) of the real user ID system-wide,
+///   not just the sandboxed tree, and is not enforced for privileged users
+///   (root, or Linux `CAP_SYS_RESOURCE`/`CAP_SYS_ADMIN`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResourceLimits {
     /// Maximum address space (virtual memory) in **bytes**.

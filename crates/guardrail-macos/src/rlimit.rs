@@ -1,4 +1,7 @@
-//! Resource limits via `setrlimit(2)`.
+//! Resource limits via `setrlimit(2)`. These are per-process caps inherited by
+//! descendants, not aggregate budgets for the sandboxed tree; `RLIMIT_NPROC`
+//! counts all processes of the real UID and is not enforced for privileged
+//! users (see [`guardrail_core::ResourceLimits`]).
 
 use std::io;
 

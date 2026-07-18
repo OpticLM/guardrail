@@ -54,6 +54,24 @@ test('spawns a sandboxed child and reports a clean exit (Unix)', { skip: process
   assert.equal(result.code, 0)
 })
 
+test('kill safely races async wait on fast exits (Unix)', { skip: process.platform === 'win32' }, async () => {
+  const sandbox = await guardrail.Sandbox.build({
+    fs: [
+      { kind: 'read-allow', path: '/' },
+      { kind: 'execute-allow', path: '/' },
+    ],
+    network: 'full',
+  })
+
+  for (let iteration = 0; iteration < 50; iteration += 1) {
+    const child = sandbox.spawn('/usr/bin/true')
+    const waiting = child.wait()
+    assert.doesNotThrow(() => child.kill())
+    const result = await waiting
+    assert.equal(typeof result.success, 'boolean')
+  }
+})
+
 test('reuses a sandbox while Node workers churn allocations (Unix)', { skip: process.platform === 'win32' }, async () => {
   const sandbox = await guardrail.Sandbox.build({
     fs: [

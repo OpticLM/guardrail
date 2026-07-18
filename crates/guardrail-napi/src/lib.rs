@@ -101,11 +101,17 @@ pub struct SandboxOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
-    /// Address-space cap in megabytes.
+    /// Address-space cap in megabytes. Windows: aggregate Job Object budget
+    /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
+    /// descendants but not aggregated across forks.
     pub memory_limit_mb: Option<u32>,
-    /// CPU-time cap in seconds.
+    /// CPU-time cap in seconds. Windows: aggregate per-job budget;
+    /// Linux/macOS: per-process `RLIMIT_CPU`, not aggregated across forks.
     pub cpu_time_limit_secs: Option<u32>,
-    /// Maximum number of processes/threads.
+    /// Maximum number of processes. Windows: active processes in the Job
+    /// Object; Linux/macOS: `RLIMIT_NPROC`, which counts all processes (on
+    /// Linux, also threads) of the real user ID system-wide and is not
+    /// enforced for privileged users.
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
     pub env: Option<HashMap<String, String>>,
@@ -132,11 +138,17 @@ pub struct SpawnOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
-    /// Address-space cap in megabytes.
+    /// Address-space cap in megabytes. Windows: aggregate Job Object budget
+    /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
+    /// descendants but not aggregated across forks.
     pub memory_limit_mb: Option<u32>,
-    /// CPU-time cap in seconds.
+    /// CPU-time cap in seconds. Windows: aggregate per-job budget;
+    /// Linux/macOS: per-process `RLIMIT_CPU`, not aggregated across forks.
     pub cpu_time_limit_secs: Option<u32>,
-    /// Maximum number of processes/threads.
+    /// Maximum number of processes. Windows: active processes in the Job
+    /// Object; Linux/macOS: `RLIMIT_NPROC`, which counts all processes (on
+    /// Linux, also threads) of the real user ID system-wide and is not
+    /// enforced for privileged users.
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
     pub env: Option<HashMap<String, String>>,
@@ -389,7 +401,8 @@ impl SandboxChild {
     }
 
     /// Wait for the child to exit. Resolves with its [`ExitResult`]. Calling
-    /// `wait()` more than once rejects.
+    /// `wait()` while another wait is active, or after one succeeds, rejects. A
+    /// failed wait may be retried.
     #[napi(ts_return_type = "Promise<ExitResult>")]
     pub fn wait(&self) -> AsyncTask<WaitTask> {
         AsyncTask::new(WaitTask {

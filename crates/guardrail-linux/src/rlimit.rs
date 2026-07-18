@@ -1,4 +1,9 @@
-//! Resource limits via `setrlimit(2)`. Applied inside `pre_exec`, so every
+//! Resource limits via `setrlimit(2)`. These are per-process caps inherited by
+//! descendants, not aggregate budgets for the sandboxed tree; `RLIMIT_NPROC`
+//! counts all processes/threads of the real UID and is not enforced for
+//! privileged users (see [`guardrail_core::ResourceLimits`]).
+//!
+//! Applied inside `pre_exec`, so every
 //! function here must be async-signal-safe (only raw `libc` calls, no
 //! allocation, no panics that unwind across the FFI boundary).
 

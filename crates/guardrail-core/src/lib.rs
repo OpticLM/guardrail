@@ -1,9 +1,10 @@
 //! Core interfaces for the `guardrail` sandbox.
 //!
-//! This crate is platform-agnostic: it defines the declarative [`policy`]
-//! types, the [`SandboxConfig`] configuration, and the [`Backend`] trait
-//! that platform crates (e.g. `guardrail-linux`) implement. It contains no
-//! OS-specific code and compiles on every platform.
+//! This crate exposes a platform-agnostic API: it defines the declarative
+//! [`policy`] types, the [`SandboxConfig`] configuration, and the [`Backend`]
+//! trait that platform crates (e.g. `guardrail-linux`) implement. Its process
+//! handles contain small target-gated implementations, while the crate itself
+//! compiles on every platform.
 
 mod backend;
 mod config;

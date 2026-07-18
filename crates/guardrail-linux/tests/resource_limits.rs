@@ -80,18 +80,44 @@ fn cpu_time_limit_kills_busy_loop() {
 }
 
 #[test]
-#[ignore = "RLIMIT_NPROC counts processes per real-uid system-wide; flaky in shared/CI environments"]
-fn process_limit_is_applied() {
-    // Best-effort: with max_processes(1) the child cannot fork a helper.
-    // Left ignored because RLIMIT_NPROC depends on the ambient process count of
-    // the running user. Run manually with `--ignored` on a quiet machine.
+fn process_limit_blocks_fork() {
+    // RLIMIT_NPROC counts every process of the real UID, so a cap of 1 is
+    // already exceeded by the probe itself and fork(2) must fail with EAGAIN.
+    // The limit is not enforced for privileged users, so skip under root.
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: RLIMIT_NPROC is not enforced for privileged users");
+        return;
+    }
     let mut config = common::base();
     config.limits.max_processes = Some(1);
-    let mut cmd = common::probe_command();
-    cmd.arg("spin");
+    let mut cmd = common::probe(&["fork"]);
     cmd.env_clear();
     cmd.envs(&config.env);
-    let res = LinuxBackend::new(config).expect("backend").spawn(cmd);
-    // The assertion is intentionally loose; document-only.
-    let _ = res;
+    let mut child = LinuxBackend::new(config)
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
+    let status = child.wait().expect("wait");
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "fork must be denied under RLIMIT_NPROC = 1"
+    );
+}
+
+#[test]
+fn without_limit_the_same_fork_succeeds() {
+    // Control: guards against the fork probe being broken in a way that makes
+    // the denial test above pass spuriously.
+    let config = common::base();
+    let mut cmd = common::probe(&["fork"]);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = LinuxBackend::new(config)
+        .expect("backend")
+        .spawn(cmd)
+        .expect("spawn");
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "fork should succeed when unconstrained");
 }

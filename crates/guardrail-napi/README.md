@@ -873,7 +873,7 @@ marked *ignored* is an honest no-op there.
 | --- | --- | --- | --- |
 | `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
 | `network` | seccomp socket-family filter | Seatbelt network rules | AppContainer capabilities |
-| `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` | `setrlimit` | Job Object |
+| `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |

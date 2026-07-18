@@ -1,8 +1,7 @@
 //! Handle to a running sandboxed process.
 
 use std::process::{Child, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(windows)]
 use std::any::Any;
@@ -131,6 +130,16 @@ impl From<Child> for SandboxChild {
 /// thread) can run concurrently. Enforces the OS invariant that the pid is not
 /// signalled after `wait()` reaps it.
 ///
+/// On Linux and macOS, `wait()` first blocks in `waitid(..., WNOWAIT)`, which
+/// observes the exit *without* reaping: the child stays a zombie and the OS
+/// cannot reuse its pid. The actual reap and transition to `Reaped` then happen
+/// together under the same mutex `kill()` signals under, so `kill()` can never
+/// see a pid that has been freed — the pid-reuse race between reaping and state
+/// publication is closed by construction, not by timing. A failed wait moves
+/// to an `Uncertain` state that permits only another wait, never a signal.
+/// This type owns all waits for its child; process-wide code must not reap the
+/// same child independently or change the `SIGCHLD` disposition concurrently.
+///
 /// Built from a single-owner [`SandboxChild`]; async/FFI bindings (e.g. the
 /// napi binding) wrap this so they get the wait/kill coordination once instead
 /// of re-deriving it per binding. The single-owner [`SandboxChild`] stays
@@ -139,12 +148,19 @@ impl From<Child> for SandboxChild {
 #[derive(Debug, Clone)]
 pub struct SharedSandboxChild {
     pid: u32,
-    // `Option` so `wait()` can take the child out for the duration of the
-    // blocking wait without holding the lock (which would deadlock `kill()`).
-    inner: Arc<Mutex<Option<SandboxChild>>>,
-    // Set after `wait()` reaps the child. `kill()` reads it to avoid signalling
-    // a pid the OS has freed and may have reassigned once `wait()` returns.
-    reaped: Arc<AtomicBool>,
+    state: Arc<Mutex<SharedState>>,
+}
+
+#[derive(Debug)]
+enum SharedState {
+    Ready(SandboxChild),
+    // The child handle is owned by wait(). can_signal is true only when Linux
+    // or macOS is expected to retain waitable status until the guarded reap.
+    Waiting { can_signal: bool },
+    // A wait failed, so the child handle is retained for a retry but its pid is
+    // not safe to signal: the OS or another waiter may already have reaped it.
+    Uncertain(SandboxChild),
+    Reaped,
 }
 
 impl SharedSandboxChild {
@@ -153,8 +169,7 @@ impl SharedSandboxChild {
         let pid = child.id();
         Self {
             pid,
-            inner: Arc::new(Mutex::new(Some(child))),
-            reaped: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(SharedState::Ready(child))),
         }
     }
 
@@ -163,86 +178,216 @@ impl SharedSandboxChild {
         self.pid
     }
 
+    // Tolerate a poisoned mutex rather than unwrapping: if a concurrent
+    // wait()/kill() panicked while holding the lock, unwrapping would propagate
+    // the poison panic and kill the other caller (and, via napi, the Node
+    // thread). A `PoisonedMutexGuard` derefs to the inner state just like a
+    // clean guard.
+    fn lock(&self) -> MutexGuard<'_, SharedState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn take_for_wait(&self) -> std::io::Result<SandboxChild> {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, SharedState::Waiting { can_signal: false }) {
+            SharedState::Ready(child) => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    *state = SharedState::Waiting {
+                        can_signal: sigchld_retains_waitable_status(),
+                    };
+                }
+                Ok(child)
+            }
+            // A retry cannot signal until waitid has re-established that the
+            // child is waitable. It remains false through the guarded reap.
+            SharedState::Uncertain(child) => Ok(child),
+            previous @ (SharedState::Waiting { .. } | SharedState::Reaped) => {
+                *state = previous;
+                Err(std::io::Error::other(
+                    "wait() has already been called on this child",
+                ))
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn reap_observed_child(&self, mut child: SandboxChild) -> std::io::Result<ExitStatus> {
+        let mut state = self.lock();
+        match child.wait() {
+            Ok(status) => {
+                *state = SharedState::Reaped;
+                Ok(status)
+            }
+            Err(err) => {
+                // The status may have been consumed by another process-wide
+                // waiter. Retain the handle for a retry, but never signal its
+                // now-unproven numeric pid.
+                *state = SharedState::Uncertain(child);
+                Err(err)
+            }
+        }
+    }
+
     /// Wait for the child to exit, returning its status.
     ///
     /// Takes the child out of the mutex for the duration of the blocking wait so
-    /// a concurrent [`kill`](Self::kill) is not blocked. Calling `wait()` more
-    /// than once returns an error: `waitpid` can only reap a pid once.
+    /// a concurrent [`kill`](Self::kill) is not blocked. Calling `wait()` while
+    /// another wait is active, or after a successful wait, returns an error. A
+    /// failed wait may be retried.
     pub fn wait(&self) -> std::io::Result<ExitStatus> {
         // Take the child OUT of the mutex so the blocking wait does not hold the
-        // lock (kill() needs to acquire it). If it is already gone, wait() was
-        // called twice.
-        // Tolerate a poisoned mutex rather than unwrapping: if a concurrent
-        // wait()/kill() panicked while holding `inner`, unwrapping would
-        // propagate the poison panic and kill the other caller (and, via napi,
-        // the Node thread). A `PoisonedMutexGuard` derefs to the inner
-        // `Option<SandboxChild>` just like a clean guard, so `.take()` works.
-        let mut child = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .ok_or_else(|| std::io::Error::other("wait() has already been called on this child"))?;
-        let status = child.wait()?;
-        // `waitpid` reaps the pid atomically with this return, so mark it reaped
-        // before anything else: a concurrent `kill()` must not `SIGKILL` the
-        // now-free pid. (On error we leave it false: the child's state is
-        // unknown and the kill fallback remains the intended behavior.)
-        self.reaped.store(true, Ordering::SeqCst);
-        Ok(status)
+        // lock (kill() needs to acquire it).
+        let child = self.take_for_wait()?;
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            // Block until the child exits WITHOUT reaping it (WNOWAIT): the
+            // child stays a zombie, so the OS cannot reuse the pid yet and a
+            // concurrent kill() signalling the pid stays safe.
+            if let Err(err) = waitid_nowait(self.pid) {
+                // Keep the handle for a retried wait, but fail closed for kill:
+                // ECHILD can mean the OS or another waiter already reaped it.
+                *self.lock() = SharedState::Uncertain(child);
+                return Err(err);
+            }
+            // Reap and transition to Reaped while holding the lock kill()
+            // signals under.
+            self.reap_observed_child(child)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // The supported Windows backend waits through a process handle,
+            // which is immune to pid reuse. Other platforms use Child::wait(),
+            // and all reject kill() while the handle is owned here.
+            let mut child = child;
+            let status = child.wait();
+            let mut state = self.lock();
+            match status {
+                Ok(status) => {
+                    *state = SharedState::Reaped;
+                    Ok(status)
+                }
+                Err(err) => {
+                    *state = SharedState::Uncertain(child);
+                    Err(err)
+                }
+            }
+        }
     }
 
     /// Kill the child immediately.
     ///
     /// - `wait()` not started → we still own the handle, kill it directly.
-    /// - `wait()` in flight → the handle is gone but the child is still alive
-    ///   (the pid has not been reaped), so on Unix this signals the pid. On
-    ///   non-Unix platforms this is unsupported: the kill handle lives inside
-    ///   the taken child and cannot be duplicated for concurrent use.
+    /// - `wait()` in flight → on Linux and macOS the child is unreaped (alive
+    ///   or zombie — reaping only happens under the lock held here), so
+    ///   signalling the pid is safe. Other platforms reject this operation.
     /// - `wait()` already returned → the child has been reaped, so this is a
     ///   no-op. It must not signal a pid the OS may have reassigned.
+    /// - `wait()` failed → signalling is rejected because pid ownership can no
+    ///   longer be proven. The retained child handle is only available to a
+    ///   retried `wait()`.
+    /// - `SIGCHLD` is configured to discard child status → signalling is
+    ///   rejected because the OS may auto-reap and reuse the pid.
     pub fn kill(&self) -> std::io::Result<()> {
-        // See wait(): tolerate a poisoned mutex so a panic in the other caller
-        // does not propagate here.
-        match self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
+        let mut state = self.lock();
+        match &mut *state {
             // wait() not started → we still own the handle.
-            Some(child) => child.kill(),
-            None => {
-                // `inner` being None covers two cases: wait() is in flight
-                // (child still alive, pid valid), or wait() already returned
-                // (child reaped, pid freed and possibly reused by the OS). The
-                // `reaped` flag distinguishes them — `waitpid` reaps the pid
-                // atomically with its return, so `reaped` is set exactly when
-                // the pid is no longer ours to signal.
-                if self.reaped.load(Ordering::SeqCst) {
-                    // Already reaped: the child is gone. Do not signal a pid the
-                    // OS may have reassigned to an unrelated process.
-                    return Ok(());
-                }
-                // wait() is in flight → the child is still alive and the pid has
-                // not been reaped/reused, so signalling by pid is safe.
-                #[cfg(unix)]
+            SharedState::Ready(child) => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 {
-                    // SAFETY: kill() with a pid and a signal takes scalar args.
-                    // `reaped` is false, so `wait()` has not returned and the
-                    // child is still alive — the pid has not been reaped/reused.
-                    unsafe {
-                        libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
+                    if sigchld_retains_waitable_status() {
+                        child.kill()
+                    } else {
+                        Err(std::io::Error::other(
+                            "kill() is unsafe because SIGCHLD does not retain waitable child status",
+                        ))
                     }
-                    Ok(())
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 {
+                    child.kill()
+                }
+            }
+            SharedState::Waiting { can_signal } => {
+                // wait() is in flight. Reaping happens only while holding this
+                // lock, so the pid still names our child (alive, or a zombie
+                // waitid(WNOWAIT) is holding in place). Signalling a zombie is
+                // a harmless no-op.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    if *can_signal {
+                        kill_pid(self.pid)
+                    } else {
+                        Err(std::io::Error::other(
+                            "kill() while wait() is in flight is unsafe because waitable pid ownership is not guaranteed",
+                        ))
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    let _ = can_signal;
                     Err(std::io::Error::other(
                         "kill() while wait() is in flight is not supported on this platform",
                     ))
                 }
             }
+            SharedState::Uncertain(_) => Err(std::io::Error::other(
+                "kill() after a failed wait is unsafe because pid ownership is uncertain",
+            )),
+            // Already reaped: the child is gone. Do not signal a pid the OS may
+            // have reassigned to an unrelated process.
+            SharedState::Reaped => Ok(()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sigchld_retains_waitable_status() -> bool {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: a null new action queries SIGCHLD without changing it, and action
+    // is a valid out-pointer initialized by sigaction on success.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } == -1 {
+        return false;
+    }
+    // SAFETY: sigaction returned success and initialized action.
+    let action = unsafe { action.assume_init() };
+    action.sa_sigaction != libc::SIG_IGN && action.sa_flags & libc::SA_NOCLDWAIT == 0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn kill_pid(pid: u32) -> std::io::Result<()> {
+    // SAFETY: kill() with a pid and a signal takes scalar args.
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Block until `pid` (a direct child) has exited, without reaping it.
+///
+/// Uses `waitid(P_PID, pid, WEXITED | WNOWAIT)`: on return the child is a
+/// zombie whose pid the OS cannot reuse until it is actually reaped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn waitid_nowait(pid: u32) -> std::io::Result<()> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid out-pointer; P_PID/pid identify our own
+        // child, and WNOWAIT leaves it waitable for the subsequent reap.
+        let ret = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if ret == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
         }
     }
 }
@@ -300,7 +445,7 @@ unsafe extern "system" {
     fn TerminateJobObject(hjob: std::os::windows::io::RawHandle, uexitcode: u32) -> i32;
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
@@ -344,7 +489,7 @@ mod tests {
         let waiter = child.clone();
         let handle = thread::spawn(move || waiter.wait().expect("wait returned err"));
         // Give the worker time to take the child out of the mutex and enter the
-        // blocking waitpid. If we race and kill first, kill() goes through the
+        // blocking waitid. If we race and kill first, kill() goes through the
         // owned-handle path instead — the child still dies and the worker still
         // observes a signal status, so the assertion holds either way.
         thread::sleep(Duration::from_millis(100));
@@ -354,5 +499,153 @@ mod tests {
             status.signal().is_some(),
             "expected the child to be terminated by a signal, got {status:?}"
         );
+    }
+
+    #[test]
+    fn kill_on_waitid_observed_zombie_succeeds() {
+        // Deterministically exercise the state where waitid(WNOWAIT) has
+        // observed exit but the child has not been reaped yet.
+        let child = shared(Command::new("true"));
+        let owned = child.take_for_wait().expect("take child for wait");
+        waitid_nowait(child.pid()).expect("observe exit without reaping");
+
+        child
+            .kill()
+            .expect("signalling an observed zombie must succeed");
+        let status = child
+            .reap_observed_child(owned)
+            .expect("reap observed child");
+        assert!(status.success(), "true should exit cleanly, got {status:?}");
+    }
+
+    #[test]
+    fn raw_signal_failure_is_propagated() {
+        let err = kill_pid(i32::MAX as u32).expect_err("unknown pid must fail");
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn reap_failure_disables_kill_and_allows_wait_retry() {
+        let child = shared(Command::new("true"));
+        let owned = child.take_for_wait().expect("take child for wait");
+        waitid_nowait(child.pid()).expect("observe exit without reaping");
+
+        // Simulate a process-wide waiter consuming this child's status before
+        // SharedSandboxChild performs its guarded reap.
+        let mut raw_status = 0;
+        // SAFETY: raw_status is a valid out-pointer and pid is our direct child.
+        let waited =
+            unsafe { libc::waitpid(child.pid() as libc::pid_t, &mut raw_status, libc::WNOHANG) };
+        assert_eq!(waited, child.pid() as libc::pid_t);
+
+        let err = child
+            .reap_observed_child(owned)
+            .expect_err("the status was already consumed");
+        assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
+
+        let kill_err = child
+            .kill()
+            .expect_err("an uncertain pid must never be signalled");
+        assert!(
+            kill_err.to_string().contains("pid ownership is uncertain"),
+            "unexpected kill error: {kill_err}"
+        );
+
+        let retry_owned = child.take_for_wait().expect("start retried wait");
+        let retry_kill_err = child
+            .kill()
+            .expect_err("a retry must not re-enable signalling");
+        assert!(
+            retry_kill_err
+                .to_string()
+                .contains("waitable pid ownership is not guaranteed"),
+            "unexpected retry kill error: {retry_kill_err}"
+        );
+        *child.lock() = SharedState::Uncertain(retry_owned);
+
+        let retry_err = child
+            .wait()
+            .expect_err("a retry still cannot recover consumed status");
+        assert_eq!(retry_err.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn ignored_sigchld_wait_failure_disables_kill() {
+        const HELPER_ENV: &str = "GUARDRAIL_IGNORED_SIGCHLD_HELPER";
+
+        if std::env::var_os(HELPER_ENV).is_some() {
+            // This branch runs in an isolated test subprocess because signal
+            // dispositions are process-global.
+            // SAFETY: SIG_IGN is a valid disposition for SIGCHLD.
+            let previous = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            assert_ne!(previous, libc::SIG_ERR, "failed to ignore SIGCHLD");
+
+            let mut sleep = Command::new("sleep");
+            sleep.arg("30");
+            let waiting_child = shared(sleep);
+
+            let ready_err = waiting_child
+                .kill()
+                .expect_err("ignored SIGCHLD must disable ready-state signalling");
+            assert!(
+                ready_err
+                    .to_string()
+                    .contains("SIGCHLD does not retain waitable child status"),
+                "unexpected ready-state kill error: {ready_err}"
+            );
+
+            let waiter = waiting_child.clone();
+            let handle = thread::spawn(move || waiter.wait());
+            thread::sleep(Duration::from_millis(100));
+
+            let in_flight_err = waiting_child
+                .kill()
+                .expect_err("ignored SIGCHLD must disable in-flight signalling");
+            assert!(
+                in_flight_err
+                    .to_string()
+                    .contains("waitable pid ownership is not guaranteed"),
+                "unexpected in-flight kill error: {in_flight_err}"
+            );
+            // SAFETY: this child is deliberately sleeping and has not exited;
+            // terminate it directly so the isolated helper can finish.
+            assert_eq!(
+                unsafe { libc::kill(waiting_child.pid() as libc::pid_t, libc::SIGKILL) },
+                0
+            );
+            let wait_err = handle
+                .join()
+                .expect("waiter thread panicked")
+                .expect_err("SIGCHLD ignored child has no waitable status");
+            assert_eq!(wait_err.raw_os_error(), Some(libc::ECHILD));
+
+            let child = shared(Command::new("true"));
+            let err = child.wait().expect_err("auto-reaped child must not wait");
+            assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
+
+            let kill_err = child
+                .kill()
+                .expect_err("an auto-reaped pid must never be signalled");
+            assert!(
+                kill_err.to_string().contains("pid ownership is uncertain"),
+                "unexpected kill error: {kill_err}"
+            );
+
+            let retry_err = child
+                .wait()
+                .expect_err("auto-reaped status remains unavailable");
+            assert_eq!(retry_err.raw_os_error(), Some(libc::ECHILD));
+            return;
+        }
+
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "process::tests::ignored_sigchld_wait_failure_disables_kill",
+            ])
+            .env(HELPER_ENV, "1")
+            .status()
+            .expect("run ignored-SIGCHLD helper");
+        assert!(status.success(), "helper failed with {status:?}");
     }
 }
