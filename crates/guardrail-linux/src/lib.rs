@@ -1,8 +1,13 @@
 //! Linux backend for `guardrail`.
 //!
-//! Applies confinement entirely in-process inside [`std::process::Command`]'s
+//! Applies confinement entirely in-process around [`std::process::Command`]'s
 //! `pre_exec` hook: resource limits via `setrlimit`, plus Landlock filesystem
-//! rules and seccomp-BPF filters for network and IPC. Every parent file
+//! rules and seccomp-BPF filters for network and IPC. Policies are compiled
+//! and the Landlock ruleset is fully built in the parent; the post-fork child
+//! only issues raw syscalls (`prctl`, `setrlimit`, `landlock_restrict_self`,
+//! `close_range`, `seccomp`) over parent-prepared data — the
+//! async-signal-safe subset the `pre_exec` contract requires when the parent
+//! is multithreaded (e.g. Node via `guardrail-napi`). Every parent file
 //! descriptor above stderr is marked close-on-exec, so only stdio crosses
 //! into the child — policies cannot revoke access to descriptors that are
 //! already open, so inheriting one would bypass them. No external sandboxing

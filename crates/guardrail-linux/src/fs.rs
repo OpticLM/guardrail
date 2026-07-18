@@ -6,16 +6,17 @@
 //! granting a parent subtree that contains a denied descendant.
 
 use std::collections::BTreeSet;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use landlock::{
     ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, make_bitflags,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, make_bitflags,
 };
 
 use guardrail_core::{Error, FsAccess, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CompiledRules {
     read_paths: BTreeSet<PathBuf>,
     write_paths: BTreeSet<PathBuf>,
@@ -36,15 +37,56 @@ pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
     })
 }
 
-/// Build and enforce a Landlock ruleset for compiled positive paths.
-/// Called inside `pre_exec`.
+/// A Landlock ruleset fully built in the parent: ruleset creation,
+/// compatibility checks, and per-path rules already happened, so the only
+/// thing that crosses `fork()` is this file descriptor.
+#[derive(Debug)]
+pub(crate) struct PreparedRuleset {
+    fd: OwnedFd,
+}
+
+impl PreparedRuleset {
+    /// Enforce the ruleset on the calling thread. Called inside `pre_exec` in
+    /// the freshly forked child: a single raw `landlock_restrict_self(2)` over
+    /// the parent-built descriptor, so the child never runs library code that
+    /// may allocate or take a lock. Requires `NO_NEW_PRIVS` (set earlier in
+    /// `pre_exec`).
+    ///
+    /// A zero return from the kernel guarantees the ruleset is active, so the
+    /// silent `NotEnforced` downgrade the landlock crate can report cannot
+    /// happen through this path: the syscall either enforces or errors, and an
+    /// error aborts the spawn.
+    pub(crate) fn restrict_self(&self) -> std::io::Result<()> {
+        // SAFETY: scalar args only; the fd is owned by self and stays open for
+        // the duration of the call.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_restrict_self,
+                self.fd.as_raw_fd(),
+                0 as libc::c_uint,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// Build a Landlock ruleset for compiled positive paths, entirely in the
+/// parent before `fork()`. Enforcement in the child is a separate, raw step
+/// ([`PreparedRuleset::restrict_self`]); building here keeps allocation, path
+/// opening, and error formatting out of the `pre_exec` closure, which the
+/// [`pre_exec` contract] requires under multithreaded parents such as Node.
 ///
 /// Fails closed: on a kernel that cannot enforce Landlock, `handle_access`
 /// errors under [`CompatLevel::HardRequirement`] and the spawn is aborted
 /// rather than running the child unconfined. `LinuxBackend::new` already
 /// refuses to construct a backend on such kernels, so the checks here are
 /// defense in depth.
-pub(crate) fn apply(rules: &CompiledRules) -> Result<()> {
+///
+/// [`pre_exec` contract]: std::os::unix::process::CommandExt::pre_exec
+pub(crate) fn prepare(rules: &CompiledRules) -> Result<PreparedRuleset> {
     // Pin ABI v1 for the broadest kernel support; the read/exec/write rights
     // this sandbox needs all exist in v1.
     let abi = ABI::V1;
@@ -82,21 +124,17 @@ pub(crate) fn apply(rules: &CompiledRules) -> Result<()> {
         access_for_right(FsRight::Execute, abi),
     )?;
 
-    let status = ruleset
-        .restrict_self()
-        .map_err(|e| Error::confinement("landlock", e))?;
-
-    // PartiallyEnforced is acceptable: with all V1 rights hard-required above,
-    // it can only reflect the file-path downgrades described on add_rule.
-    // NotEnforced means no rule is active at all — refuse to run the child.
-    if status.ruleset == RulesetStatus::NotEnforced {
-        return Err(Error::Unsupported(
+    // With every V1 right hard-required above, a created ruleset always
+    // carries a real descriptor; `None` means the crate downgraded to a dummy
+    // ruleset that would enforce nothing — refuse to run the child.
+    let fd = Option::<OwnedFd>::from(ruleset).ok_or_else(|| {
+        Error::Unsupported(
             "Landlock ruleset is not enforced on this kernel; refusing to run \
              the child without filesystem confinement"
                 .into(),
-        ));
-    }
-    Ok(())
+        )
+    })?;
+    Ok(PreparedRuleset { fd })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

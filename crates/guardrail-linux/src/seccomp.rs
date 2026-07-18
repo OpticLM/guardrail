@@ -199,12 +199,22 @@ fn compile(rules: RuleMap, action: SeccompAction) -> Result<BpfProgram> {
     Ok(program)
 }
 
-/// Install `programs` on the current thread. Requires NO_NEW_PRIVS (set
-/// earlier in pre_exec). Async-signal-safe enough for pre_exec (prctl
-/// wrappers).
-pub(crate) fn apply(programs: &[BpfProgram]) -> Result<()> {
+/// Install `programs` on the current thread. Called inside `pre_exec` in the
+/// freshly forked child: `apply_filter` only issues a `prctl(2)` and a
+/// `seccomp(2)` over the parent-built program, and errors are reduced to
+/// their raw errno so the child never allocates, formats, or takes a lock.
+/// Requires NO_NEW_PRIVS (set earlier in pre_exec).
+pub(crate) fn apply(programs: &[BpfProgram]) -> std::io::Result<()> {
     for program in programs {
-        seccompiler::apply_filter(program).map_err(|e| Error::confinement("seccomp", e))?;
+        seccompiler::apply_filter(program).map_err(|err| match err {
+            // Errno-carrying variants pass their existing io::Error through
+            // unchanged; it already holds a raw OS code and owns no heap.
+            seccompiler::Error::Prctl(e) | seccompiler::Error::Seccomp(e) => e,
+            // The remaining variants (empty filter, TSYNC) cannot occur for
+            // the programs `build` produces and the flags `apply_filter`
+            // passes; map them to a plain errno without formatting anything.
+            _ => std::io::Error::from_raw_os_error(libc::EINVAL),
+        })?;
     }
     Ok(())
 }

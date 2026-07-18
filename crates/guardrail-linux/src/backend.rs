@@ -39,43 +39,44 @@ impl Backend for LinuxBackend {
         command.env_clear();
         command.envs(&self.config.env);
 
-        // Clone only the data the child closure needs. The closure runs in the
-        // forked child, so it must own its inputs (no borrows of `self`).
+        // Everything the child needs crosses the fork as plain bytes or file
+        // descriptors prepared here in the parent: the Landlock ruleset is
+        // fully built (rule compilation, PathFd opens, add_rule) before
+        // fork(), and the BPF programs were compiled in `new`.
         let limits = self.config.limits;
-        let fs_rules = self.fs_rules.clone();
+        let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let seccomp_programs = self.seccomp_programs.clone();
 
         // SAFETY: the closure runs after fork() and before execvp() in the
-        // child. NO_NEW_PRIVS and the rlimit calls are async-signal-safe; the
-        // Landlock ruleset construction allocates, which is acceptable in this
-        // single-threaded post-fork child (glibc releases the malloc arena
-        // locks across fork) and matches established in-process sandbox crates.
-        // It returns an io::Error instead of panicking.
+        // child of a possibly multithreaded parent, so it may only use
+        // async-signal-safe operations. Every step below is a raw syscall
+        // over data captured from the parent, and every error is an
+        // errno-backed io::Error — no allocation, locks, or formatting after
+        // fork. It returns an io::Error instead of panicking.
         unsafe {
             command.pre_exec(move || {
-                // (1) NO_NEW_PRIVS first: required for seccomp later, and a
-                //     hardening measure on its own. prctl is async-signal-safe.
+                // (1) NO_NEW_PRIVS first: required for Landlock and seccomp
+                //     below, and a hardening measure on its own. prctl is
+                //     async-signal-safe.
                 set_no_new_privs()?;
 
                 // (2) Resource limits.
                 rlimit::apply(&limits)?;
 
-                // (3) Filesystem confinement via Landlock. `fs::apply` returns
-                //     our structured Error; bridge it to io::Error because
-                //     `pre_exec` closures must return `io::Result`.
-                fs::apply(&fs_rules).map_err(std::io::Error::other)?;
+                // (3) Filesystem confinement: enforce the parent-built
+                //     Landlock ruleset — one landlock_restrict_self(2) call.
+                landlock_ruleset.restrict_self()?;
 
                 // (4) Descriptor hygiene: mark everything above stderr
                 //     close-on-exec. Runs after the steps above so descriptors
-                //     they open along the way are covered too, and before
+                //     they hold along the way are covered too, and before
                 //     seccomp so the filter cannot interfere with the syscall.
                 scrub_inherited_fds()?;
 
                 // (5) Seccomp is applied LAST so its filters do not interfere
-                //     with Landlock's own setup syscalls.
-                //     The BPF programs were built in the parent;
-                //     only install them here.
-                seccomp::apply(&seccomp_programs).map_err(std::io::Error::other)?;
+                //     with the syscalls above. The BPF programs were built in
+                //     the parent; only prctl(2) + seccomp(2) happen here.
+                seccomp::apply(&seccomp_programs)?;
 
                 Ok(())
             });
