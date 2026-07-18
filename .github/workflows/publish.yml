@@ -27,22 +27,25 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --esm --target x86_64-unknown-linux-gnu --use-napi-cross
+            test: true
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --esm --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: macos-26
             target: x86_64-apple-darwin
-            build: pnpm exec napi build --platform --release --target x86_64-apple-darwin
+            build: pnpm exec napi build --platform --release --esm --target x86_64-apple-darwin
           - host: macos-26
             target: aarch64-apple-darwin
-            build: pnpm exec napi build --platform --release --target aarch64-apple-darwin
+            build: pnpm exec napi build --platform --release --esm --target aarch64-apple-darwin
+            test: true
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --target x86_64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --esm --target x86_64-pc-windows-msvc
+            test: true
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --target aarch64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --esm --target aarch64-pc-windows-msvc
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -50,7 +53,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "11.9.0"
+          package_json_file: crates/guardrail-napi/package.json
       - name: Setup node
         uses: actions/setup-node@v6
         with:
@@ -73,10 +76,16 @@ jobs:
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        # --no-optional keeps previously published @opticlm/guardrail-* binaries
+        # out of node_modules, so the test step can only load the binding built
+        # by this job.
+        run: pnpm install --frozen-lockfile --no-optional
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
+      - name: Test binding
+        if: matrix.settings.test
+        run: pnpm test
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -96,7 +105,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          package_json_file: crates/guardrail-napi/package.json
       - name: Setup node
         uses: actions/setup-node@v6
         with:
@@ -105,7 +114,10 @@ jobs:
           cache-dependency-path: crates/guardrail-napi/pnpm-lock.yaml
           registry-url: https://registry.npmjs.org/
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        # --no-optional keeps previously published @opticlm/guardrail-* binaries
+        # out of node_modules, so the smoke test can only load the artifacts
+        # staged for this release.
+        run: pnpm install --frozen-lockfile --no-optional
       - name: Download native artifacts
         uses: actions/download-artifact@v7
         with:
@@ -124,6 +136,18 @@ jobs:
         run: |
           package_count="$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
           test "$package_count" = "6"
+      - name: Verify platform package contents
+        run: |
+          for package_dir in npm/*/; do
+            main="$(node -p "require('./${package_dir}package.json').main")"
+            test -s "${package_dir}${main}"
+          done
+      - name: Smoke test the packaged host binding
+        # Remove the downloaded copies next to index.js so the committed loader
+        # can only resolve the artifact staged into its final npm package layout.
+        run: |
+          rm -- "${APP_NAME}".*.node
+          NAPI_RS_NATIVE_LIBRARY_PATH="$PWD/npm/linux-x64-gnu/${APP_NAME}.linux-x64-gnu.node" pnpm test
       - name: Publish main package
         run: pnpm publish --access public --no-git-checks
       - name: Publish platform packages

@@ -43,7 +43,7 @@ This repo is jj, not git — set the message on the current change with `jj desc
 ## Commands
 
 - In `crates/guardrail-napi`, use pnpm as the package manager, not npm.
-- CI currently builds the napi binary for all six targets and runs `pnpm test` on the host targets.
+- CI: the test workflow builds the host napi binding and runs `pnpm test` on each host; the publish workflow builds all six targets, runs `pnpm test` against the host-native release artifacts, and load-checks the assembled platform npm packages before publishing.
 - The default Rust test set is `cargo test --all-targets`, which covers `guardrail-core`, the `guardrail` facade, `guardrail-napi`, and the native backend selected by target-specific dependencies. Test a platform backend directly only on its native host with `cargo test -p guardrail-<os> --all-targets`.
 
 ## Architecture

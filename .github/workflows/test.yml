@@ -31,10 +31,16 @@ jobs:
             native_package: guardrail-windows
     steps:
       - uses: actions/checkout@v7
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: crates/guardrail-napi/package.json
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/guardrail-napi/pnpm-lock.yaml
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -50,3 +56,15 @@ jobs:
         run: cargo test --all-targets
       - name: Test native platform backend
         run: cargo test -p ${{ matrix.native_package }} --all-targets
+      - name: Install Node binding dependencies
+        # --no-optional keeps previously published @opticlm/guardrail-* binaries
+        # out of node_modules, so the loader can only resolve the binding built
+        # in the next step.
+        run: pnpm install --frozen-lockfile --no-optional
+        working-directory: crates/guardrail-napi
+      - name: Build Node binding
+        run: pnpm build:debug
+        working-directory: crates/guardrail-napi
+      - name: Test Node binding
+        run: pnpm test
+        working-directory: crates/guardrail-napi
