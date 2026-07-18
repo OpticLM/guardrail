@@ -1,32 +1,32 @@
 use std::path::{Component, Path, PathBuf};
 
-use guardrail_core::{FsAccess, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Error, FsAccess, NetworkPolicy, Result, SandboxConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SeatbeltProfile {
     pub(crate) source: String,
 }
 
-pub(crate) fn build(config: &SandboxConfig) -> SeatbeltProfile {
+pub(crate) fn build(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     build_with_imports(config, &[])
 }
 
 pub(crate) fn build_with_imports(
     config: &SandboxConfig,
     imports: &[std::path::PathBuf],
-) -> SeatbeltProfile {
+) -> Result<SeatbeltProfile> {
     let mut source = String::from("(version 1)\n");
 
     for path in imports {
-        let path = sbpl_string(path);
+        let path = sbpl_string(path)?;
         source.push_str(&format!("(import \"{path}\")\n"));
     }
 
-    source.push_str(&build_policy_rules(config));
-    SeatbeltProfile { source }
+    source.push_str(&build_policy_rules(config)?);
+    Ok(SeatbeltProfile { source })
 }
 
-pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
+pub(crate) fn build_policy_rules(config: &SandboxConfig) -> Result<String> {
     let mut source = String::from("(deny default)\n(debug deny)\n");
 
     for (index, rule) in config.fs.iter().enumerate() {
@@ -34,19 +34,19 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
         match rule {
             FsAccess::ReadAllow(path) => {
                 let exclusions = read_deny_paths(later_rules);
-                push_path_rules(&mut source, "allow", &["file-read*"], path, &exclusions);
+                push_path_rules(&mut source, "allow", &["file-read*"], path, &exclusions)?;
             }
             FsAccess::ReadDeny(path) => {
                 let exclusions = read_allow_paths(later_rules);
-                push_path_rules(&mut source, "deny", &["file-read*"], path, &exclusions);
+                push_path_rules(&mut source, "deny", &["file-read*"], path, &exclusions)?;
             }
             FsAccess::WriteAllow(path) => {
                 let exclusions = write_deny_paths(later_rules);
-                push_path_rules(&mut source, "allow", &["file-write*"], path, &exclusions);
+                push_path_rules(&mut source, "allow", &["file-write*"], path, &exclusions)?;
             }
             FsAccess::WriteDeny(path) => {
                 let exclusions = write_allow_paths(later_rules);
-                push_path_rules(&mut source, "deny", &["file-write*"], path, &exclusions);
+                push_path_rules(&mut source, "deny", &["file-write*"], path, &exclusions)?;
             }
             FsAccess::ExecuteAllow(path) => {
                 let exclusions = execute_deny_paths(later_rules);
@@ -56,7 +56,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
                     &["file-map-executable", "process-exec*"],
                     path,
                     &exclusions,
-                );
+                )?;
             }
             FsAccess::ExecuteDeny(path) => {
                 let exclusions = execute_allow_paths(later_rules);
@@ -66,7 +66,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
                     &["file-map-executable", "process-exec*"],
                     path,
                     &exclusions,
-                );
+                )?;
             }
         }
     }
@@ -87,7 +87,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> String {
     // `(deny default)` IPC is already denied, and custom `.sb` profile imports
     // are the escape hatch for workloads that need more IPC.
 
-    source
+    Ok(source)
 }
 
 fn push_path_rules(
@@ -96,10 +96,11 @@ fn push_path_rules(
     operations: &[&str],
     path: &Path,
     exclusions: &[PathBuf],
-) {
+) -> Result<()> {
     for path in path_variants(path) {
-        push_path_rule(source, action, operations, &path, exclusions);
+        push_path_rule(source, action, operations, &path, exclusions)?;
     }
+    Ok(())
 }
 
 fn push_path_rule(
@@ -108,31 +109,33 @@ fn push_path_rule(
     operations: &[&str],
     path: &Path,
     exclusions: &[PathBuf],
-) {
+) -> Result<()> {
     for operation in operations {
         source.push_str(&format!("({action} {operation} "));
-        push_subpath_filter(source, path, exclusions);
+        push_subpath_filter(source, path, exclusions)?;
         source.push_str(")\n");
     }
+    Ok(())
 }
 
-fn push_subpath_filter(source: &mut String, path: &Path, exclusions: &[PathBuf]) {
+fn push_subpath_filter(source: &mut String, path: &Path, exclusions: &[PathBuf]) -> Result<()> {
     if exclusions.is_empty() {
         source.push_str("(subpath \"");
-        source.push_str(&sbpl_string(path));
+        source.push_str(&sbpl_string(path)?);
         source.push_str("\")");
-        return;
+        return Ok(());
     }
 
     source.push_str("(require-all (subpath \"");
-    source.push_str(&sbpl_string(path));
+    source.push_str(&sbpl_string(path)?);
     source.push_str("\")");
     for exclusion in exclusions {
         source.push_str(" (require-not (subpath \"");
-        source.push_str(&sbpl_string(exclusion));
+        source.push_str(&sbpl_string(exclusion)?);
         source.push_str("\"))");
     }
     source.push(')');
+    Ok(())
 }
 
 fn read_allow_paths(rules: &[FsAccess]) -> Vec<PathBuf> {
@@ -236,11 +239,35 @@ fn canonical_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn sbpl_string(path: &Path) -> String {
-    path.display()
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+/// Convert a policy path to the body of an SBPL double-quoted string literal.
+///
+/// Fails closed on paths a quoted literal cannot carry faithfully — relative
+/// paths, non-UTF-8 paths, and paths containing control characters — so
+/// untrusted path strings cannot alter the structure of the generated profile.
+pub(crate) fn sbpl_string(path: &Path) -> Result<String> {
+    if !path.is_absolute() {
+        return Err(invalid_path("sandbox policy path is not absolute", path));
+    }
+    let Some(text) = path.to_str() else {
+        return Err(invalid_path("sandbox policy path is not valid UTF-8", path));
+    };
+    if text.chars().any(char::is_control) {
+        return Err(invalid_path(
+            "sandbox policy path contains a control character",
+            path,
+        ));
+    }
+    Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn invalid_path(message: &str, path: &Path) -> Error {
+    Error::confinement(
+        "seatbelt-profile",
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{message}: {path:?}"),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -265,7 +292,7 @@ mod tests {
 
     #[test]
     fn default_config_denies_by_default() {
-        let profile = build(&empty_config());
+        let profile = build(&empty_config()).unwrap();
 
         assert_eq!(
             profile.source,
@@ -290,7 +317,8 @@ mod tests {
                 std::path::PathBuf::from("/tmp/base-one.sb"),
                 std::path::PathBuf::from("/tmp/base-two.sb"),
             ],
-        );
+        )
+        .unwrap();
 
         assert_substrings_in_order(
             &profile.source,
@@ -310,7 +338,8 @@ mod tests {
         let profile = build_with_imports(
             &empty_config(),
             &[std::path::PathBuf::from(r#"/tmp/base"name\with-slash.sb"#)],
-        );
+        )
+        .unwrap();
 
         assert!(
             profile
@@ -330,7 +359,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(profile.source.contains("(version 1)\n"));
         assert!(
@@ -364,15 +393,15 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(profile.source.contains(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
-            sbpl_string(&future_alias)
+            sbpl_string(&future_alias).unwrap()
         )));
         assert!(profile.source.contains(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
-            sbpl_string(&canonical_test_path(&future_real))
+            sbpl_string(&canonical_test_path(&future_real)).unwrap()
         )));
 
         let _ = std::fs::remove_dir_all(root);
@@ -405,15 +434,15 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(profile.source.contains(&format!(
             "(require-not (subpath \"{}\"))",
-            sbpl_string(&secret_alias)
+            sbpl_string(&secret_alias).unwrap()
         )));
         assert!(profile.source.contains(&format!(
             "(require-not (subpath \"{}\"))",
-            sbpl_string(&canonical_test_path(&secret_real))
+            sbpl_string(&canonical_test_path(&secret_real)).unwrap()
         )));
 
         let _ = std::fs::remove_dir_all(root);
@@ -430,7 +459,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(
             profile
@@ -450,7 +479,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(allow file-read*"));
         assert!(
@@ -471,7 +500,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(deny file-read*"));
         assert!(
@@ -492,7 +521,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(allow file-read*"));
         assert!(
@@ -518,7 +547,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(deny file-read*"));
         assert!(
@@ -549,7 +578,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert_substrings_in_order(
             &profile.source,
@@ -570,7 +599,7 @@ mod tests {
     #[test]
     fn deny_network_emits_no_network_rule() {
         let config = empty_config();
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("network"));
     }
@@ -586,7 +615,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(profile.source.contains("(allow network-outbound)\n"));
         assert!(profile.source.contains("(allow system-socket)\n"));
@@ -603,7 +632,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(profile.source.contains("(allow network*)\n"));
         assert!(profile.source.contains("(allow system-socket)\n"));
@@ -620,7 +649,7 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(
             profile
@@ -640,13 +669,124 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             windows_cache_namespace: None,
         };
-        let profile = build(&config);
+        let profile = build(&config).unwrap();
 
         assert!(
             profile
                 .source
                 .contains(r#"(subpath "/tmp/name\\with-slash")"#)
         );
+    }
+
+    #[test]
+    fn control_characters_in_paths_are_rejected() {
+        for path in [
+            "/tmp/line\nfeed",
+            "/tmp/carriage\rreturn",
+            "/tmp/tab\there",
+            "/tmp/nul\0byte",
+        ] {
+            let config = SandboxConfig {
+                fs: vec![FsAccess::ReadAllow(path.into())],
+                ..empty_config()
+            };
+
+            let result = build(&config);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Confinement {
+                        stage: "seatbelt-profile",
+                        ..
+                    })
+                ),
+                "expected rejection for {path:?}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_in_exclusion_paths_are_rejected() {
+        let config = SandboxConfig {
+            fs: vec![
+                FsAccess::ReadAllow("/tmp".into()),
+                FsAccess::ReadDeny("/tmp/eva\nsive".into()),
+            ],
+            ..empty_config()
+        };
+
+        assert!(matches!(
+            build(&config),
+            Err(Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn control_characters_in_import_paths_are_rejected() {
+        let result = build_with_imports(
+            &empty_config(),
+            &[std::path::PathBuf::from("/tmp/base\nprofile.sb")],
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relative_paths_are_rejected() {
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("relative/never-exists".into())],
+            ..empty_config()
+        };
+
+        assert!(matches!(
+            build(&config),
+            Err(Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_rejected() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow(
+                std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe").into(),
+            )],
+            ..empty_config()
+        };
+
+        assert!(matches!(
+            build(&config),
+            Err(Error::Confinement {
+                stage: "seatbelt-profile",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn leading_dash_paths_are_embedded_literally() {
+        let config = SandboxConfig {
+            fs: vec![FsAccess::ReadAllow("/tmp/-rf".into())],
+            ..empty_config()
+        };
+        let profile = build(&config).unwrap();
+
+        assert!(profile.source.contains("(subpath \"/tmp/-rf\")"));
     }
 
     #[cfg(unix)]

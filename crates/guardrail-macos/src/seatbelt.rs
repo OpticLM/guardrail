@@ -13,7 +13,7 @@ pub(crate) struct PreparedProfile(CString);
 
 pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
     let profile = if config.darwin_sandbox_profiles.is_empty() {
-        crate::profile::build(config)
+        crate::profile::build(config)?
     } else {
         let mut imports = Vec::with_capacity(config.darwin_sandbox_profiles.len());
         for path in &config.darwin_sandbox_profiles {
@@ -25,7 +25,7 @@ pub(crate) fn resolve(config: &SandboxConfig) -> Result<SeatbeltProfile> {
 
             imports.push(canonical_path);
         }
-        crate::profile::build_with_imports(config, &imports)
+        crate::profile::build_with_imports(config, &imports)?
     };
 
     validate(&profile.source)?;
@@ -109,8 +109,8 @@ mod tests {
         };
         let profile = resolve(&config).unwrap();
 
-        let first_import = crate::profile::sbpl_string(&first);
-        let second_import = crate::profile::sbpl_string(&second);
+        let first_import = crate::profile::sbpl_string(&first).unwrap();
+        let second_import = crate::profile::sbpl_string(&second).unwrap();
         assert_eq!(
             profile.source,
             format!(

@@ -18,6 +18,15 @@
 //! writable by the sandboxed child. Broad built-in profiles can import further
 //! rules and should be audited for the target macOS release before use.
 //!
+//! # Security: policy path requirements
+//!
+//! Paths embedded in the generated profile — [`guardrail_core::FsAccess`] rule
+//! paths and [`guardrail_core::SandboxConfig::darwin_sandbox_profiles`] import
+//! paths — must be absolute, valid UTF-8, and free of control characters.
+//! Backend construction fails closed with
+//! [`guardrail_core::Error::Confinement`] on any other path, so untrusted path
+//! strings cannot change the structure of the generated SBPL.
+//!
 //! # Tips: common macOS runtime grants
 //!
 //! Guardrail generates only the rules you explicitly declare — no implicit
