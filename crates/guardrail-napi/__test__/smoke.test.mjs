@@ -118,9 +118,9 @@ test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: proc
   // No `fs` rules are needed: Windows already grants `ALL APPLICATION PACKAGES`
   // read+execute on C:\Windows\System32, so
   // the AppContainer child can load cmd.exe and its system DLLs without any
-  // explicit guardrail rule. `cmd` is resolved to C:\Windows\System32\cmd.exe
-  // by SearchPathW in the parent process (guardrail-windows/src/process.rs),
-  // independent of the child's cleared environment.
+  // explicit guardrail rule. Bare names like `cmd` are resolved against the
+  // configured env's PATH (guardrail-windows/src/process.rs) — never the
+  // parent's own lookup context — so System32 must be listed explicitly.
   //
   // `spawn` clears the inherited environment, and AppContainer CreateProcess
   // launches need the standard Windows runtime vars, so pass them explicitly
@@ -130,6 +130,9 @@ test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: proc
   const env = {}
   for (const key of ['SystemRoot', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP']) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
+  }
+  if (process.env.SystemRoot !== undefined) {
+    env.PATH = process.env.SystemRoot + '\\System32'
   }
   const sandbox = await guardrail.Sandbox.build({
     network: 'deny',
@@ -153,6 +156,9 @@ test('inherits Node standard output and error on Windows', { skip: process.platf
     const env = {}
     for (const key of ['SystemRoot', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP']) {
       if (process.env[key] !== undefined) env[key] = process.env[key]
+    }
+    if (process.env.SystemRoot !== undefined) {
+      env.PATH = process.env.SystemRoot + '\\\\System32'
     }
     const sandbox = await guardrail.Sandbox.build({
       network: 'deny',

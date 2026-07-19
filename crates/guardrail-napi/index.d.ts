@@ -135,7 +135,12 @@ export interface SandboxOptions {
    * enforced for privileged users.
    */
   maxProcesses?: number
-  /** The ONLY environment variables the child sees (inherited env is cleared). */
+  /**
+   * The ONLY environment variables the child sees (inherited env is cleared).
+   * On Windows, a bare program name resolves against this env's `PATH` only,
+   * whose non-empty entries must be absolute. Spawning e.g. `cmd` requires
+   * listing the expanded system directory, e.g. `C:\Windows\System32`.
+   */
   env?: Record<string, string>
   /**
    * macOS-only trusted Seatbelt policy imports; ignored on other platforms.
@@ -205,7 +210,12 @@ export interface SpawnOptions {
    * enforced for privileged users.
    */
   maxProcesses?: number
-  /** The ONLY environment variables the child sees (inherited env is cleared). */
+  /**
+   * The ONLY environment variables the child sees (inherited env is cleared).
+   * On Windows, a bare program name resolves against this env's `PATH` only,
+   * whose non-empty entries must be absolute. Spawning e.g. `cmd` requires
+   * listing the expanded system directory, e.g. `C:\Windows\System32`.
+   */
   env?: Record<string, string>
   /**
    * macOS-only trusted Seatbelt policy imports; ignored on other platforms.

@@ -58,6 +58,23 @@
 //! * Children sharing a cached profile (same host process,
 //!   `windows_cache_namespace`, and filesystem policy) share one package SID
 //!   and profile directory, so they are not isolated from each other.
+//!
+//! # Program resolution
+//!
+//! A program given with a path separator is passed to `CreateProcessW` as-is.
+//! A bare name is resolved against the `PATH` entry of
+//! [`SandboxConfig::env`](guardrail_core::SandboxConfig::env) — the only
+//! environment the child sees — following `std::process::Command`'s
+//! per-directory rules (`.exe` appended to extensionless names, empty entries
+//! skipped). For bare-name resolution, every non-empty entry must be absolute;
+//! a relative entry is an `InvalidInput` spawn error because resolving it would
+//! consult the host's current-directory state. The host's own `PATH`, its
+//! executable directory, the system directories, and the current directory are
+//! never searched, so the sandbox configuration alone determines which binary
+//! runs; a bare name absent from the configured `PATH` fails to spawn with a
+//! `NotFound` error. Spawning a bare name like `cmd` therefore requires putting
+//! the expanded system directory, such as `C:\Windows\System32`, in the
+//! configured `PATH`.
 
 #![cfg(windows)]
 

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, OwnedHandle, RawHandle};
+use std::path::Path;
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -27,8 +28,8 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, GetFileType, OPEN_EXISTING,
-    PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, SearchPathW,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, GetFileAttributesW, GetFileType,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
 };
 use windows_sys::Win32::System::Console::{
     GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -63,10 +64,8 @@ pub(crate) fn launch(
 ) -> Result<SandboxChild> {
     let mut command_line = command_line_block(&command.program, &command.args);
     let environment = environment_block(env);
-    let application_name = application_name(&command.program);
-    let application_name_ptr = application_name
-        .as_ref()
-        .map_or(ptr::null(), |wide| wide.as_ptr());
+    let application_name = application_name(&command.program, env)?;
+    let application_name_ptr = application_name.as_ptr();
     let cwd = command
         .current_dir
         .as_ref()
@@ -970,38 +969,70 @@ fn command_line_block(program: &OsStr, args: &[OsString]) -> Vec<u16> {
     out
 }
 
-fn application_name(program: &OsStr) -> Option<Vec<u16>> {
+/// Compute `lpApplicationName` for `CreateProcessAsUserW`.
+///
+/// A program containing a path separator is passed through as given. A bare
+/// name is resolved against the `PATH` of the sandbox
+/// environment — the only environment the child will see — so the launched
+/// binary is determined by the sandbox configuration alone (issue #23). Each
+/// absolute `PATH` directory is probed with the `std::process::Command` rules:
+/// empty entries are skipped, `.exe` is appended when the name has no
+/// extension, and existence is checked with `GetFileAttributesW`. Relative
+/// entries are rejected because Windows would resolve them against the
+/// supervisor's current-directory state. The supervisor's own `PATH`, its
+/// executable's directory, the system directories, and every current
+/// directory are never consulted; a bare name with no match is a `NotFound`
+/// spawn error rather than a second, parent-dependent lookup by
+/// `CreateProcessW` itself.
+fn application_name(program: &OsStr, env: &BTreeMap<String, String>) -> Result<Vec<u16>> {
     if has_path_separator(program) {
-        return Some(wide_null(program));
+        return Ok(wide_null(program));
     }
 
-    let program_wide = wide_null(program);
-    let extension = wide_null(OsStr::new(".exe"));
-    let mut buffer = vec![0u16; 260];
-
-    loop {
-        let found = unsafe {
-            SearchPathW(
-                ptr::null(),
-                program_wide.as_ptr(),
-                extension.as_ptr(),
-                buffer.len() as u32,
-                buffer.as_mut_ptr(),
-                ptr::null_mut(),
-            )
-        };
-        if found == 0 {
-            return None;
+    let sandbox_path = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.as_str())
+        .unwrap_or_default();
+    let mut sandbox_dirs = Vec::new();
+    for dir in std::env::split_paths(sandbox_path) {
+        if dir.as_os_str().is_empty() {
+            continue;
         }
-
-        let found = found as usize;
-        if found < buffer.len() {
-            buffer.truncate(found + 1);
-            return Some(buffer);
+        if !dir.is_absolute() {
+            return Err(Error::Spawn(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("sandbox PATH entry {dir:?} is not absolute"),
+            )));
         }
-
-        buffer.resize(found + 1, 0);
+        sandbox_dirs.push(dir);
     }
+    // CreateProcessW's search appends `.exe` only to extensionless names;
+    // std::process::Command mirrors that rule, and so does this lookup.
+    let has_extension = program.as_encoded_bytes().contains(&b'.');
+    for dir in sandbox_dirs {
+        let mut candidate = dir.join(program);
+        if !has_extension {
+            candidate.set_extension("exe");
+        }
+        if program_exists(&candidate) {
+            return Ok(wide_null(candidate.as_os_str()));
+        }
+    }
+
+    Err(Error::Spawn(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("program {program:?} not found in the sandbox PATH"),
+    )))
+}
+
+/// Whether `path` names an existing filesystem entry, without following
+/// symlinks — the same `GetFileAttributesW` probe std uses for its lookup.
+fn program_exists(path: &Path) -> bool {
+    let wide = wide_null(path.as_os_str());
+    // SAFETY: the path is a nul-terminated UTF-16 buffer that outlives the
+    // call.
+    unsafe { GetFileAttributesW(wide.as_ptr()) != INVALID_FILE_ATTRIBUTES }
 }
 
 fn has_path_separator(value: &OsStr) -> bool {
@@ -1143,11 +1174,160 @@ mod tests {
     }
 
     #[test]
-    fn resolves_bare_program_with_parent_search_path() {
-        let resolved = application_name(OsStr::new("cmd")).expect("cmd resolves");
-        let resolved = wide_to_string(&resolved);
-        assert!(resolved.to_ascii_lowercase().contains(r"\cmd.exe"));
-        assert!(resolved.ends_with('\0'));
+    fn explicit_paths_bypass_the_sandbox_path_lookup() {
+        let resolved = application_name(OsStr::new(r"C:\tools\probe.exe"), &BTreeMap::new())
+            .expect("a program with separators is passed through");
+        assert_eq!(wide_to_string(&resolved), "C:\\tools\\probe.exe\0");
+    }
+
+    #[test]
+    fn bare_name_resolves_from_the_sandbox_path() {
+        let dir = TempDir::new("bare-name");
+        let expected = dir.path().join("guardrail-lookup.exe");
+        std::fs::write(&expected, b"").expect("create candidate");
+
+        let resolved = application_name(OsStr::new("guardrail-lookup"), &env_with_path(dir.path()))
+            .expect("resolve bare name from the sandbox PATH");
+        assert_eq!(
+            wide_to_string(&resolved),
+            format!("{}\0", expected.display())
+        );
+    }
+
+    #[test]
+    fn extensionless_names_match_only_their_exe_candidate() {
+        let dir = TempDir::new("exe-suffix");
+        std::fs::write(dir.path().join("tool"), b"").expect("create extensionless file");
+
+        let err = application_name(OsStr::new("tool"), &env_with_path(dir.path()))
+            .expect_err("an extensionless bare name must only probe tool.exe");
+        assert_not_found(&err);
+
+        std::fs::write(dir.path().join("tool.exe"), b"").expect("create exe candidate");
+        let resolved = application_name(OsStr::new("tool"), &env_with_path(dir.path()))
+            .expect("tool.exe satisfies the lookup");
+        assert_eq!(
+            wide_to_string(&resolved),
+            format!("{}\0", dir.path().join("tool.exe").display())
+        );
+    }
+
+    #[test]
+    fn names_with_extensions_are_probed_verbatim() {
+        let dir = TempDir::new("verbatim-extension");
+        std::fs::write(dir.path().join("tool.cmd"), b"").expect("create candidate");
+
+        let resolved = application_name(OsStr::new("tool.cmd"), &env_with_path(dir.path()))
+            .expect("a name with an extension is probed as given");
+        assert_eq!(
+            wide_to_string(&resolved),
+            format!("{}\0", dir.path().join("tool.cmd").display())
+        );
+    }
+
+    #[test]
+    fn earlier_sandbox_path_entries_win() {
+        let first = TempDir::new("first-entry");
+        let second = TempDir::new("second-entry");
+        std::fs::write(first.path().join("dup.exe"), b"").expect("create first candidate");
+        std::fs::write(second.path().join("dup.exe"), b"").expect("create second candidate");
+
+        // An empty leading entry must be skipped, not treated as the CWD.
+        let joined = format!(";{};{}", first.path().display(), second.path().display());
+        let env = BTreeMap::from([("PATH".to_owned(), joined)]);
+
+        let resolved = application_name(OsStr::new("dup"), &env).expect("resolve duplicated name");
+        assert_eq!(
+            wide_to_string(&resolved),
+            format!("{}\0", first.path().join("dup.exe").display())
+        );
+    }
+
+    #[test]
+    fn path_key_is_matched_case_insensitively() {
+        let dir = TempDir::new("path-key-case");
+        std::fs::write(dir.path().join("cased.exe"), b"").expect("create candidate");
+        let env = BTreeMap::from([("Path".to_owned(), dir.path().display().to_string())]);
+
+        application_name(OsStr::new("cased"), &env)
+            .expect("a `Path` key must satisfy the PATH lookup");
+    }
+
+    #[test]
+    fn relative_sandbox_path_entries_are_rejected() {
+        for relative in [".", "tools", r"C:tools", r"\tools"] {
+            let env = BTreeMap::from([("PATH".to_owned(), relative.to_owned())]);
+            let err = application_name(OsStr::new("tool"), &env)
+                .expect_err("a relative PATH entry must be rejected");
+            match err {
+                Error::Spawn(io) => {
+                    assert_eq!(io.kind(), io::ErrorKind::InvalidInput, "{io:?}");
+                }
+                other => panic!("expected an InvalidInput spawn error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn relative_entries_are_rejected_before_any_program_is_selected() {
+        let dir = TempDir::new("absolute-before-relative");
+        std::fs::write(dir.path().join("tool.exe"), b"").expect("create absolute candidate");
+        let path = format!("{};.", dir.path().display());
+        let env = BTreeMap::from([("PATH".to_owned(), path)]);
+
+        let err = application_name(OsStr::new("tool"), &env)
+            .expect_err("the complete PATH must be validated before lookup");
+        match err {
+            Error::Spawn(io) => assert_eq!(io.kind(), io::ErrorKind::InvalidInput, "{io:?}"),
+            other => panic!("expected an InvalidInput spawn error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_names_never_use_the_parent_lookup_context() {
+        // `cmd` resolves in the supervisor's context (parent PATH and the
+        // system directories), but the sandbox environment has no PATH, so
+        // the lookup must fail instead of falling back to that context.
+        let err = application_name(OsStr::new("cmd"), &BTreeMap::new())
+            .expect_err("a bare name without a sandbox PATH must not resolve");
+        assert_not_found(&err);
+    }
+
+    fn env_with_path(dir: &Path) -> BTreeMap<String, String> {
+        BTreeMap::from([("PATH".to_owned(), dir.display().to_string())])
+    }
+
+    fn assert_not_found(err: &Error) {
+        match err {
+            Error::Spawn(io) => assert_eq!(io.kind(), io::ErrorKind::NotFound, "{io:?}"),
+            other => panic!("expected a NotFound spawn error, got {other:?}"),
+        }
+    }
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "guardrail-windows-process-{label}-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            // Best-effort cleanup; a leftover temp dir must not fail the test.
+            let _removed = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]

@@ -580,6 +580,11 @@ fn builder_with_system_root() -> SandboxConfig {
             env.insert(key.to_string(), value);
         }
     }
+    // Bare names like `cmd` resolve against this PATH only (issue #23); the
+    // supervisor's lookup context is never consulted.
+    if let Ok(system_root) = std::env::var("SystemRoot") {
+        env.insert("PATH".to_string(), format!(r"{system_root}\System32"));
+    }
     SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,

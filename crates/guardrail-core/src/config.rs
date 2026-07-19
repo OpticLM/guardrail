@@ -64,6 +64,12 @@ pub struct SandboxConfig {
     /// The **only** environment variables the child will see. The child's
     /// inherited environment is unconditionally cleared before these are
     /// applied by the backend.
+    ///
+    /// The Windows backend also resolves bare program names against this
+    /// environment's `PATH` — never the parent's — so the configuration alone
+    /// determines which binary is launched. Every non-empty Windows `PATH`
+    /// entry must be absolute; a relative entry makes bare-program spawning
+    /// fail with `InvalidInput` (see the backend crate docs).
     pub env: BTreeMap<String, String>,
     /// Linux-only IPC confinement level. Non-Linux backends ignore this field.
     ///

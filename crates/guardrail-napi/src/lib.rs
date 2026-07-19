@@ -141,6 +141,9 @@ pub struct SandboxOptions {
     /// enforced for privileged users.
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
+    /// On Windows, a bare program name resolves against this env's `PATH` only,
+    /// whose non-empty entries must be absolute. Spawning e.g. `cmd` requires
+    /// listing the expanded system directory, e.g. `C:\Windows\System32`.
     pub env: Option<HashMap<String, String>>,
     /// macOS-only trusted Seatbelt policy imports; ignored on other platforms.
     /// Imported `allow` rules can grant access absent from `fs` and `network`,
@@ -184,6 +187,9 @@ pub struct SpawnOptions {
     /// enforced for privileged users.
     pub max_processes: Option<u32>,
     /// The ONLY environment variables the child sees (inherited env is cleared).
+    /// On Windows, a bare program name resolves against this env's `PATH` only,
+    /// whose non-empty entries must be absolute. Spawning e.g. `cmd` requires
+    /// listing the expanded system directory, e.g. `C:\Windows\System32`.
     pub env: Option<HashMap<String, String>>,
     /// macOS-only trusted Seatbelt policy imports; ignored on other platforms.
     /// Imported `allow` rules can grant access absent from `fs` and `network`,
