@@ -54,6 +54,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Test default packages
         run: cargo test --all-targets
+      - name: Test documentation examples
+        # --all-targets skips doctests, so compile and run them explicitly.
+        run: cargo test --doc
       - name: Test native platform backend
         run: cargo test -p ${{ matrix.native_package }} --all-targets
       - name: Install Node binding dependencies

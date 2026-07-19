@@ -152,6 +152,65 @@ impl SandboxChild {
         }
     }
 
+    /// Borrow the underlying [`std::process::Child`], if this handle wraps
+    /// one.
+    ///
+    /// Children spawned by the Windows backend are backed by raw process and
+    /// Job Object handles rather than a [`Child`], so for them this returns
+    /// `None`. Prefer the portable methods on `SandboxChild`; reach for this
+    /// only when an API exists solely on [`Child`], such as
+    /// [`Child::try_wait`].
+    ///
+    /// ```no_run
+    /// # fn main() -> std::io::Result<()> {
+    /// use guardrail_core::SandboxChild;
+    ///
+    /// let mut child = SandboxChild::from(std::process::Command::new("tool").spawn()?);
+    /// if let Some(inner) = child.as_child_mut() {
+    ///     let exited = inner.try_wait()?.is_some();
+    ///     println!("exited yet: {exited}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn as_child_mut(&mut self) -> Option<&mut Child> {
+        match &mut self.inner {
+            SandboxChildInner::Child(child) => Some(child),
+            #[cfg(windows)]
+            SandboxChildInner::WindowsRaw { .. } => None,
+        }
+    }
+
+    /// Consume the handle and return the underlying [`Child`], if this handle
+    /// wraps one.
+    ///
+    /// Children spawned by the Windows backend are backed by raw process and
+    /// Job Object handles rather than a [`Child`]; for them the intact handle
+    /// comes back as the error, so a failed unwrap never loses the child.
+    ///
+    /// ```no_run
+    /// # fn main() -> std::io::Result<()> {
+    /// use guardrail_core::SandboxChild;
+    ///
+    /// let child = SandboxChild::from(std::process::Command::new("tool").spawn()?);
+    /// let status = match child.try_into_child() {
+    ///     // Backends other than Windows wrap a std Child.
+    ///     Ok(mut inner) => inner.wait()?,
+    ///     // Raw Windows children keep working through the returned handle.
+    ///     Err(mut child) => child.wait()?,
+    /// };
+    /// println!("exited: {status}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_into_child(self) -> Result<Child, Self> {
+        match self.inner {
+            SandboxChildInner::Child(child) => Ok(child),
+            #[cfg(windows)]
+            inner @ SandboxChildInner::WindowsRaw { .. } => Err(Self { inner }),
+        }
+    }
+
     /// Construct a Windows child from already-owned process and Job handles,
     /// plus the parent ends of any stdio pipes.
     ///
@@ -570,6 +629,26 @@ mod tests {
 
     fn shared(mut cmd: Command) -> SharedSandboxChild {
         SharedSandboxChild::new(cmd.spawn().expect("spawn").into())
+    }
+
+    #[test]
+    fn as_child_mut_exposes_the_wrapped_std_child() {
+        let mut child: SandboxChild = Command::new("true").spawn().expect("spawn").into();
+        let inner = child
+            .as_child_mut()
+            .expect("a std-backed child must expose its inner Child");
+        let status = inner.wait().expect("wait");
+        assert!(status.success(), "true should exit cleanly, got {status:?}");
+    }
+
+    #[test]
+    fn try_into_child_returns_the_wrapped_std_child() {
+        let child: SandboxChild = Command::new("true").spawn().expect("spawn").into();
+        let mut inner = child
+            .try_into_child()
+            .expect("a std-backed child must unwrap into its inner Child");
+        let status = inner.wait().expect("wait");
+        assert!(status.success(), "true should exit cleanly, got {status:?}");
     }
 
     #[test]
