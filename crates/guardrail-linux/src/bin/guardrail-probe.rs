@@ -15,6 +15,10 @@
 //!   fork              fork one child that exits immediately; exit 0 if the
 //!                     fork succeeds, exit 3 if it is denied
 //!   read-file <PATH>  read PATH; exit 0 if allowed, exit 3 if denied/failed
+//!   wait-read-file <PATH> <SECONDS>
+//!                     poll until PATH exists (up to SECONDS), then read it;
+//!                     exit 0 if the read succeeds, 3 if it is denied or the
+//!                     path never appears
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
 //!   read-fd <FD> <EXPECTED>
 //!                     read from the (supposedly inherited) descriptor FD;
@@ -112,6 +116,25 @@ fn main() {
             match std::fs::read(path) {
                 Ok(_) => exit(0),
                 Err(_) => exit(3),
+            }
+        }
+        "wait-read-file" => {
+            let path = args.get(2).map(String::as_str).unwrap_or("");
+            let Some(seconds) = args.get(3).and_then(|s| s.parse::<u64>().ok()) else {
+                exit(2);
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            loop {
+                match std::fs::read(path) {
+                    Ok(_) => exit(0),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        if std::time::Instant::now() >= deadline {
+                            exit(3);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => exit(3),
+                }
             }
         }
         "write-file" => {
@@ -358,11 +381,11 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|fork|read-file|write-file|read-fd|socket-inet|\
-                 socket-netlink|socket-packet|socket-vsock|socket-unix|socketpair-unix|\
-                 socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|io-uring-enter|\
-                 io-uring-register|shm|ptrace-self|unshare-user|mount|mount-setattr|\
-                 kexec-load|bpf> [arg]"
+                 <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|read-fd|\
+                 socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
+                 socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|\
+                 io-uring-enter|io-uring-register|shm|ptrace-self|unshare-user|mount|\
+                 mount-setattr|kexec-load|bpf> [arg]"
             );
             exit(2);
         }

@@ -4,14 +4,37 @@
 //! `pre_exec` hook: resource limits via `setrlimit`, plus Landlock filesystem
 //! rules and seccomp-BPF filters for network and IPC. Policies are compiled
 //! and the Landlock ruleset is fully built in the parent; the post-fork child
-//! only issues raw syscalls (`prctl`, `setrlimit`, `landlock_restrict_self`,
-//! `close_range`, `seccomp`) over parent-prepared data — the
-//! async-signal-safe subset the `pre_exec` contract requires when the parent
-//! is multithreaded (e.g. Node via `guardrail-napi`). Every parent file
-//! descriptor above stderr is marked close-on-exec, so only stdio crosses
-//! into the child — policies cannot revoke access to descriptors that are
-//! already open, so inheriting one would bypass them. No external sandboxing
-//! binary is used.
+//! only issues raw syscalls (`prctl`, `unshare`, `mount`, `setrlimit`,
+//! `landlock_restrict_self`, `close_range`, `seccomp`) over parent-prepared
+//! data — the async-signal-safe subset the `pre_exec` contract requires when
+//! the parent is multithreaded (e.g. Node via `guardrail-napi`). Every parent
+//! file descriptor above stderr is marked close-on-exec, so only stdio
+//! crosses into the child — policies cannot revoke access to descriptors
+//! that are already open, so inheriting one would bypass them. No external
+//! sandboxing binary is used.
+//!
+//! # Deny rules beneath allowed parents
+//!
+//! Landlock rules are additive grants, so a policy such as `allow(root)` then
+//! `deny(root/secret)` is enforced by a second layer: the allowed parent is
+//! granted wholesale (covering entries created at any later time), and each
+//! deny boundary is overmounted with a mask — an empty read-only tmpfs or
+//! file for read denies, a read-only or noexec self-bind for write/execute
+//! denies — inside a per-spawn unprivileged user + mount namespace whose
+//! propagation is private to the child. Mounts attach to the directory
+//! itself, so the ordered policy stays live no matter when files appear on
+//! either side of the boundary, and a second namespace boundary locks the
+//! masks (`MNT_LOCKED`) against children permitted to create namespaces of
+//! their own. See `src/ns.rs` for the mechanism.
+//!
+//! This is the one feature that needs unprivileged user namespaces: when the
+//! host forbids them (Debian's `kernel.unprivileged_userns_clone=0`, Ubuntu
+//! 24.04's `apparmor_restrict_unprivileged_userns=1`,
+//! `user.max_user_namespaces=0`), constructing a backend for such a policy
+//! fails with a precise `Error::Unsupported` instead of approximating.
+//! Policies without deny-under-allow boundaries never create a namespace.
+//! One shape is rejected on any host: denying read on a path while write or
+//! execute stays allowed there — a hidden path cannot remain writable.
 //!
 //! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
 //! pathname or abstract — fails with `EAFNOSUPPORT`, so the child cannot reach
@@ -68,6 +91,7 @@
 
 mod backend;
 mod fs;
+mod ns;
 mod rlimit;
 mod seccomp;
 mod support;

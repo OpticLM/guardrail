@@ -3,7 +3,7 @@ use std::process::Command;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
 
-use crate::{fs, rlimit, seccomp, support};
+use crate::{fs, ns, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
@@ -17,10 +17,15 @@ impl LinuxBackend {
     ///
     /// Fails closed with [`Error::Unsupported`] when the running kernel cannot
     /// enforce Landlock or fails the seccomp action-availability probe (see
-    /// [`Backend::probe_support`]).
+    /// [`Backend::probe_support`]), or — only when the policy denies paths
+    /// beneath allowed parents — when the host forbids the unprivileged user
+    /// namespaces those deny boundaries are enforced with (see [`crate::ns`]).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
+        if !fs_rules.mount_plan.is_empty() {
+            ns::probe_mask_support()?;
+        }
         let seccomp_programs = seccomp::build(&config)?;
         Ok(Self {
             config,
@@ -42,10 +47,12 @@ impl Backend for LinuxBackend {
         // Everything the child needs crosses the fork as plain bytes or file
         // descriptors prepared here in the parent: the Landlock ruleset is
         // fully built (rule compilation, PathFd opens, add_rule) before
-        // fork(), and the BPF programs were compiled in `new`.
+        // fork(), the BPF programs were compiled in `new`, and the mount
+        // masking plan is CStrings and fixed buffers compiled in `new`.
         let limits = self.config.limits;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let seccomp_programs = self.seccomp_programs.clone();
+        let mut namespace = ns::PreparedNamespace::new(&self.fs_rules.mount_plan);
 
         // SAFETY: the closure runs after fork() and before execvp() in the
         // child of a possibly multithreaded parent, so it may only use
@@ -60,20 +67,30 @@ impl Backend for LinuxBackend {
                 //     async-signal-safe.
                 set_no_new_privs()?;
 
-                // (2) Resource limits.
+                // (2) Mount masking for deny-under-allow boundaries, when the
+                //     policy has any: enter a user + mount namespace and glue
+                //     masks over denied paths. Must precede Landlock, which
+                //     denies mount-topology changes once enforced. The forked
+                //     child is single-threaded, as unshare(CLONE_NEWUSER)
+                //     requires.
+                if let Some(namespace) = namespace.as_mut() {
+                    namespace.enter()?;
+                }
+
+                // (3) Resource limits.
                 rlimit::apply(&limits)?;
 
-                // (3) Filesystem confinement: enforce the parent-built
+                // (4) Filesystem confinement: enforce the parent-built
                 //     Landlock ruleset — one landlock_restrict_self(2) call.
                 landlock_ruleset.restrict_self()?;
 
-                // (4) Descriptor hygiene: mark everything above stderr
+                // (5) Descriptor hygiene: mark everything above stderr
                 //     close-on-exec. Runs after the steps above so descriptors
                 //     they hold along the way are covered too, and before
                 //     seccomp so the filter cannot interfere with the syscall.
                 scrub_inherited_fds()?;
 
-                // (5) Seccomp is applied LAST so its filters do not interfere
+                // (6) Seccomp is applied LAST so its filters do not interfere
                 //     with the syscalls above. The BPF programs were built in
                 //     the parent; only prctl(2) + seccomp(2) happen here.
                 seccomp::apply(&seccomp_programs)?;

@@ -176,6 +176,10 @@ fn read_allow_then_read_deny_denies_child_but_allows_sibling() {
         eprintln!("skipping: Landlock not enforced on this kernel");
         return;
     }
+    if let Some(reason) = common::mount_masking_unsupported_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
 
     let tmp = TempDir::new().unwrap();
     let public = tmp.path().join("public.txt");
@@ -306,5 +310,262 @@ fn missing_deny_descendant_inside_allow_fails_before_spawn() {
             stage: "landlock",
             ..
         })
+    ));
+}
+
+/// Run `args` under an already-constructed backend, returning whether the
+/// probe exited 0. Unlike [`allowed`], this reuses the backend so tests can
+/// change the filesystem between construction and spawn.
+fn spawn_allowed(
+    backend: &LinuxBackend,
+    config: &guardrail_core::SandboxConfig,
+    args: &[&str],
+) -> bool {
+    let mut cmd = probe(args);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = backend.spawn(cmd).expect("spawn");
+    child.wait().expect("wait").success()
+}
+
+/// Issue #19: the ordered policy must stay live after backend construction —
+/// a sibling created later matches the parent allow, and a descendant created
+/// later under the denied subtree matches the deny.
+#[test]
+fn files_created_after_backend_construction_follow_the_ordered_policy() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+    if let Some(reason) = common::mount_masking_unsupported_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let secret = tmp.path().join("secret");
+    std::fs::create_dir(&secret).unwrap();
+    std::fs::write(secret.join("key.txt"), b"key").unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(tmp.path().into()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
+    let backend = LinuxBackend::new(config.clone()).expect("backend");
+
+    // Created only after the backend (and its compiled policy) exist.
+    let future = tmp.path().join("future.txt");
+    std::fs::write(&future, b"future").unwrap();
+    let late_secret = secret.join("late.txt");
+    std::fs::write(&late_secret, b"late").unwrap();
+
+    assert!(
+        spawn_allowed(&backend, &config, &["read-file", future.to_str().unwrap()]),
+        "a sibling created after construction matches the parent allow"
+    );
+    assert!(
+        !spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", secret.join("key.txt").to_str().unwrap()]
+        ),
+        "the pre-existing denied descendant stays denied"
+    );
+    assert!(
+        !spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", late_secret.to_str().unwrap()]
+        ),
+        "a descendant created after construction under the denied subtree stays denied"
+    );
+}
+
+/// Issue #19: the policy must stay live even for files created while a
+/// sandboxed child is already running.
+#[test]
+fn file_created_while_child_is_running_is_readable() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+    if let Some(reason) = common::mount_masking_unsupported_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let secret = tmp.path().join("secret");
+    std::fs::create_dir(&secret).unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(tmp.path().into()),
+        FsAccess::ReadDeny(secret),
+    ]);
+    let backend = LinuxBackend::new(config.clone()).expect("backend");
+
+    let appearing = tmp.path().join("appears.txt");
+    let mut cmd = probe(&["wait-read-file", appearing.to_str().unwrap(), "10"]);
+    cmd.env_clear();
+    cmd.envs(&config.env);
+    let mut child = backend.spawn(cmd).expect("spawn");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::fs::write(&appearing, b"now you see me").unwrap();
+
+    assert!(
+        child.wait().expect("wait").success(),
+        "a file created while the child runs matches the parent allow"
+    );
+}
+
+/// A grandchild re-allowed beneath a denied parent keeps working, including
+/// for files created after backend construction, while new siblings inside
+/// the denied parent stay hidden.
+#[test]
+fn reallowed_grandchild_stays_live_under_denied_parent() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+    if let Some(reason) = common::mount_masking_unsupported_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let child = tmp.path().join("child");
+    let grand = child.join("grand");
+    std::fs::create_dir_all(&grand).unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(tmp.path().into()),
+        FsAccess::ReadDeny(child.clone()),
+        FsAccess::ReadAllow(grand.clone()),
+    ]);
+    let backend = LinuxBackend::new(config.clone()).expect("backend");
+
+    let new_grand = grand.join("new.txt");
+    std::fs::write(&new_grand, b"grand").unwrap();
+    let new_hidden = child.join("other.txt");
+    std::fs::write(&new_hidden, b"hidden").unwrap();
+    let new_sibling = tmp.path().join("sibling.txt");
+    std::fs::write(&new_sibling, b"sibling").unwrap();
+
+    assert!(
+        spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", new_grand.to_str().unwrap()]
+        ),
+        "a file created after construction in the re-allowed grandchild is readable"
+    );
+    assert!(
+        !spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", new_hidden.to_str().unwrap()]
+        ),
+        "a file created after construction in the denied parent stays hidden"
+    );
+    assert!(
+        spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", new_sibling.to_str().unwrap()]
+        ),
+        "a sibling outside the denied parent is readable"
+    );
+}
+
+/// A write deny beneath a write allow is a read-only mask, not a hide: reads
+/// keep working (including for files created later), writes are denied.
+#[test]
+fn write_deny_under_write_allow_is_readonly_but_readable() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+    if let Some(reason) = common::mount_masking_unsupported_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let locked = tmp.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("data.txt"), b"data").unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(tmp.path().into()),
+        FsAccess::WriteAllow(tmp.path().into()),
+        FsAccess::WriteDeny(locked.clone()),
+    ]);
+    let backend = LinuxBackend::new(config.clone()).expect("backend");
+
+    let late = locked.join("late.txt");
+    std::fs::write(&late, b"late").unwrap();
+
+    assert!(
+        spawn_allowed(
+            &backend,
+            &config,
+            &["write-file", tmp.path().join("new.txt").to_str().unwrap()]
+        ),
+        "writes under the allow keep working"
+    );
+    assert!(
+        !spawn_allowed(
+            &backend,
+            &config,
+            &["write-file", locked.join("x.txt").to_str().unwrap()]
+        ),
+        "creating files under the write deny is denied"
+    );
+    assert!(
+        !spawn_allowed(&backend, &config, &["write-file", late.to_str().unwrap()]),
+        "writing a file created after construction under the write deny is denied"
+    );
+    assert!(
+        spawn_allowed(
+            &backend,
+            &config,
+            &["read-file", locked.join("data.txt").to_str().unwrap()]
+        ),
+        "reads under a write-only deny keep working"
+    );
+    assert!(
+        spawn_allowed(&backend, &config, &["read-file", late.to_str().unwrap()]),
+        "reads of files created after construction under a write-only deny keep working"
+    );
+}
+
+/// Denying read while write stays allowed beneath the same path has no
+/// faithful mount encoding; the backend must refuse it precisely.
+#[test]
+fn read_deny_with_covered_write_allow_is_unsupported() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let secret = tmp.path().join("secret");
+    std::fs::create_dir(&secret).unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::ReadAllow(tmp.path().into()),
+        FsAccess::WriteAllow(tmp.path().into()),
+        FsAccess::ReadDeny(secret),
+    ]);
+
+    assert!(matches!(
+        LinuxBackend::new(config),
+        Err(Error::Unsupported(_))
     ));
 }

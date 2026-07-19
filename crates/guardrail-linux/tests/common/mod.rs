@@ -84,6 +84,26 @@ pub fn landlock_enforced() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether deny-under-allow mount masking works on this host, exercised
+/// through the real backend probe. Returns the `Unsupported` reason when the
+/// host forbids unprivileged user namespaces, so tests can skip with it.
+pub fn mount_masking_unsupported_reason() -> Option<String> {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let secret = tmp.path().join("secret");
+    std::fs::create_dir(&secret).expect("mkdir");
+
+    let mut config = base();
+    config.fs.extend([
+        guardrail_core::FsAccess::ReadAllow(tmp.path().into()),
+        guardrail_core::FsAccess::ReadDeny(secret),
+    ]);
+    match guardrail_linux::LinuxBackend::new(config) {
+        Ok(_) => None,
+        Err(guardrail_core::Error::Unsupported(reason)) => Some(reason),
+        Err(other) => panic!("unexpected backend error probing mount masking: {other:?}"),
+    }
+}
+
 fn runtime_library_paths(exe: &Path) -> Vec<PathBuf> {
     let output = match Command::new("ldd").arg(exe).output() {
         Ok(output) if output.status.success() => output,
