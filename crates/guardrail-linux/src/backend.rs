@@ -3,12 +3,13 @@ use std::process::Command;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
 
-use crate::{fs, ns, rlimit, seccomp, support};
+use crate::{fs, net, ns, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
     config: SandboxConfig,
     fs_rules: fs::CompiledRules,
+    net_ruleset: Option<fs::PreparedRuleset>,
     seccomp_programs: Vec<seccompiler::BpfProgram>,
 }
 
@@ -17,19 +18,24 @@ impl LinuxBackend {
     ///
     /// Fails closed with [`Error::Unsupported`] when the running kernel cannot
     /// enforce Landlock or fails the seccomp action-availability probe (see
-    /// [`Backend::probe_support`]), or — only when the policy denies paths
-    /// beneath allowed parents — when the host forbids the unprivileged user
-    /// namespaces those deny boundaries are enforced with (see [`crate::ns`]).
+    /// [`Backend::probe_support`]); when the policy composes
+    /// `NetworkPolicy::OutboundOnly` with `IpcPolicy::Relaxed` and the kernel
+    /// lacks Landlock network support (ABI v4, Linux 6.7+; see [`crate::net`]);
+    /// or — only when the policy denies paths beneath allowed parents — when
+    /// the host forbids the unprivileged user namespaces those deny boundaries
+    /// are enforced with (see [`crate::ns`]).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
         if !fs_rules.mount_plan.is_empty() {
             ns::probe_mask_support()?;
         }
+        let net_ruleset = net::prepare(&config)?;
         let seccomp_programs = seccomp::build(&config)?;
         Ok(Self {
             config,
             fs_rules,
+            net_ruleset,
             seccomp_programs,
         })
     }
@@ -51,6 +57,11 @@ impl Backend for LinuxBackend {
         // masking plan is CStrings and fixed buffers compiled in `new`.
         let limits = self.config.limits;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
+        let net_ruleset = self
+            .net_ruleset
+            .as_ref()
+            .map(fs::PreparedRuleset::try_clone)
+            .transpose()?;
         let seccomp_programs = self.seccomp_programs.clone();
         let mut namespace = ns::PreparedNamespace::new(&self.fs_rules.mount_plan);
 
@@ -83,6 +94,13 @@ impl Backend for LinuxBackend {
                 // (4) Filesystem confinement: enforce the parent-built
                 //     Landlock ruleset — one landlock_restrict_self(2) call.
                 landlock_ruleset.restrict_self()?;
+
+                // (4b) Network confinement for OutboundOnly + Relaxed IPC:
+                //     a second parent-built Landlock layer denying TCP bind
+                //     (see crate::net), same single raw syscall.
+                if let Some(net_ruleset) = &net_ruleset {
+                    net_ruleset.restrict_self()?;
+                }
 
                 // (5) Descriptor hygiene: mark everything above stderr
                 //     close-on-exec. Runs after the steps above so descriptors

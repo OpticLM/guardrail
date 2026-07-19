@@ -41,7 +41,16 @@ pub enum NetworkPolicy {
     #[default]
     Deny,
     /// Outbound IPv4/IPv6 connections are allowed. Every other socket family
-    /// except `AF_UNIX`, and binding/listening, are denied.
+    /// except `AF_UNIX` is denied. Whether Unix-domain sockets — servers
+    /// included — are available is the local-IPC decision; on Linux that is
+    /// [`IpcPolicy`].
+    ///
+    /// Backends restrict IP-server setup where their native mechanism can
+    /// distinguish it from allowed local IPC. On Linux with
+    /// [`IpcPolicy::Relaxed`], explicit TCP `bind` is denied, but UDP `bind`
+    /// and `listen` on an unbound TCP socket remain available because the
+    /// current Linux enforcement layers cannot mediate them. See the Linux
+    /// backend documentation for details.
     OutboundOnly,
     /// No network restrictions are added.
     Full,
@@ -81,12 +90,14 @@ pub enum UserNamespacePolicy {
 /// Inter-process-communication confinement level.
 /// Default is [`IpcPolicy::Strict`].
 ///
-/// **Linux-only.** This policy is enforced with seccomp by the Linux backend;
-/// the macOS and Windows backends ignore [`SandboxConfig::linux_ipc`]. On
-/// macOS, IPC confinement follows the generated and imported Seatbelt rules,
-/// including any Unix-domain socket access enabled by network grants. On
-/// Windows, AppContainer baseline isolation applies independently. See each
-/// backend crate's documentation.
+/// **Linux-only.** This policy is primarily enforced with seccomp by the Linux
+/// backend; when relaxed IPC composes with outbound-only networking, Landlock
+/// supplies the family-aware TCP-bind restriction. The macOS and Windows
+/// backends ignore [`SandboxConfig::linux_ipc`]. On macOS, IPC confinement
+/// follows the generated and imported Seatbelt rules, including any
+/// Unix-domain socket access enabled by network grants. On Windows,
+/// AppContainer baseline isolation applies independently. See each backend
+/// crate's documentation.
 ///
 /// [`SandboxConfig::linux_ipc`]: crate::SandboxConfig::linux_ipc
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,7 +110,11 @@ pub enum IpcPolicy {
     /// `mmap` remain available to the child.
     #[default]
     Strict,
-    /// Permit SysV / POSIX IPC and Unix-domain sockets. Process inspection
+    /// Permit SysV / POSIX IPC and Unix-domain sockets, including Unix-domain
+    /// servers (`bind`/`listen`) — also under [`NetworkPolicy::OutboundOnly`],
+    /// which keeps denying explicit TCP `bind` on Linux. Process inspection
     /// (`ptrace`, `process_vm_*`) stays denied.
+    ///
+    /// [`NetworkPolicy::OutboundOnly`]: crate::NetworkPolicy::OutboundOnly
     Relaxed,
 }

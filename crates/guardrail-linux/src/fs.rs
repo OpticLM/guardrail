@@ -72,6 +72,20 @@ pub(crate) struct PreparedRuleset {
 }
 
 impl PreparedRuleset {
+    pub(crate) fn new(fd: OwnedFd) -> Self {
+        Self { fd }
+    }
+
+    /// Duplicate the ruleset descriptor so an owned copy can move into a
+    /// per-spawn `pre_exec` closure.
+    pub(crate) fn try_clone(&self) -> Result<Self> {
+        let fd = self
+            .fd
+            .try_clone()
+            .map_err(|e| Error::confinement("landlock", e))?;
+        Ok(Self { fd })
+    }
+
     /// Enforce the ruleset on the calling thread. Called inside `pre_exec` in
     /// the freshly forked child: a single raw `landlock_restrict_self(2)` over
     /// the parent-built descriptor, so the child never runs library code that

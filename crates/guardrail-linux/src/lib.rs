@@ -44,6 +44,26 @@
 //! merely probe optional sockets (nscd, syslog, ssh-agent) fall back;
 //! connection-oriented `socketpair`s created by the child keep working.
 //!
+//! # OutboundOnly and Unix-domain servers
+//!
+//! `NetworkPolicy::OutboundOnly` restricts IP servers, but seccomp cannot see
+//! a socket fd's family at `bind`/`listen` time, so how that restriction is
+//! enforced follows the IPC policy. Under `IpcPolicy::Strict` no Unix-domain
+//! socket can exist, so family-blind whole-syscall traps (SIGSYS) are sound
+//! and used.
+//! Under `IpcPolicy::Relaxed` — which permits Unix-domain servers — the
+//! denial moves to a second Landlock ruleset handling `BindTcp` with no
+//! rules: binding a TCP socket to any port fails with `EACCES` while outbound
+//! `connect` and Unix-domain `bind`/`listen` are untouched. This requires
+//! Landlock ABI v4 (Linux 6.7+); on older kernels constructing a backend for
+//! that policy combination fails with `Error::Unsupported` instead of
+//! silently narrowing the contract. Two residuals of what the kernel can
+//! express today remain under that combination: `listen(2)` on an unbound
+//! TCP socket autobinds an ephemeral port without passing the LSM bind hook,
+//! and UDP bind is not yet covered (Landlock gained UDP rights in ABI v10,
+//! not yet exposed by the `landlock` crate). Compose with `IpcPolicy::Strict`
+//! when the child must not serve anything at all.
+//!
 //! Unless the network policy is `Full` and the IPC policy is `Relaxed`, the
 //! `io_uring_*` syscalls fail with `ENOSYS`: ring-submitted operations
 //! (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not
@@ -91,6 +111,7 @@
 
 mod backend;
 mod fs;
+mod net;
 mod ns;
 mod rlimit;
 mod seccomp;

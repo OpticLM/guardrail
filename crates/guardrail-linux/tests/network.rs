@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 
@@ -102,6 +103,10 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind()
     config.network = NetworkPolicy::OutboundOnly;
     // Relaxed IPC isolates the network filter for the AF_UNIX probe.
     config.linux_ipc = IpcPolicy::Relaxed;
+    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
     assert!(
         allowed(&config, &["socket-inet"]),
         "AF_INET socket creation must be allowed under OutboundOnly"
@@ -116,10 +121,74 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind()
             "{probe} must be blocked under OutboundOnly"
         );
     }
+    // Exit 3, not SIGSYS: the denial is Landlock's EACCES, family-aware so
+    // Unix-domain servers stay available (see below).
+    assert_eq!(
+        status(&config, &["tcp-bind"]).code(),
+        Some(3),
+        "binding a TCP listener must be denied under OutboundOnly with Relaxed IPC"
+    );
+}
+
+#[test]
+fn outbound_only_with_relaxed_ipc_allows_unix_bind_listen() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.linux_ipc = IpcPolicy::Relaxed;
+    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+    let name = format!("guardrail-outbound-unix-{}", std::process::id());
+    assert!(
+        allowed(&config, &["unix-bind-listen", &name]),
+        "an abstract Unix-domain server must be allowed under OutboundOnly with Relaxed IPC"
+    );
+}
+
+#[test]
+fn outbound_only_with_relaxed_ipc_keeps_ipv4_and_ipv6_connections() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.linux_ipc = IpcPolicy::Relaxed;
+    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    for (family, bind_address) in [("IPv4", "127.0.0.1:0"), ("IPv6", "[::1]:0")] {
+        let listener = TcpListener::bind(bind_address)
+            .unwrap_or_else(|e| panic!("bind {family} loopback: {e}"));
+        let address = listener.local_addr().expect("listener address").to_string();
+        assert!(
+            allowed(&config, &["tcp-connect", &address]),
+            "an outbound {family} TCP connection must be allowed under OutboundOnly with Relaxed IPC"
+        );
+    }
+}
+
+#[test]
+fn outbound_only_with_strict_ipc_keeps_trapping_bind() {
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.linux_ipc = IpcPolicy::Strict;
+    // With no Unix-domain sockets creatable, the family-blind whole-syscall
+    // traps stay sound and keep the harder SIGSYS denial.
     assert!(
         blocked_by_seccomp(&config, &["tcp-bind"]),
-        "binding/listening must be blocked under OutboundOnly"
+        "binding/listening must be trapped under OutboundOnly with Strict IPC"
     );
+}
+
+/// The `Unsupported` reason when the host kernel lacks the Landlock network
+/// support (ABI v4) that OutboundOnly + Relaxed IPC requires, so tests can
+/// skip with it.
+fn outbound_relaxed_unsupported_reason(config: &SandboxConfig) -> Option<String> {
+    match LinuxBackend::new(config.clone()) {
+        Ok(_) => None,
+        Err(guardrail_core::Error::Unsupported(reason)) => Some(reason),
+        Err(other) => panic!("unexpected backend error: {other:?}"),
+    }
 }
 
 #[test]

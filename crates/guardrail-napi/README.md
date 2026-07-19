@@ -873,13 +873,21 @@ marked *ignored* is an honest no-op there.
 | Option | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
-| `network` | seccomp socket-family filter | Seatbelt network rules | AppContainer capabilities |
+| `network` | seccomp socket-family filter; Landlock TCP-bind restriction for `outbound-only` + relaxed IPC | Seatbelt network rules | AppContainer capabilities |
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
+
+On Linux, combining `network: 'outbound-only'` with `linuxIpc: 'relaxed'`
+requires Landlock ABI v4 (Linux 6.7+); `Sandbox.build()` and the one-shot
+`spawn()` throw `Unsupported` on older kernels. Relaxed IPC keeps Unix-domain
+servers usable, so the family-blind seccomp `bind`/`listen` traps cannot be
+installed. Landlock instead denies explicit TCP `bind`. The current Linux
+backend does not mediate UDP `bind` or `listen` on an unbound TCP socket, so
+those operations remain available under this combination.
 
 On Windows there is no configurable IPC option, but AppContainer baseline
 isolation still applies. Access to a securable object requires both the normal
@@ -901,7 +909,9 @@ package SID and are not isolated from each other.
   it verifies Landlock enforcement on a disposable thread, but the seccomp
   check only queries whether the kernel reports the filter's `Trap` action.
   Ambient policy may still prevent filter installation, so a successful probe
-  is not proof that spawning will succeed.
+  is not proof that spawning will succeed. The policy-specific Landlock ABI v4
+  check for outbound-only networking with relaxed IPC happens in
+  `Sandbox.build()` or one-shot `spawn()`, not `probeSupport()`.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.
 - `stdio` is inherited from the parent process. Output capture is not yet

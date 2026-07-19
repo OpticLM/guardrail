@@ -36,6 +36,11 @@
 //!                     abstract socket NAME; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
+//!   tcp-connect <ADDR>
+//!                     connect a TCP stream to ADDR; exit 0 if allowed, 3 if denied
+//!   unix-bind-listen <NAME>
+//!                     bind an AF_UNIX stream socket to the abstract name NAME
+//!                     and listen on it; exit 0 if allowed, 3 if denied
 //!   io-uring-setup    create an io_uring instance; exit 0 if allowed, 3 on ENOSYS
 //!   io-uring-enter    call io_uring_enter with an invalid fd; exit 0 if the
 //!                     kernel returns EBADF, 3 on ENOSYS
@@ -210,6 +215,30 @@ fn main() {
             Ok(_) => exit(0),
             Err(_) => exit(3),
         },
+        "tcp-connect" => {
+            let Some(address) = args.get(2) else {
+                exit(2);
+            };
+            match std::net::TcpStream::connect(address) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "unix-bind-listen" => {
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::{SocketAddr, UnixListener};
+
+            let Some(name) = args.get(2) else {
+                exit(2);
+            };
+            let Ok(addr) = SocketAddr::from_abstract_name(name.as_bytes()) else {
+                exit(2);
+            };
+            match UnixListener::bind_addr(&addr) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
         "io-uring-setup" => {
             // io_uring_setup(2) has no libc wrapper; a zeroed params block
             // requests no optional features. [0u64; 15] matches struct
@@ -383,9 +412,9 @@ fn main() {
                 "usage: guardrail-probe \
                  <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|read-fd|\
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
-                 socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|io-uring-setup|\
-                 io-uring-enter|io-uring-register|shm|ptrace-self|unshare-user|mount|\
-                 mount-setattr|kexec-load|bpf> [arg]"
+                 socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-connect|\
+                 unix-bind-listen|io-uring-setup|io-uring-enter|io-uring-register|shm|\
+                 ptrace-self|unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
             );
             exit(2);
         }

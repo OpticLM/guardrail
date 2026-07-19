@@ -381,7 +381,10 @@ impl Task for BuildSandboxTask {
 /// enforcement is verified, but the seccomp probe only checks whether the
 /// kernel reports the `Trap` action; it cannot prove that an ambient sandbox
 /// will permit installing the filter. Actual spawning remains authoritative
-/// and fails closed, so calling this first is optional.
+/// and fails closed, so calling this first is optional. Policy-specific checks,
+/// such as the Landlock ABI v4 requirement for outbound-only networking with
+/// relaxed IPC, run when `Sandbox.build()` or one-shot `spawn()` constructs the
+/// backend.
 #[napi]
 pub fn probe_support() -> Result<()> {
     PlatformBackend::probe_support().map_err(to_napi_err)
