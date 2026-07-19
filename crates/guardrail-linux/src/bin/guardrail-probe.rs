@@ -84,6 +84,10 @@ fn main() {
             v.resize(mb * 1024 * 1024, 0);
             let mut acc: u8 = 0;
             let mut i = 0;
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "`i` is checked to be within `0..v.len()`"
+            )]
             while i < v.len() {
                 v[i] = 1;
                 acc = acc.wrapping_add(v[i]);
@@ -163,7 +167,7 @@ fn main() {
             if n < 0 {
                 exit(3);
             }
-            if &buf[..n as usize] == expected.as_bytes() {
+            if buf.get(..n.cast_unsigned() as usize) == Some(expected.as_bytes()) {
                 exit(0);
             }
             exit(3);
@@ -189,6 +193,9 @@ fn main() {
             // SAFETY: both fds were created above and are owned here.
             unsafe {
                 libc::close(fds[0]);
+            }
+            // SAFETY: both fds were created above and are owned here.
+            unsafe {
                 libc::close(fds[1]);
             }
             exit(0);

@@ -17,3 +17,6 @@ guardrail-macos.workspace = true
 
 [target."cfg(windows)".dependencies]
 guardrail-windows.workspace = true
+
+[lints]
+workspace = true

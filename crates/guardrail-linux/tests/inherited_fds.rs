@@ -21,8 +21,8 @@ const SECRET: &str = "inherited-fd-secret";
 /// flag must be cleared explicitly).
 fn open_secret_without_cloexec(dir: &TempDir) -> std::fs::File {
     let path = dir.path().join("secret.txt");
-    std::fs::write(&path, SECRET).unwrap();
-    let file = std::fs::File::open(&path).unwrap();
+    std::fs::write(&path, SECRET).expect("write secret");
+    let file = std::fs::File::open(&path).expect("open secret");
     // SAFETY: fcntl with F_SETFD takes scalar args only, on an owned fd.
     let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) };
     assert_eq!(rc, 0, "clearing FD_CLOEXEC failed");

@@ -22,3 +22,6 @@ tempfile = "3"
 landlock.workspace = true
 libc.workspace = true
 seccompiler.workspace = true
+
+[lints]
+workspace = true

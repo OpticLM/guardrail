@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "shared test helpers are not used by every integration test"
+)]
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -87,6 +90,10 @@ pub fn landlock_enforced() -> bool {
 /// Whether deny-under-allow mount masking works on this host, exercised
 /// through the real backend probe. Returns the `Unsupported` reason when the
 /// host forbids unprivileged user namespaces, so tests can skip with it.
+#[expect(
+    clippy::panic,
+    reason = "an unexpected backend error invalidates the test harness"
+)]
 pub fn mount_masking_unsupported_reason() -> Option<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let secret = tmp.path().join("secret");

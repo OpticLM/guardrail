@@ -183,6 +183,10 @@ fn outbound_only_with_strict_ipc_keeps_trapping_bind() {
 /// The `Unsupported` reason when the host kernel lacks the Landlock network
 /// support (ABI v4) that OutboundOnly + Relaxed IPC requires, so tests can
 /// skip with it.
+#[expect(
+    clippy::panic,
+    reason = "an unexpected backend error invalidates the test harness"
+)]
 fn outbound_relaxed_unsupported_reason(config: &SandboxConfig) -> Option<String> {
     match LinuxBackend::new(config.clone()) {
         Ok(_) => None,

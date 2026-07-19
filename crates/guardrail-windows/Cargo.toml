@@ -29,3 +29,6 @@ windows-sys = {
     "Win32_System_WindowsProgramming",
   ]
 }
+
+[lints]
+workspace = true

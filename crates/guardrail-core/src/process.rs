@@ -371,6 +371,8 @@ fn kill_pid(pid: u32) -> std::io::Result<()> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn waitid_nowait(pid: u32) -> std::io::Result<()> {
     loop {
+        // SAFETY: siginfo_t is a plain C struct of integers; zero-initializing
+        // it is a valid setup for the waitid out-pointer below.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: `info` is a valid out-pointer; P_PID/pid identify our own
         // child, and WNOWAIT leaves it waitable for the subsequent reap.
@@ -609,10 +611,8 @@ mod tests {
             );
             // SAFETY: this child is deliberately sleeping and has not exited;
             // terminate it directly so the isolated helper can finish.
-            assert_eq!(
-                unsafe { libc::kill(waiting_child.pid() as libc::pid_t, libc::SIGKILL) },
-                0
-            );
+            let killed = unsafe { libc::kill(waiting_child.pid() as libc::pid_t, libc::SIGKILL) };
+            assert_eq!(killed, 0);
             let wait_err = handle
                 .join()
                 .expect("waiter thread panicked")

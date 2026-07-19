@@ -30,10 +30,10 @@ fn probe_landlock_enforcement() -> Result<()> {
         .spawn(enforce_landlock_on_probe_thread)
         .map_err(|e| Error::confinement("landlock probe", e))?
         .join()
-        .map_err(|_| {
+        .map_err(|panic| {
             Error::confinement(
                 "landlock probe",
-                std::io::Error::other("Landlock probe thread panicked"),
+                std::io::Error::other(format!("Landlock probe thread panicked: {panic:?}")),
             )
         })?
 }
@@ -107,7 +107,7 @@ mod tests {
 
         let result = std::thread::spawn(|| {
             for _ in 0..16 {
-                if apply_permissive_landlock_layer().is_err() {
+                if !apply_permissive_landlock_layer() {
                     break;
                 }
             }
@@ -122,18 +122,20 @@ mod tests {
         );
     }
 
-    fn apply_permissive_landlock_layer() -> std::result::Result<(), landlock::RulesetError> {
+    fn apply_permissive_landlock_layer() -> bool {
         let access = AccessFs::from_all(ABI::V1);
-        let status = Ruleset::default()
+        let Ok(root) = PathFd::new("/") else {
+            return false;
+        };
+        let Ok(status) = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
-            .handle_access(access)?
-            .create()?
-            .add_rule(PathBeneath::new(
-                PathFd::new("/").expect("open root"),
-                access,
-            ))?
-            .restrict_self()?;
-        assert_eq!(status.ruleset, RulesetStatus::FullyEnforced);
-        Ok(())
+            .handle_access(access)
+            .and_then(|ruleset| ruleset.create())
+            .and_then(|ruleset| ruleset.add_rule(PathBeneath::new(root, access)))
+            .and_then(|ruleset| ruleset.restrict_self())
+        else {
+            return false;
+        };
+        status.ruleset == RulesetStatus::FullyEnforced
     }
 }

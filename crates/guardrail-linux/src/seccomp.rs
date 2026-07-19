@@ -444,7 +444,7 @@ fn socket_domain_allowlist_rule(allowed_families: &[libc::c_int]) -> Result<Secc
                 0, // arg0 = domain
                 SeccompCmpArgLen::Dword,
                 SeccompCmpOp::Ne,
-                family as u64,
+                domain_as_u64(family),
             )
             .map_err(|e| Error::confinement("seccomp", e))?,
         );
@@ -458,10 +458,17 @@ fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule> {
         0, // arg0 = domain
         SeccompCmpArgLen::Dword,
         SeccompCmpOp::Eq,
-        family as u64,
+        domain_as_u64(family),
     )
     .map_err(|e| Error::confinement("seccomp", e))?;
     SeccompRule::new(vec![condition]).map_err(|e| Error::confinement("seccomp", e))
+}
+
+/// Widen a socket domain (`AF_*` constant, always non-negative) to the `u64`
+/// seccomp compares against. `try_from` rejects a negative value rather than
+/// silently reinterpreting the sign bit as `as` would.
+fn domain_as_u64(family: libc::c_int) -> u64 {
+    u64::try_from(family).expect("socket domain constant is non-negative")
 }
 
 #[cfg(test)]

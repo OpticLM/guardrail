@@ -70,7 +70,10 @@ mod tests {
                     })
                 })
                 .collect();
-            *self.seen_env.lock().unwrap() = Some(seen);
+            #[expect(clippy::unwrap_in_result, reason = "lock is never poisoned")]
+            {
+                *self.seen_env.lock().unwrap() = Some(seen);
+            }
             Err(Error::Unsupported("recording backend never spawns".into()))
         }
     }
@@ -93,7 +96,7 @@ mod tests {
         };
         let mut cmd = std::process::Command::new("true");
         cmd.env("SHOULD_NOT_SURVIVE", "1");
-        let _ = backend.spawn(cmd);
+        let _ = backend.spawn(cmd).unwrap_err();
         assert_eq!(backend.seen_env.lock().unwrap().as_ref(), Some(&config.env));
     }
 }

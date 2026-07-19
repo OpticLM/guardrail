@@ -88,11 +88,13 @@ fn required_arg(args: &[String], index: usize) -> &str {
 fn allocate_and_touch(mb: usize) -> Result<(), ()> {
     let bytes = mb.checked_mul(1024 * 1024).ok_or(())?;
     let mut buffer = Vec::new();
-    buffer.try_reserve_exact(bytes).map_err(|_| ())?;
+    buffer.try_reserve_exact(bytes).map_err(|_error| ())?;
     buffer.resize(bytes, 0u8);
 
     for offset in (0..buffer.len()).step_by(4096) {
-        buffer[offset] = buffer[offset].wrapping_add(1);
+        if let Some(byte) = buffer.get_mut(offset) {
+            *byte = byte.wrapping_add(1);
+        }
     }
     black_box(&buffer);
     Ok(())

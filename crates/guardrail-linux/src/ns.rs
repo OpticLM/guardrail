@@ -130,10 +130,11 @@ impl PreparedNamespace {
         if plan.is_empty() {
             return None;
         }
+        let (uid, gid) = current_uid_gid();
         Some(Self {
             plan: plan.clone(),
-            uid_map: identity_map(unsafe { libc::geteuid() } as u64),
-            gid_map: identity_map(unsafe { libc::getegid() } as u64),
+            uid_map: identity_map(uid),
+            gid_map: identity_map(gid),
             clone_fds: vec![-1; plan.clone_sources.len()].into_boxed_slice(),
         })
     }
@@ -146,9 +147,15 @@ impl PreparedNamespace {
     pub(crate) fn enter(&mut self) -> io::Result<()> {
         enter_user_mount_ns(&self.uid_map, &self.gid_map)?;
 
-        // Clone every re-exposed subtree before any mask shadows its path.
-        for (slot, source) in self.plan.clone_sources.iter().enumerate() {
-            self.clone_fds[slot] = open_tree(
+        // Clone every re-exposed subtree before any mask shadows its path. The
+        // plan pairs each source with a slot, so iterate them in lockstep.
+        for (source, slot_fd) in self
+            .plan
+            .clone_sources
+            .iter()
+            .zip(self.clone_fds.iter_mut())
+        {
+            *slot_fd = open_tree(
                 libc::AT_FDCWD,
                 source,
                 OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE,
@@ -224,11 +231,16 @@ fn apply_op(op: &MaskOp, clone_fds: &mut [libc::c_int]) -> io::Result<()> {
             Ok(())
         }
         MaskOp::Attach { slot, path } => {
-            let fd = clone_fds[*slot];
+            // `slot` indexes a fd `enter` cloned for exactly this op; the plan
+            // builds them in lockstep, so it is always in range.
+            let slot_fd = clone_fds
+                .get_mut(*slot)
+                .expect("attach slot must index a clone fd");
+            let fd = *slot_fd;
             move_mount_fd(fd, path)?;
             // SAFETY: fd was opened by `enter` and is consumed here.
             unsafe { libc::close(fd) };
-            clone_fds[*slot] = -1;
+            *slot_fd = -1;
             Ok(())
         }
         MaskOp::Restrict {
@@ -298,12 +310,12 @@ fn hide_file(path: &CStr) -> io::Result<()> {
         MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
     )?;
     move_mount_fd(otfd, path)?;
-    // SAFETY: all three descriptors were opened above and are owned here.
-    unsafe {
-        libc::close(otfd);
-        libc::close(mfd);
-        libc::close(fsfd);
-    }
+    // SAFETY: otfd was opened above and is owned here.
+    unsafe { libc::close(otfd) };
+    // SAFETY: mfd was opened above and is owned here.
+    unsafe { libc::close(mfd) };
+    // SAFETY: fsfd was opened above and is owned here.
+    unsafe { libc::close(fsfd) };
     Ok(())
 }
 
@@ -340,8 +352,9 @@ fn enter_user_mount_ns(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
 /// contains deny-under-allow boundaries: policies without them never create
 /// a namespace and work regardless of this probe.
 pub(crate) fn probe_mask_support() -> Result<()> {
-    let uid_map = identity_map(unsafe { libc::geteuid() } as u64);
-    let gid_map = identity_map(unsafe { libc::getegid() } as u64);
+    let (uid, gid) = current_uid_gid();
+    let uid_map = identity_map(uid);
+    let gid_map = identity_map(gid);
 
     // SAFETY: fork takes no arguments; the child below only calls
     // async-signal-safe functions (unshare, open, write, close, mount,
@@ -400,6 +413,15 @@ pub(crate) fn probe_mask_support() -> Result<()> {
 /// process may install for itself.
 fn identity_map(id: u64) -> Vec<u8> {
     format!("{id} {id} 1\n").into_bytes()
+}
+
+/// The caller's effective uid/gid, widened to `u64` for the identity map.
+fn current_uid_gid() -> (u64, u64) {
+    // SAFETY: geteuid takes no arguments and returns the effective uid.
+    let uid = unsafe { libc::geteuid() } as u64;
+    // SAFETY: getegid takes no arguments and returns the effective gid.
+    let gid = unsafe { libc::getegid() } as u64;
+    (uid, gid)
 }
 
 /// Open `path` write-only and write `buf` in one call (uid/gid map and
