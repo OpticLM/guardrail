@@ -1,11 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { Worker } from 'node:worker_threads'
+import { promisify } from 'node:util'
 
 const require = createRequire(import.meta.url)
 const guardrail = require('../index.js')
+const execFileAsync = promisify(execFile)
 
 test('module exposes the expected API', () => {
   assert.equal(typeof guardrail.spawn, 'function')
@@ -138,4 +141,39 @@ test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: proc
   const result = await child.wait()
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
   assert.equal(result.code, 0)
+})
+
+test('inherits Node standard output and error on Windows', { skip: process.platform !== 'win32' }, async () => {
+  // Run the binding in a nested Node process whose stdout/stderr are pipes
+  // owned by this test. The sandboxed cmd process must inherit those exact
+  // handles for its markers to reach execFile's captured output.
+  const bindingUrl = new URL('../index.js', import.meta.url).href
+  const script = `
+    const guardrail = await import(${JSON.stringify(bindingUrl)})
+    const env = {}
+    for (const key of ['SystemRoot', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP']) {
+      if (process.env[key] !== undefined) env[key] = process.env[key]
+    }
+    const sandbox = await guardrail.Sandbox.build({
+      network: 'deny',
+      env,
+      windowsCacheNamespace: 'smoke-stdio-' + process.pid,
+    })
+    const child = sandbox.spawn('cmd', [
+      '/D',
+      '/C',
+      'echo guardrail-stdout-marker&echo guardrail-stderr-marker>&2',
+    ])
+    const result = await child.wait()
+    if (!result.success) throw new Error('sandboxed stdio probe failed: ' + JSON.stringify(result))
+  `
+
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    ['--input-type=module', '--eval', script],
+    { encoding: 'utf8' },
+  )
+
+  assert.match(stdout, /^guardrail-stdout-marker\r?$/m)
+  assert.match(stderr, /^guardrail-stderr-marker\r?$/m)
 })

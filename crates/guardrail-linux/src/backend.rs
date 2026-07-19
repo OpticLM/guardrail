@@ -1,7 +1,6 @@
 use std::os::unix::process::CommandExt;
-use std::process::Command;
 
-use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
 use crate::{fs, net, ns, rlimit, seccomp, support};
 
@@ -46,8 +45,11 @@ impl Backend for LinuxBackend {
         support::probe_required_features()
     }
 
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
-        command.env_clear();
+    fn spawn(&self, command: SandboxCommand) -> Result<SandboxChild> {
+        // `into_std_command` applies program, args, cwd, and stdio, and clears
+        // the inherited environment; the configuration env is the only one the
+        // child sees.
+        let mut command = command.into_std_command();
         command.envs(&self.config.env);
 
         // Everything the child needs crosses the fork as plain bytes or file

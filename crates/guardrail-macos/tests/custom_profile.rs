@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 
-use guardrail_core::Backend;
+use guardrail_core::{Backend, StdioMode};
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -25,15 +25,12 @@ fn custom_profile_is_loaded_and_applied() {
     let mut config = common::base();
     config.darwin_sandbox_profiles.push(profile_path);
     let mut command = common::probe(&["read-file", secret.to_str().unwrap()]);
-    command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    command.env_clear();
-    command.envs(&config.env);
+    command.stdout = StdioMode::Piped;
+    command.stderr = StdioMode::Piped;
     let child = MacosBackend::new(config.clone())
         .and_then(|backend| backend.spawn(command))
         .expect("spawn");
-    let output = child.into_inner().wait_with_output().expect("wait");
+    let output = child.wait_with_output().expect("wait");
 
     assert!(
         output.status.success(),

@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::process::Command;
 
-use guardrail_core::{Error, Result, SandboxConfig};
+use guardrail_core::{Error, Result, SandboxCommand, SandboxConfig};
 
 use crate::profile::SeatbeltProfile;
 
@@ -48,16 +47,16 @@ impl PreparedLaunch {
     /// exact environment declared by the sandbox configuration.
     pub(crate) fn new(
         profile: &PreparedProfile,
-        command: &Command,
+        command: &SandboxCommand,
         env: &BTreeMap<String, String>,
     ) -> io::Result<Self> {
-        let mut argv_storage = Vec::with_capacity(command.get_args().len() + 5);
+        let mut argv_storage = Vec::with_capacity(command.args.len() + 5);
         argv_storage.push(SANDBOX_EXEC.to_owned());
         argv_storage.push(c"-p".to_owned());
         argv_storage.push(profile.0.clone());
         argv_storage.push(c"--".to_owned());
-        argv_storage.push(os_string(command.get_program())?);
-        for arg in command.get_args() {
+        argv_storage.push(os_string(&command.program)?);
+        for arg in &command.args {
             argv_storage.push(os_string(arg)?);
         }
         let argv = pointer_table(&argv_storage);
@@ -168,8 +167,8 @@ mod tests {
     #[test]
     fn launcher_argv_and_env_are_fully_prepared() {
         let profile = PreparedProfile(CString::new("(version 1)\n(deny default)\n").unwrap());
-        let mut command = Command::new("/tmp/program");
-        command.args(["first", "two words"]);
+        let mut command = SandboxCommand::new("/tmp/program");
+        command.args = vec!["first".into(), "two words".into()];
         let env = BTreeMap::from([
             ("EMPTY".to_owned(), String::new()),
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),

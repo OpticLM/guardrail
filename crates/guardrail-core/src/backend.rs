@@ -1,7 +1,6 @@
 //! The platform-confinement abstraction.
 
-use std::process::Command;
-
+use crate::command::SandboxCommand;
 use crate::error::Result;
 use crate::process::SandboxChild;
 
@@ -9,11 +8,15 @@ use crate::process::SandboxChild;
 ///
 /// Implementors apply OS-level confinement (filesystem, network, IPC, resource
 /// limits) and spawn the child according to the immutable configuration they
-/// were constructed with. A backend must clear the command's inherited
-/// environment before applying the configuration environment, and must keep
-/// the parent's file descriptors or handles from leaking into the child:
-/// only the standard streams may cross the sandbox boundary. Policies cannot
-/// revoke access to descriptors that are already open, so an inherited
+/// were constructed with. A [`SandboxCommand`] carries no environment by
+/// construction, so the child's environment is exactly the configuration's
+/// `env`; backends that go through [`std::process::Command`] must still clear
+/// its inherited environment before applying that map (see
+/// [`SandboxCommand::into_std_command`]). A backend must also keep the
+/// parent's file descriptors or handles from leaking into the child: only the
+/// standard streams selected by the command's
+/// [`StdioMode`](crate::StdioMode)s may cross the sandbox boundary. Policies
+/// cannot revoke access to descriptors that are already open, so an inherited
 /// descriptor would bypass them.
 pub trait Backend {
     /// Probe whether the running machine appears to support this backend.
@@ -23,9 +26,8 @@ pub trait Backend {
     /// will succeed: runtime state or an ambient sandbox may still block
     /// confinement. In particular, Linux only probes whether the kernel
     /// reports the seccomp `Trap` action; it cannot prove that installing the
-    /// backend's filter will be permitted.
-    ///
-    /// Backends still fail closed during construction or spawn, so calling
+    /// filter will be permitted at spawn time. Spawning remains authoritative
+    /// and fails closed when confinement cannot be applied, so calling
     /// this first is optional. It exists to let applications detect known
     /// incompatibilities up front and degrade deliberately.
     ///
@@ -35,68 +37,5 @@ pub trait Backend {
         Self: Sized;
 
     /// Spawn `command` confined according to this backend's stored config.
-    fn spawn(&self, command: Command) -> Result<SandboxChild>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::SandboxConfig;
-    use crate::error::Error;
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
-
-    struct RecordingBackend {
-        config: SandboxConfig,
-        seen_env: Mutex<Option<BTreeMap<String, String>>>,
-    }
-
-    impl Backend for RecordingBackend {
-        fn probe_support() -> Result<()> {
-            Ok(())
-        }
-
-        fn spawn(&self, mut command: std::process::Command) -> Result<SandboxChild> {
-            command.env_clear();
-            command.envs(&self.config.env);
-            let seen = command
-                .get_envs()
-                .filter_map(|(key, value)| {
-                    value.map(|value| {
-                        (
-                            key.to_string_lossy().into_owned(),
-                            value.to_string_lossy().into_owned(),
-                        )
-                    })
-                })
-                .collect();
-            #[expect(clippy::unwrap_in_result, reason = "lock is never poisoned")]
-            {
-                *self.seen_env.lock().unwrap() = Some(seen);
-            }
-            Err(Error::Unsupported("recording backend never spawns".into()))
-        }
-    }
-
-    #[test]
-    fn spawn_scrubs_env_before_delegating() {
-        let config = SandboxConfig {
-            fs: vec![],
-            network: crate::policy::NetworkPolicy::Deny,
-            linux_ipc: crate::policy::IpcPolicy::Strict,
-            linux_user_namespaces: crate::policy::UserNamespacePolicy::Deny,
-            limits: crate::config::ResourceLimits::default(),
-            env: BTreeMap::from([("FOO".into(), "bar".into())]),
-            darwin_sandbox_profiles: vec![],
-            windows_cache_namespace: None,
-        };
-        let backend = RecordingBackend {
-            config: config.clone(),
-            seen_env: Mutex::new(None),
-        };
-        let mut cmd = std::process::Command::new("true");
-        cmd.env("SHOULD_NOT_SURVIVE", "1");
-        let _ = backend.spawn(cmd).unwrap_err();
-        assert_eq!(backend.seen_env.lock().unwrap().as_ref(), Some(&config.env));
-    }
+    fn spawn(&self, command: SandboxCommand) -> Result<SandboxChild>;
 }

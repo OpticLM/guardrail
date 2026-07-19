@@ -3,6 +3,7 @@
 use std::env;
 use std::fs;
 use std::hint::black_box;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use std::time::Duration;
@@ -23,6 +24,45 @@ fn main() {
                 exit(0);
             }
             exit(3);
+        }
+        "echo-stdio" => {
+            // Distinct markers per stream so redirection tests can tell the
+            // two apart.
+            if std::io::stdout().write_all(b"stdout-marker\n").is_err() {
+                exit(3);
+            }
+            if std::io::stderr().write_all(b"stderr-marker\n").is_err() {
+                exit(3);
+            }
+        }
+        "stdin-echo" => {
+            let mut buffer = Vec::new();
+            if std::io::stdin().read_to_end(&mut buffer).is_err() {
+                exit(3);
+            }
+            if std::io::stdout().write_all(&buffer).is_err() {
+                exit(3);
+            }
+        }
+        #[cfg(windows)]
+        "read-handle" => {
+            use std::os::windows::io::{FromRawHandle, RawHandle};
+
+            let raw = required_arg(&args, 2)
+                .parse::<usize>()
+                .unwrap_or_else(|_| exit(2));
+            // SAFETY: the raw value names a handle only if the parent let it
+            // be inherited; ManuallyDrop ensures an arbitrary value is never
+            // closed, and the process exits right after the read attempt.
+            let mut file =
+                std::mem::ManuallyDrop::new(unsafe { fs::File::from_raw_handle(raw as RawHandle) });
+            // The test target is a non-empty file, so one readable byte
+            // proves the handle actually reached this process.
+            let mut buffer = [0u8; 1];
+            match file.read_exact(&mut buffer) {
+                Ok(()) => exit(0),
+                Err(_) => exit(3),
+            }
         }
         "alloc" => {
             let mb = required_arg(&args, 2)
@@ -72,7 +112,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: guardrail-windows-probe <echo-env|check-env|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind [host]> ..."
+                "usage: guardrail-windows-probe <echo-env|check-env|echo-stdio|stdin-echo|read-handle|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind [host]> ..."
             );
             exit(2);
         }

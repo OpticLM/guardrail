@@ -6,24 +6,27 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use guardrail_core::{
-    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig, StdioMode,
+    UserNamespacePolicy,
 };
 
 pub fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_guardrail-probe"))
 }
 
-pub fn probe_command() -> Command {
-    Command::new(probe_path())
+pub fn probe_command() -> SandboxCommand {
+    SandboxCommand::new(probe_path())
 }
 
-pub fn probe(args: &[&str]) -> Command {
-    let mut c = probe_command();
-    c.args(args).stdout(Stdio::null()).stderr(Stdio::null());
-    c
+pub fn probe(args: &[&str]) -> SandboxCommand {
+    let mut command = probe_command();
+    command.args = args.iter().copied().map(Into::into).collect();
+    command.stdout = StdioMode::Null;
+    command.stderr = StdioMode::Null;
+    command
 }
 
 /// Base grants required to execute the test probe under Landlock.

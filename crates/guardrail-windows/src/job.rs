@@ -17,11 +17,7 @@ use windows_sys::Win32::System::JobObjects::{
 use crate::handle::{bool_result, owned_handle_from_raw};
 
 pub(crate) fn create(config: &SandboxConfig) -> Result<OwnedHandle> {
-    // SAFETY: null security attributes and an unnamed job are valid inputs.
-    // The returned raw handle is transferred into OwnedHandle below.
-    let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    let job =
-        unsafe { owned_handle_from_raw(raw) }.map_err(|err| Error::confinement("job", err))?;
+    let job = create_raw().map_err(|err| Error::confinement("job", err))?;
 
     let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -70,6 +66,33 @@ pub(crate) fn create(config: &SandboxConfig) -> Result<OwnedHandle> {
         info.BasicLimitInformation.PerJobUserTimeLimit = ticks;
     }
 
+    set_extended_limits(&job, &info).map_err(|err| Error::confinement("job", err))?;
+
+    Ok(job)
+}
+
+/// Create a kill-on-close job that owns an inert handle broker.
+pub(crate) fn create_kill_on_close() -> io::Result<OwnedHandle> {
+    let job = create_raw()?;
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    set_extended_limits(&job, &info)?;
+    Ok(job)
+}
+
+fn create_raw() -> io::Result<OwnedHandle> {
+    // SAFETY: null security attributes and an unnamed job are valid inputs.
+    // The returned raw handle is transferred into OwnedHandle below.
+    let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+    // SAFETY: CreateJobObjectW returned a unique owned handle, validated by
+    // owned_handle_from_raw before ownership transfers to OwnedHandle.
+    unsafe { owned_handle_from_raw(raw) }
+}
+
+fn set_extended_limits(
+    job: &OwnedHandle,
+    info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+) -> io::Result<()> {
     // SAFETY: `job` is a valid Job Object handle. `info` points to a properly
     // initialized JOBOBJECT_EXTENDED_LIMIT_INFORMATION for the duration of the
     // call, and the byte length matches the structure.
@@ -81,7 +104,5 @@ pub(crate) fn create(config: &SandboxConfig) -> Result<OwnedHandle> {
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         )
     };
-    bool_result(ok).map_err(|err| Error::confinement("job", err))?;
-
-    Ok(job)
+    bool_result(ok)
 }

@@ -9,23 +9,20 @@
 //! Landlock calls.
 
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
 
-use guardrail_core::{Backend, Error, FsAccess};
+use guardrail_core::{Backend, Error, FsAccess, SandboxCommand};
 use guardrail_linux::LinuxBackend;
 use tempfile::TempDir;
 
 mod common;
 
-fn probe(args: &[&str]) -> Command {
+fn probe(args: &[&str]) -> SandboxCommand {
     common::probe(args)
 }
 
 /// Run the probe under `config`, return whether it exited 0 (allowed).
 fn allowed(config: &guardrail_core::SandboxConfig, args: &[&str]) -> bool {
-    let mut cmd = probe(args);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(args);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -52,9 +49,7 @@ fn read_rule_does_not_grant_execute() {
     let exe_dir = common::probe_path().parent().unwrap().to_path_buf();
     let mut config = common::read_only_base();
     config.fs.extend([FsAccess::ReadAllow(exe_dir)]);
-    let mut cmd = probe(&["echo-env", "PATH"]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(&["echo-env", "PATH"]);
     let result = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd);
@@ -86,9 +81,7 @@ fn write_rule_does_not_grant_execute() {
 
     let mut config = common::base();
     config.fs.extend([FsAccess::WriteAllow(tmp.path().into())]);
-    let mut cmd = Command::new(&copied_probe);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = SandboxCommand::new(&copied_probe);
     let result = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd);
@@ -299,9 +292,6 @@ fn missing_deny_descendant_inside_allow_fails_before_spawn() {
         FsAccess::ReadDeny(missing),
     ]);
 
-    let mut cmd = probe(&["echo-env", "PATH"]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
     let result = LinuxBackend::new(config);
 
     assert!(matches!(
@@ -316,14 +306,8 @@ fn missing_deny_descendant_inside_allow_fails_before_spawn() {
 /// Run `args` under an already-constructed backend, returning whether the
 /// probe exited 0. Unlike [`allowed`], this reuses the backend so tests can
 /// change the filesystem between construction and spawn.
-fn spawn_allowed(
-    backend: &LinuxBackend,
-    config: &guardrail_core::SandboxConfig,
-    args: &[&str],
-) -> bool {
-    let mut cmd = probe(args);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+fn spawn_allowed(backend: &LinuxBackend, args: &[&str]) -> bool {
+    let cmd = probe(args);
     let mut child = backend.spawn(cmd).expect("spawn");
     child.wait().expect("wait").success()
 }
@@ -361,23 +345,18 @@ fn files_created_after_backend_construction_follow_the_ordered_policy() {
     std::fs::write(&late_secret, b"late").unwrap();
 
     assert!(
-        spawn_allowed(&backend, &config, &["read-file", future.to_str().unwrap()]),
+        spawn_allowed(&backend, &["read-file", future.to_str().unwrap()]),
         "a sibling created after construction matches the parent allow"
     );
     assert!(
         !spawn_allowed(
             &backend,
-            &config,
             &["read-file", secret.join("key.txt").to_str().unwrap()]
         ),
         "the pre-existing denied descendant stays denied"
     );
     assert!(
-        !spawn_allowed(
-            &backend,
-            &config,
-            &["read-file", late_secret.to_str().unwrap()]
-        ),
+        !spawn_allowed(&backend, &["read-file", late_secret.to_str().unwrap()]),
         "a descendant created after construction under the denied subtree stays denied"
     );
 }
@@ -407,9 +386,7 @@ fn file_created_while_child_is_running_is_readable() {
     let backend = LinuxBackend::new(config.clone()).expect("backend");
 
     let appearing = tmp.path().join("appears.txt");
-    let mut cmd = probe(&["wait-read-file", appearing.to_str().unwrap(), "10"]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(&["wait-read-file", appearing.to_str().unwrap(), "10"]);
     let mut child = backend.spawn(cmd).expect("spawn");
 
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -456,27 +433,15 @@ fn reallowed_grandchild_stays_live_under_denied_parent() {
     std::fs::write(&new_sibling, b"sibling").unwrap();
 
     assert!(
-        spawn_allowed(
-            &backend,
-            &config,
-            &["read-file", new_grand.to_str().unwrap()]
-        ),
+        spawn_allowed(&backend, &["read-file", new_grand.to_str().unwrap()]),
         "a file created after construction in the re-allowed grandchild is readable"
     );
     assert!(
-        !spawn_allowed(
-            &backend,
-            &config,
-            &["read-file", new_hidden.to_str().unwrap()]
-        ),
+        !spawn_allowed(&backend, &["read-file", new_hidden.to_str().unwrap()]),
         "a file created after construction in the denied parent stays hidden"
     );
     assert!(
-        spawn_allowed(
-            &backend,
-            &config,
-            &["read-file", new_sibling.to_str().unwrap()]
-        ),
+        spawn_allowed(&backend, &["read-file", new_sibling.to_str().unwrap()]),
         "a sibling outside the denied parent is readable"
     );
 }
@@ -513,7 +478,6 @@ fn write_deny_under_write_allow_is_readonly_but_readable() {
     assert!(
         spawn_allowed(
             &backend,
-            &config,
             &["write-file", tmp.path().join("new.txt").to_str().unwrap()]
         ),
         "writes under the allow keep working"
@@ -521,25 +485,23 @@ fn write_deny_under_write_allow_is_readonly_but_readable() {
     assert!(
         !spawn_allowed(
             &backend,
-            &config,
             &["write-file", locked.join("x.txt").to_str().unwrap()]
         ),
         "creating files under the write deny is denied"
     );
     assert!(
-        !spawn_allowed(&backend, &config, &["write-file", late.to_str().unwrap()]),
+        !spawn_allowed(&backend, &["write-file", late.to_str().unwrap()]),
         "writing a file created after construction under the write deny is denied"
     );
     assert!(
         spawn_allowed(
             &backend,
-            &config,
             &["read-file", locked.join("data.txt").to_str().unwrap()]
         ),
         "reads under a write-only deny keep working"
     );
     assert!(
-        spawn_allowed(&backend, &config, &["read-file", late.to_str().unwrap()]),
+        spawn_allowed(&backend, &["read-file", late.to_str().unwrap()]),
         "reads of files created after construction under a write-only deny keep working"
     );
 }

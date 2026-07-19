@@ -1,16 +1,10 @@
 #![cfg(target_os = "linux")]
 
 //! Verifies the §3 "unconditional env scrub": the child sees ONLY the env vars
-//! added to the builder, never the parent's inherited ones.
+//! in `SandboxConfig::env`, never the parent's inherited ones.
 
-use std::process::Command;
-
-use guardrail_core::Backend;
+use guardrail_core::{Backend, StdioMode};
 use guardrail_linux::LinuxBackend;
-
-fn probe() -> Command {
-    common::probe_command()
-}
 
 mod common;
 
@@ -21,17 +15,15 @@ fn inherited_env_is_cleared() {
     unsafe { std::env::set_var("GUARDRAIL_SECRET", "leaked") };
 
     let config = common::base();
-    let mut cmd = probe();
-    cmd.arg("echo-env").arg("GUARDRAIL_SECRET");
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let mut cmd = common::probe_command();
+    cmd.args = vec!["echo-env".into(), "GUARDRAIL_SECRET".into()];
+    cmd.stdout = StdioMode::Piped;
 
-    let child = LinuxBackend::new(config.clone())
+    let child = LinuxBackend::new(config)
         .expect("backend")
         .spawn(cmd)
         .expect("spawn");
-    let out = child.into_inner().wait_with_output().expect("wait");
+    let out = child.wait_with_output().expect("wait");
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -44,16 +36,14 @@ fn inherited_env_is_cleared() {
 fn explicitly_added_env_reaches_child() {
     let mut config = common::base();
     config.env.insert("GREETING".into(), "hello".into());
-    let mut cmd = probe();
-    cmd.arg("echo-env").arg("GREETING");
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let mut cmd = common::probe_command();
+    cmd.args = vec!["echo-env".into(), "GREETING".into()];
+    cmd.stdout = StdioMode::Piped;
 
-    let child = LinuxBackend::new(config.clone())
+    let child = LinuxBackend::new(config)
         .expect("backend")
         .spawn(cmd)
         .expect("spawn");
-    let out = child.into_inner().wait_with_output().expect("wait");
+    let out = child.wait_with_output().expect("wait");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
 }

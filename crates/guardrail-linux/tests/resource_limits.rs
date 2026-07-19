@@ -16,10 +16,7 @@ fn memory_limit_blocks_large_allocation() {
     // 64 MiB address-space cap; ask the child to grab 512 MiB.
     let mut config = common::base();
     config.limits.memory_bytes = Some(64 * 1024 * 1024);
-    let mut cmd = common::probe(&[]);
-    cmd.arg("alloc").arg("512");
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["alloc", "512"]);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -36,10 +33,7 @@ fn without_limit_the_same_allocation_succeeds() {
     // Control: no cap → the 512 MiB allocation succeeds. Guards against the
     // probe being broken in a way that makes the test above pass spuriously.
     let config = common::base();
-    let mut cmd = common::probe(&[]);
-    cmd.arg("alloc").arg("512");
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["alloc", "512"]);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -56,10 +50,7 @@ fn cpu_time_limit_kills_busy_loop() {
     // 1s CPU cap on an infinite spin. RLIMIT_CPU soft→SIGXCPU, hard→SIGKILL.
     let mut config = common::base();
     config.limits.cpu_time_secs = Some(1);
-    let mut cmd = common::probe(&[]);
-    cmd.arg("spin");
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["spin"]);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -91,9 +82,7 @@ fn process_limit_blocks_fork() {
     }
     let mut config = common::base();
     config.limits.max_processes = Some(1);
-    let mut cmd = common::probe(&["fork"]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["fork"]);
     let mut child = LinuxBackend::new(config)
         .expect("backend")
         .spawn(cmd)
@@ -111,9 +100,7 @@ fn without_limit_the_same_fork_succeeds() {
     // Control: guards against the fork probe being broken in a way that makes
     // the denial test above pass spuriously.
     let config = common::base();
-    let mut cmd = common::probe(&["fork"]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["fork"]);
     let mut child = LinuxBackend::new(config)
         .expect("backend")
         .spawn(cmd)

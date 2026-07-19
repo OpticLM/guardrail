@@ -6,16 +6,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use guardrail_core::{
-    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    UserNamespacePolicy,
 };
 
 pub fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_guardrail-macos-probe"))
 }
 
-pub fn probe(args: &[&str]) -> Command {
-    let mut command = Command::new(probe_path());
-    command.args(args);
+pub fn probe(args: &[&str]) -> SandboxCommand {
+    let mut command = SandboxCommand::new(probe_path());
+    command.args = args.iter().copied().map(Into::into).collect();
     command
 }
 

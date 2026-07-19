@@ -1,9 +1,8 @@
 #![cfg(windows)]
 
-use std::process::Command;
 use std::sync::Arc;
 
-use guardrail_core::{Backend, Result, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
 use crate::{cache, job, process};
 
@@ -32,13 +31,11 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
-        command.env_clear();
-        command.envs(&self.config.env);
-
+    fn spawn(&self, command: SandboxCommand) -> Result<SandboxChild> {
         let job = job::create(&self.config)?;
         process::launch(
             command,
+            &self.config.env,
             job,
             Arc::clone(&self.appcontainer),
             self.config.network,

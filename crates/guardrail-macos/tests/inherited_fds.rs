@@ -72,9 +72,7 @@ fn sandboxed_child_cannot_use_the_leaked_fd() {
     let secret = LeakedSecret::create("sandboxed");
 
     let config = common::base();
-    let mut cmd = common::probe(&["read-fd", &secret.fd_arg(), SECRET]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["read-fd", &secret.fd_arg(), SECRET]);
     let mut child = MacosBackend::new(config)
         .expect("backend")
         .spawn(cmd)

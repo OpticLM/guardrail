@@ -12,7 +12,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
@@ -35,8 +36,8 @@ use windows_sys::core::PWSTR;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn probe() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
+fn probe() -> SandboxCommand {
+    SandboxCommand::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
 }
 
 fn probe_dir() -> PathBuf {
@@ -46,7 +47,7 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+fn spawn_child(config: &SandboxConfig, command: SandboxCommand) -> guardrail_core::SandboxChild {
     WindowsBackend::new(config.clone())
         .expect("backend")
         .spawn(command)
@@ -56,10 +57,8 @@ fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::Sand
 #[test]
 fn default_network_deny_still_launches_process_in_appcontainer() {
     let config = builder_with_system_root();
-    let mut command = Command::new("cmd");
-    command.args(["/C", "exit", "0"]);
-    command.env_clear();
-    command.envs(&config.env);
+    let mut command = SandboxCommand::new("cmd");
+    command.args = vec!["/C".into(), "exit".into(), "0".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -77,9 +76,7 @@ fn filesystem_read_is_denied_without_grant() {
     let mut config = builder_with_system_root();
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
-    command.arg("read-file").arg(&file);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["read-file".into(), file.clone().into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -103,9 +100,7 @@ fn read_grant_allows_reading_a_declared_directory() {
         FsAccess::ReadAllow(temp.path().into()),
     ]);
     let mut command = probe();
-    command.arg("read-file").arg(&file);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["read-file".into(), file.clone().into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -125,9 +120,7 @@ fn write_is_denied_under_read_grant() {
         FsAccess::ReadAllow(temp.path().into()),
     ]);
     let mut command = probe();
-    command.arg("write-file").arg(&file);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["write-file".into(), file.clone().into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -154,9 +147,7 @@ fn write_grant_allows_writing_under_declared_directory() {
         FsAccess::WriteAllow(temp.path().into()),
     ]);
     let mut command = probe();
-    command.arg("write-file").arg(&file);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["write-file".into(), file.clone().into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -217,11 +208,11 @@ fn lpac_removes_all_packages_but_keeps_package_and_capability_allows() {
     );
 
     let mut command = probe();
-    command
-        .args(["delayed-read-file", "5000"])
-        .arg(&package_grant);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "delayed-read-file".into(),
+        "5000".into(),
+        package_grant.clone().into(),
+    ];
     let mut package_child = spawn_child(&config, command);
     let package_sid = appcontainer_sid(package_child.id());
     let all_packages_sid = well_known_sid(WinBuiltinAnyPackageSid);
@@ -286,9 +277,11 @@ fn read_allow_with_read_deny_keeps_parent_inheritance_for_future_sibling() {
     ]);
 
     let mut command = probe();
-    command.args(["delayed-read-file", "750"]).arg(&future);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "delayed-read-file".into(),
+        "750".into(),
+        future.clone().into(),
+    ];
     let mut child = spawn_child(&config, command);
     fs::write(&future, "future").expect("write future sibling");
     let status = child.wait().expect("wait");
@@ -314,9 +307,11 @@ fn future_child_of_denied_directory_inherits_deny() {
         FsAccess::ReadDeny(denied),
     ]);
     let mut command = probe();
-    command.args(["delayed-read-file", "750"]).arg(&future);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "delayed-read-file".into(),
+        "750".into(),
+        future.clone().into(),
+    ];
     let mut child = spawn_child(&config, command);
     fs::write(&future, "secret").expect("write future denied child");
 
@@ -364,9 +359,11 @@ fn dropping_backend_and_child_removes_filesystem_deny_ace() {
     ]);
     let backend = WindowsBackend::new(config.clone()).expect("backend");
     let mut command = probe();
-    command.args(["delayed-read-file", "250"]).arg(&secret);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "delayed-read-file".into(),
+        "250".into(),
+        secret.clone().into(),
+    ];
     let mut child = backend.spawn(command).expect("spawn");
     let package_sid = appcontainer_sid(child.id());
     let filesystem_sid = filesystem_restricting_sid(child.id());
@@ -510,9 +507,11 @@ fn default_network_deny_blocks_outbound_tcp_connect() {
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.network = NetworkPolicy::Deny;
     let mut command = probe();
-    command.args(["tcp-connect", "127.0.0.1", &port]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "tcp-connect".into(),
+        "127.0.0.1".into(),
+        port.clone().into(),
+    ];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -537,9 +536,11 @@ fn outbound_only_allows_loopback_connect_when_host_allows_appcontainer_loopback(
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.network = NetworkPolicy::OutboundOnly;
     let mut command = probe();
-    command.args(["tcp-connect", "127.0.0.1", &port]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "tcp-connect".into(),
+        "127.0.0.1".into(),
+        port.clone().into(),
+    ];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -556,9 +557,7 @@ fn full_network_allows_non_loopback_tcp_bind() {
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.network = NetworkPolicy::Full;
     let mut command = probe();
-    command.args(["tcp-bind", "0.0.0.0"]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["tcp-bind".into(), "0.0.0.0".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -595,9 +594,7 @@ fn builder_with_system_root() -> SandboxConfig {
 
 fn probe_file_allowed(config: &SandboxConfig, operation: &str, path: &Path) -> bool {
     let mut command = probe();
-    command.arg(operation).arg(path);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![operation.into(), path.as_os_str().into()];
     let mut child = spawn_child(config, command);
     child.wait().expect("wait").success()
 }

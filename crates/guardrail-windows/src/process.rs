@@ -1,75 +1,136 @@
-//! Suspended Windows process launch under a Job Object.
+//! Suspended Windows process launch under a Job Object, with isolated handle
+//! inheritance through an inert helper process.
 
 #![cfg(windows)]
 
 use std::any::Any;
-use std::ffi::OsStr;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, OwnedHandle};
-use std::process::Command;
-use std::sync::Arc;
+use std::os::windows::io::{AsRawHandle, OwnedHandle, RawHandle};
+use std::process::{ChildStderr, ChildStdin, ChildStdout};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::{io, mem, ptr};
 
-use guardrail_core::{Error, NetworkPolicy, Result, SandboxChild};
+use guardrail_core::{
+    Error, NetworkPolicy, Result, SandboxChild, SandboxCommand, StdioMode, WindowsChildStdio,
+};
+use windows_sys::Win32::Foundation::{
+    DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ACCESS_DENIED,
+    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, GetTokenInformation, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenGroups,
     TokenUser,
 };
-use windows_sys::Win32::Storage::FileSystem::SearchPathW;
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, GetFileType, OPEN_EXISTING,
+    PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, SearchPathW,
+};
+use windows_sys::Win32::System::Console::{
+    GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
+use windows_sys::Win32::System::Pipes::{
+    CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTUPINFOEXW,
-    TerminateProcess, UpdateProcThreadAttribute,
+    GetCurrentProcessId, InitializeProcThreadAttributeList, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
+    UpdateProcThreadAttribute,
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
 
 use crate::cache::{CachedAppContainer, raw_security_capabilities};
 use crate::handle::{bool_result, owned_handle_from_raw, resume_then_close_thread};
+use crate::job;
 
 const SE_GROUP_INTEGRITY: u32 = 0x20;
 
 pub(crate) fn launch(
-    command: Command,
+    command: SandboxCommand,
+    env: &BTreeMap<String, String>,
     job: OwnedHandle,
     appcontainer: Arc<CachedAppContainer>,
     network: NetworkPolicy,
 ) -> Result<SandboxChild> {
-    let mut command_line = command_line_block(&command);
-    let environment = environment_block(&command);
-    let application_name = application_name(&command);
+    let mut command_line = command_line_block(&command.program, &command.args);
+    let environment = environment_block(env);
+    let application_name = application_name(&command.program);
     let application_name_ptr = application_name
         .as_ref()
         .map_or(ptr::null(), |wide| wide.as_ptr());
     let cwd = command
-        .get_current_dir()
+        .current_dir
+        .as_ref()
         .map(|path| wide_null(path.as_os_str()));
     let cwd_ptr = cwd.as_ref().map_or(ptr::null(), |wide| wide.as_ptr());
+
+    let stdio =
+        prepare_stdio(command.stdin, command.stdout, command.stderr).map_err(Error::Spawn)?;
+    // PROC_THREAD_ATTRIBUTE_HANDLE_LIST requires inheritable handles. Keep
+    // duplicable copies in an inert helper process rather than this
+    // multithreaded host, so unrelated concurrent CreateProcess calls cannot
+    // receive file, pipe, or device handles. Real consoles take the
+    // creation-time inheritance path described by HandleBroker::new.
+    let mut owned_broker = None;
+    let broker: &HandleBroker = if stdio.has_console_handle() {
+        owned_broker.insert(
+            HandleBroker::new(Some(&stdio))
+                .map_err(|err| Error::confinement("handle broker", err))?,
+        )
+    } else {
+        handle_broker().map_err(|err| Error::confinement("handle broker", err))?
+    };
+    let brokered_stdio =
+        BrokeredStdio::new(broker, &stdio).map_err(|err| Error::confinement("stdio", err))?;
 
     let mut startup = STARTUPINFOEXW {
         StartupInfo: windows_sys::Win32::System::Threading::STARTUPINFOW {
             cb: mem::size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: brokered_stdio.stdin.raw,
+            hStdOutput: brokered_stdio.stdout.raw,
+            hStdError: brokered_stdio.stderr.raw,
             ..windows_sys::Win32::System::Threading::STARTUPINFOW::default()
         },
         ..STARTUPINFOEXW::default()
     };
     // UpdateProcThreadAttribute retains these pointers until the attribute list
-    // is destroyed, so both pointees must be declared before the list.
+    // is destroyed, so every pointee must be declared before the list.
     let mut security_capabilities = appcontainer.security_capabilities(network)?;
     let mut all_application_packages_policy =
         Box::new(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT);
+    let mut inheritable_handles: [HANDLE; 3] = [
+        brokered_stdio.stdin.raw,
+        brokered_stdio.stdout.raw,
+        brokered_stdio.stderr.raw,
+    ];
+    let mut parent_process = broker.process.as_raw_handle();
     let mut attributes =
-        AttributeList::new(2).map_err(|err| Error::confinement("appcontainer", err))?;
+        AttributeList::new(4).map_err(|err| Error::confinement("appcontainer", err))?;
     attributes
         .update_security_capabilities(raw_security_capabilities(&mut security_capabilities))
         .map_err(|err| Error::confinement("appcontainer", err))?;
     attributes
         .opt_out_all_application_packages(all_application_packages_policy.as_mut())
         .map_err(|err| Error::confinement("appcontainer", err))?;
+    // Restrict inheritance to exactly the three standard handles so no other
+    // transiently-inheritable parent handle can leak into the sandbox even
+    // though bInheritHandles must be TRUE for stdio to cross.
+    attributes
+        .update_handle_list(&mut inheritable_handles)
+        .map_err(|err| Error::confinement("handle hygiene", err))?;
+    attributes
+        .update_parent_process(&mut parent_process)
+        .map_err(|err| Error::confinement("handle broker", err))?;
     startup.lpAttributeList = attributes.as_mut_ptr();
     let restricted_token = restricted_token(appcontainer.restricting_sid())
         .map_err(|err| Error::confinement("restricted-token", err))?;
@@ -79,8 +140,8 @@ pub(crate) fn launch(
     // SAFETY: all pointers either are null or point to nul-terminated UTF-16
     // buffers that outlive the call. `command_line` is mutable because
     // CreateProcessAsUserW may rewrite its command-line buffer. The restricted
-    // token, extended startup attribute list, and SECURITY_CAPABILITIES outlive
-    // the call.
+    // token, extended startup attribute list, SECURITY_CAPABILITIES, helper
+    // process, and three helper-owned standard handles outlive the call.
     let created = unsafe {
         CreateProcessAsUserW(
             restricted_token.as_raw_handle(),
@@ -88,7 +149,7 @@ pub(crate) fn launch(
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
-            0,
+            1,
             CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
             environment.as_ptr().cast(),
             cwd_ptr,
@@ -96,9 +157,26 @@ pub(crate) fn launch(
             &mut process_info,
         )
     };
-    bool_result(created).map_err(Error::Spawn)?;
+    let create_result = bool_result(created).map_err(Error::Spawn);
+    // The target has inherited its own copies on success. On failure these
+    // were never consumed. Either way, remove the transient broker copies now.
+    drop(brokered_stdio);
+    create_result?;
 
+    // The child holds its own inherited copies now, so close our local source
+    // handles before the remaining confinement steps.
+    let PreparedStdio {
+        child_stdin,
+        child_stdout,
+        child_stderr,
+        parent: parent_stdio,
+    } = stdio;
+    drop((child_stdin, child_stdout, child_stderr));
+
+    // SAFETY: on success both PROCESS_INFORMATION handles are valid and owned
+    // by this process; ownership transfers to the OwnedHandles here.
     let process = unsafe { owned_handle_from_raw(process_info.hProcess) }.map_err(Error::Spawn)?;
+    // SAFETY: as above for the primary thread handle.
     let thread = match unsafe { owned_handle_from_raw(process_info.hThread) } {
         Ok(thread) => thread,
         Err(err) => {
@@ -122,12 +200,532 @@ pub(crate) fn launch(
     }
 
     let pid = process_info.dwProcessId;
-    let guards: Vec<Box<dyn Any + Send>> = vec![Box::new(appcontainer)];
+    let mut guards: Vec<Box<dyn Any + Send>> = vec![Box::new(appcontainer)];
+    if let Some(broker) = owned_broker {
+        // A target inheriting a real console handle must keep its
+        // launch-specific broker (and the broker's outer Job Object) alive.
+        guards.push(Box::new(broker));
+    }
     // SAFETY: the owned process handle, owned job handle, and pid all come
     // from the successful CreateProcessW + AssignProcessToJobObject sequence
-    // above and are transferred into SandboxChild. The cleanup guards only own
-    // AppContainer/ACL cleanup state and are dropped after the raw handles.
-    Ok(unsafe { SandboxChild::from_windows_handles_with_guards(process, job, pid, guards) })
+    // above and are transferred into SandboxChild together with the parent
+    // pipe ends. The cleanup guards own AppContainer/ACL cleanup state and,
+    // when required, the launch-specific handle broker; all are dropped after
+    // the raw child and Job Object handles.
+    Ok(unsafe {
+        SandboxChild::from_windows_handles_with_guards(process, job, pid, parent_stdio, guards)
+    })
+}
+
+/// An inert process whose handle table is the source for explicit inheritance.
+///
+/// Windows requires every handle in PROC_THREAD_ATTRIBUTE_HANDLE_LIST to be
+/// inheritable. Keeping duplicable temporary handles here, rather than in the
+/// host, prevents unrelated host process launches from inheriting them. The
+/// helper never executes user code: its primary thread stays suspended, and
+/// its Job Object terminates it when the owner closes the job handle.
+struct HandleBroker {
+    // Drop the job first so it terminates the suspended process before the
+    // process handle itself closes.
+    _job: OwnedHandle,
+    process: OwnedHandle,
+    // Raw handle values are process-local scalars. Store them as integers so
+    // the broker itself remains Send + Sync; they are converted back only for
+    // Win32 calls that name handles in the broker's table.
+    console_stdio: [usize; 3],
+}
+
+impl HandleBroker {
+    fn new(stdio: Option<&PreparedStdio>) -> io::Result<Self> {
+        let job = job::create_kill_on_close()?;
+        let console_copies = ConsoleCopies::new(stdio)?;
+        let console_stdio = console_copies.remote_values();
+        let mut inherited_console_handles = console_copies.raw_handles();
+        let executable = std::env::current_exe()?;
+        let application = wide_null(executable.as_os_str());
+        let mut command_line = quote_arg(executable.as_os_str());
+        command_line.push(0);
+        let mut startup = STARTUPINFOEXW {
+            StartupInfo: STARTUPINFOW {
+                cb: mem::size_of::<STARTUPINFOW>() as u32,
+                ..STARTUPINFOW::default()
+            },
+            ..STARTUPINFOEXW::default()
+        };
+        let mut creation_flags = CREATE_SUSPENDED;
+        let mut inherit_handles = 0;
+        let mut attributes = if inherited_console_handles.is_empty() {
+            None
+        } else {
+            Some(AttributeList::new(1)?)
+        };
+
+        if let Some(attributes) = attributes.as_mut() {
+            // Unlike files and pipes, Windows console handles cannot be
+            // duplicated for use by another process. Share them with this
+            // launch-specific broker during its creation instead. The list
+            // still restricts what the broker receives to those console
+            // handles, and inherited handles keep the same numeric values.
+            attributes.update_handle_list(&mut inherited_console_handles)?;
+            startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+            startup.lpAttributeList = attributes.as_mut_ptr();
+            creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+            inherit_handles = 1;
+        }
+        let mut process_info = PROCESS_INFORMATION::default();
+
+        // SAFETY: application and command_line are nul-terminated buffers
+        // that outlive this call. If present, the extended attribute list and
+        // its console handles also outlive the call. All other optional
+        // pointers are null, and process_info is a valid out-pointer.
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command_line.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                inherit_handles,
+                creation_flags,
+                ptr::null(),
+                ptr::null(),
+                &startup.StartupInfo,
+                &mut process_info,
+            )
+        };
+        bool_result(created)?;
+
+        // SAFETY: successful CreateProcessW returns two unique owned handles.
+        let process = unsafe { owned_handle_from_raw(process_info.hProcess) }?;
+        // SAFETY: as above for the primary thread handle.
+        let thread = match unsafe { owned_handle_from_raw(process_info.hThread) } {
+            Ok(thread) => thread,
+            Err(err) => {
+                terminate_process(&process);
+                return Err(err);
+            }
+        };
+
+        // SAFETY: both handles are live and owned by this process. The helper
+        // is still suspended, so it cannot create descendants before joining
+        // the process-lifetime cleanup job.
+        let assigned =
+            unsafe { AssignProcessToJobObject(job.as_raw_handle(), process.as_raw_handle()) };
+        if let Err(err) = bool_result(assigned) {
+            terminate_process(&process);
+            return Err(err);
+        }
+
+        // Closing the primary thread handle does not resume it. The process
+        // remains inert until the job terminates it.
+        drop(thread);
+        Ok(Self {
+            _job: job,
+            process,
+            console_stdio,
+        })
+    }
+
+    fn inherit_stream(
+        &self,
+        source: RawHandle,
+        stream_index: usize,
+    ) -> io::Result<RemoteHandle<'_>> {
+        if is_console_handle(source) {
+            let raw = *self.console_stdio.get(stream_index).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid standard stream index")
+            })? as HANDLE;
+            if raw.is_null() {
+                return Err(io::Error::other(
+                    "console handle was not shared with the launch-specific broker",
+                ));
+            }
+            return Ok(RemoteHandle { broker: self, raw });
+        }
+
+        self.duplicate_inheritable(source)
+    }
+
+    fn duplicate_inheritable(&self, source: RawHandle) -> io::Result<RemoteHandle<'_>> {
+        // SAFETY: GetCurrentProcess returns a process pseudo-handle and cannot
+        // fail. The broker process handle has PROCESS_DUP_HANDLE access because
+        // it came directly from CreateProcessW.
+        let current_process = unsafe { GetCurrentProcess() };
+        let mut duplicated = ptr::null_mut();
+        // SAFETY: source is live for this call, process handles are valid, and
+        // duplicated is a valid out-pointer. The returned scalar is a handle
+        // value in the broker's handle table, not in this process.
+        let ok = unsafe {
+            DuplicateHandle(
+                current_process,
+                source,
+                self.process.as_raw_handle(),
+                &mut duplicated,
+                0,
+                1,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        bool_result(ok)?;
+        Ok(RemoteHandle {
+            broker: self,
+            raw: duplicated,
+        })
+    }
+}
+
+fn handle_broker() -> io::Result<&'static HandleBroker> {
+    static BROKER: OnceLock<HandleBroker> = OnceLock::new();
+
+    if let Some(broker) = BROKER.get() {
+        return Ok(broker);
+    }
+
+    let candidate = HandleBroker::new(None)?;
+    if let Err(unused) = BROKER.set(candidate) {
+        // Another thread won initialization. Dropping this candidate closes
+        // its job, which terminates its suspended helper process.
+        drop(unused);
+    }
+    BROKER
+        .get()
+        .ok_or_else(|| io::Error::other("handle broker initialization did not persist"))
+}
+
+/// A handle value owned by the broker process.
+struct RemoteHandle<'a> {
+    broker: &'a HandleBroker,
+    raw: HANDLE,
+}
+
+impl Drop for RemoteHandle<'_> {
+    fn drop(&mut self) {
+        // SAFETY: raw is a live handle in broker.process. With
+        // DUPLICATE_CLOSE_SOURCE, a null target process closes that remote
+        // source without creating a local duplicate; Microsoft specifies that
+        // the source is closed even if DuplicateHandle reports an error.
+        let _closed = unsafe {
+            DuplicateHandle(
+                self.broker.process.as_raw_handle(),
+                self.raw,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                0,
+                DUPLICATE_CLOSE_SOURCE,
+            )
+        };
+    }
+}
+
+/// The broker-owned copies passed through the explicit inheritance list.
+struct BrokeredStdio<'a> {
+    stdin: RemoteHandle<'a>,
+    stdout: RemoteHandle<'a>,
+    stderr: RemoteHandle<'a>,
+}
+
+impl<'a> BrokeredStdio<'a> {
+    fn new(broker: &'a HandleBroker, stdio: &PreparedStdio) -> io::Result<Self> {
+        let stdin = broker.inherit_stream(stdio.child_stdin.as_raw_handle(), 0)?;
+        let stdout = broker.inherit_stream(stdio.child_stdout.as_raw_handle(), 1)?;
+        let stderr = broker.inherit_stream(stdio.child_stderr.as_raw_handle(), 2)?;
+        Ok(Self {
+            stdin,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+/// Inheritable host-local console copies used only while creating a
+/// launch-specific broker. Console handles are the one Windows handle class
+/// that cannot be duplicated directly into an already-running broker.
+struct ConsoleCopies {
+    handles: [Option<OwnedHandle>; 3],
+}
+
+impl ConsoleCopies {
+    fn new(stdio: Option<&PreparedStdio>) -> io::Result<Self> {
+        let mut handles = [None, None, None];
+        let Some(stdio) = stdio else {
+            return Ok(Self { handles });
+        };
+
+        for (slot, source) in [&stdio.child_stdin, &stdio.child_stdout, &stdio.child_stderr]
+            .into_iter()
+            .enumerate()
+        {
+            if is_console_handle(source.as_raw_handle()) {
+                let destination = handles.get_mut(slot).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid standard stream index")
+                })?;
+                *destination = Some(duplicate_local_with_inheritability(
+                    source.as_raw_handle(),
+                    true,
+                )?);
+            }
+        }
+
+        Ok(Self { handles })
+    }
+
+    fn raw_handles(&self) -> Vec<HANDLE> {
+        self.handles
+            .iter()
+            .filter_map(|handle| handle.as_ref().map(AsRawHandle::as_raw_handle))
+            .collect()
+    }
+
+    fn remote_values(&self) -> [usize; 3] {
+        std::array::from_fn(|slot| {
+            self.handles
+                .get(slot)
+                .and_then(Option::as_ref)
+                .map_or(0, |handle| handle.as_raw_handle() as usize)
+        })
+    }
+}
+
+/// Which way a standard stream flows, from the child's perspective.
+#[derive(Clone, Copy)]
+enum StreamDirection {
+    /// The child reads this stream (stdin).
+    Read,
+    /// The child writes this stream (stdout, stderr).
+    Write,
+}
+
+/// The three non-inheritable local stream sources plus the parent's retained
+/// pipe ends.
+struct PreparedStdio {
+    child_stdin: OwnedHandle,
+    child_stdout: OwnedHandle,
+    child_stderr: OwnedHandle,
+    parent: WindowsChildStdio,
+}
+
+impl PreparedStdio {
+    fn has_console_handle(&self) -> bool {
+        [&self.child_stdin, &self.child_stdout, &self.child_stderr]
+            .into_iter()
+            .any(|handle| is_console_handle(handle.as_raw_handle()))
+    }
+}
+
+/// Resolve the command's stdio modes into concrete local handles (issue #21):
+/// every mode yields a valid non-inheritable source for the handle broker, and
+/// `Piped` additionally retains our overlapped end for the caller.
+fn prepare_stdio(
+    stdin: StdioMode,
+    stdout: StdioMode,
+    stderr: StdioMode,
+) -> io::Result<PreparedStdio> {
+    let (child_stdin, ours_stdin) = child_stream(stdin, STD_INPUT_HANDLE, StreamDirection::Read)?;
+    let (child_stdout, ours_stdout) =
+        child_stream(stdout, STD_OUTPUT_HANDLE, StreamDirection::Write)?;
+    let (child_stderr, ours_stderr) =
+        child_stream(stderr, STD_ERROR_HANDLE, StreamDirection::Write)?;
+    Ok(PreparedStdio {
+        child_stdin,
+        child_stdout,
+        child_stderr,
+        // The pipe ends are overlapped handles, as these From impls require.
+        parent: WindowsChildStdio {
+            stdin: ours_stdin.map(ChildStdin::from),
+            stdout: ours_stdout.map(ChildStdout::from),
+            stderr: ours_stderr.map(ChildStderr::from),
+        },
+    })
+}
+
+/// Produce the local source handle for one stream, plus our retained overlapped
+/// pipe end when the mode is [`StdioMode::Piped`].
+fn child_stream(
+    mode: StdioMode,
+    stdio_id: STD_HANDLE,
+    direction: StreamDirection,
+) -> io::Result<(OwnedHandle, Option<OwnedHandle>)> {
+    match mode {
+        StdioMode::Inherit => {
+            // SAFETY: GetStdHandle takes a scalar id; the returned handle is
+            // borrowed from the process std slots, never closed here.
+            let current = unsafe { GetStdHandle(stdio_id) };
+            if current.is_null() || current == INVALID_HANDLE_VALUE {
+                // A detached parent (e.g. a GUI process) has no stream to
+                // share; hand the child the null device rather than an
+                // invalid handle.
+                Ok((open_null(direction)?, None))
+            } else {
+                Ok((duplicate_local(current)?, None))
+            }
+        }
+        StdioMode::Null => Ok((open_null(direction)?, None)),
+        StdioMode::Piped => {
+            let ours_readable = matches!(direction, StreamDirection::Write);
+            let (ours, theirs) = anon_pipe(ours_readable)?;
+            Ok((theirs, Some(ours)))
+        }
+        StdioMode::File(file) => Ok((duplicate_local(file.as_raw_handle())?, None)),
+    }
+}
+
+/// Duplicate `source` within this process without making the copy inheritable.
+/// The broker creates the inheritable copy in its isolated handle table later.
+fn duplicate_local(source: RawHandle) -> io::Result<OwnedHandle> {
+    duplicate_local_with_inheritability(source, false)
+}
+
+fn duplicate_local_with_inheritability(
+    source: RawHandle,
+    inheritable: bool,
+) -> io::Result<OwnedHandle> {
+    // SAFETY: GetCurrentProcess returns the process pseudo-handle and cannot
+    // fail; the pseudo-handle needs no closing.
+    let current_process = unsafe { GetCurrentProcess() };
+    let mut duplicated = ptr::null_mut();
+    // SAFETY: `source` is a live handle for the duration of this call and
+    // `duplicated` is a valid out-pointer.
+    let ok = unsafe {
+        DuplicateHandle(
+            current_process,
+            source,
+            current_process,
+            &mut duplicated,
+            0,
+            i32::from(inheritable),
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    bool_result(ok)?;
+    // SAFETY: on success the duplicate is a valid handle uniquely owned by us.
+    unsafe { owned_handle_from_raw(duplicated) }
+}
+
+fn is_console_handle(handle: RawHandle) -> bool {
+    let mut mode = 0;
+    // SAFETY: handle is borrowed and live for this call; mode is a valid
+    // out-pointer. GetConsoleMode requires GENERIC_READ, so a write-only
+    // character handle that fails with access denied is conservatively sent
+    // through the creation-time inheritance path too.
+    if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+        return true;
+    }
+    // SAFETY: GetLastError reads the calling thread's error state immediately
+    // after the failed GetConsoleMode call.
+    if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
+        return false;
+    }
+    // SAFETY: handle remains borrowed and live for this type query.
+    unsafe { GetFileType(handle) == FILE_TYPE_CHAR }
+}
+
+/// Open a non-inheritable handle to the null device, readable for stdin slots
+/// and writable for stdout/stderr slots.
+fn open_null(direction: StreamDirection) -> io::Result<OwnedHandle> {
+    let path = wide_null(OsStr::new(r"\\.\NUL"));
+    let access = match direction {
+        StreamDirection::Read => GENERIC_READ,
+        StreamDirection::Write => GENERIC_WRITE,
+    };
+    // SAFETY: the path is a nul-terminated UTF-16 buffer; null security
+    // attributes make the returned handle non-inheritable.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    // SAFETY: CreateFileW returns a uniquely owned handle or
+    // INVALID_HANDLE_VALUE, which owned_handle_from_raw rejects.
+    unsafe { owned_handle_from_raw(handle) }
+}
+
+/// Create a std-style anonymous stdio pipe pair: our end is asynchronous
+/// (`FILE_FLAG_OVERLAPPED`, as the `ChildStdin`/`ChildStdout`/`ChildStderr`
+/// conversions require), the child's end is synchronous and non-inheritable in
+/// this process. The broker creates its inheritable copy before launch.
+fn anon_pipe(ours_readable: bool) -> io::Result<(OwnedHandle, OwnedHandle)> {
+    // The capacity std uses; a typical Linux pipe default.
+    const PIPE_BUFFER_CAPACITY: u32 = 64 * 1024;
+    static PIPE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // SAFETY: GetCurrentProcessId reads process state and cannot fail.
+    let pid = unsafe { GetCurrentProcessId() };
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let name = format!(
+            r"\\.\pipe\guardrail.{pid}.{}",
+            PIPE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        let wide_name = wide_null(OsStr::new(&name));
+
+        let direction = if ours_readable {
+            PIPE_ACCESS_INBOUND
+        } else {
+            PIPE_ACCESS_OUTBOUND
+        };
+        // SAFETY: the name is a nul-terminated UTF-16 buffer outliving the
+        // call; the returned handle is checked and owned below.
+        let raw_ours = unsafe {
+            CreateNamedPipeW(
+                wide_name.as_ptr(),
+                direction | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                PIPE_BUFFER_CAPACITY,
+                PIPE_BUFFER_CAPACITY,
+                0,
+                ptr::null(),
+            )
+        };
+        // SAFETY: as above; null/INVALID_HANDLE_VALUE are rejected with the
+        // OS error preserved.
+        let ours = match unsafe { owned_handle_from_raw(raw_ours) } {
+            Ok(handle) => handle,
+            Err(err) => {
+                // FILE_FLAG_FIRST_PIPE_INSTANCE turns a name collision (e.g.
+                // a squatted name) into ERROR_ACCESS_DENIED; retry under a
+                // fresh name.
+                if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) && tries < 10 {
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+
+        let access = if ours_readable {
+            // FILE_READ_ATTRIBUTES lets the child answer attribute queries on
+            // its stdout/stderr (GetFileInformationByHandle and friends), as
+            // std grants on its own child pipe ends.
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES
+        } else {
+            GENERIC_READ
+        };
+        // SAFETY: name outlives the call; our unconnected single-instance
+        // server end guarantees this opens our pipe. Null security attributes
+        // make the handle non-inheritable, and omitting FILE_FLAG_OVERLAPPED
+        // keeps it synchronous.
+        let raw_theirs = unsafe {
+            CreateFileW(
+                wide_name.as_ptr(),
+                access,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        // SAFETY: as above.
+        let theirs = unsafe { owned_handle_from_raw(raw_theirs) }?;
+        return Ok((ours, theirs));
+    }
 }
 
 fn restricted_token(filesystem_sid: windows_sys::Win32::Security::PSID) -> io::Result<OwnedHandle> {
@@ -299,6 +897,46 @@ impl AttributeList {
         };
         bool_result(ok)
     }
+
+    /// Restrict handle inheritance to exactly `handles`. The array must stay
+    /// alive (and its handles open) until process creation has completed,
+    /// because the attribute retains the pointer.
+    fn update_handle_list(&mut self, handles: &mut [HANDLE]) -> io::Result<()> {
+        // SAFETY: `handles` points to live handle values and, per this method's
+        // contract, outlives the attribute list that retains the pointer; all
+        // other arguments are scalars or null.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_mut_ptr().cast(),
+                mem::size_of_val(handles),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        bool_result(ok)
+    }
+
+    /// Select the inert broker as the source process for handle inheritance.
+    fn update_parent_process(&mut self, process: &mut HANDLE) -> io::Result<()> {
+        // SAFETY: process points to a live process handle with
+        // PROCESS_CREATE_PROCESS access and outlives the attribute list; all
+        // remaining arguments are scalars or reserved null pointers.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+                ptr::from_mut(process).cast(),
+                mem::size_of::<HANDLE>(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        bool_result(ok)
+    }
 }
 
 impl Drop for AttributeList {
@@ -322,9 +960,9 @@ fn terminate_job(job: &OwnedHandle) {
     let _ = unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
 }
 
-fn command_line_block(command: &Command) -> Vec<u16> {
-    let mut out = quote_arg(command.get_program());
-    for arg in command.get_args() {
+fn command_line_block(program: &OsStr, args: &[OsString]) -> Vec<u16> {
+    let mut out = quote_arg(program);
+    for arg in args {
         out.push(b' ' as u16);
         out.extend(quote_arg(arg));
     }
@@ -332,8 +970,7 @@ fn command_line_block(command: &Command) -> Vec<u16> {
     out
 }
 
-fn application_name(command: &Command) -> Option<Vec<u16>> {
-    let program = command.get_program();
+fn application_name(program: &OsStr) -> Option<Vec<u16>> {
     if has_path_separator(program) {
         return Some(wide_null(program));
     }
@@ -411,18 +1048,15 @@ fn quote_arg_wide(arg: &[u16]) -> Vec<u16> {
     out
 }
 
-fn environment_block(command: &Command) -> Vec<u16> {
-    let mut entries = command
-        .get_envs()
-        .filter_map(|(key, value)| value.map(|value| (key, value)))
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|(key, _)| key.to_string_lossy().to_ascii_uppercase());
+fn environment_block(env: &BTreeMap<String, String>) -> Vec<u16> {
+    let mut entries = env.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(key, _)| key.to_ascii_uppercase());
 
     let mut block = Vec::new();
     for (key, value) in entries {
-        block.extend(key.encode_wide());
+        block.extend(OsStr::new(key.as_str()).encode_wide());
         block.push(b'=' as u16);
-        block.extend(value.encode_wide());
+        block.extend(OsStr::new(value.as_str()).encode_wide());
         block.push(0);
     }
     if block.is_empty() {
@@ -481,13 +1115,13 @@ mod tests {
     }
 
     #[test]
-    fn environment_block_contains_only_explicit_values() {
-        let mut command = Command::new("cmd");
-        command.env_clear();
-        command.env("ZED", "last");
-        command.env("ABC", "first");
+    fn environment_block_contains_only_configured_values() {
+        let env = BTreeMap::from([
+            ("ZED".to_owned(), "last".to_owned()),
+            ("ABC".to_owned(), "first".to_owned()),
+        ]);
 
-        let block = environment_block(&command);
+        let block = environment_block(&env);
         assert_eq!(
             wide_to_string(&block),
             "ABC=first\0ZED=last\0\0".to_string()
@@ -496,10 +1130,7 @@ mod tests {
 
     #[test]
     fn empty_environment_block_is_nul_terminated() {
-        let mut command = Command::new("cmd");
-        command.env_clear();
-
-        assert_eq!(environment_block(&command), vec![0, 0]);
+        assert_eq!(environment_block(&BTreeMap::new()), vec![0, 0]);
     }
 
     #[test]
@@ -513,10 +1144,72 @@ mod tests {
 
     #[test]
     fn resolves_bare_program_with_parent_search_path() {
-        let command = Command::new("cmd");
-        let resolved = application_name(&command).expect("cmd resolves");
+        let resolved = application_name(OsStr::new("cmd")).expect("cmd resolves");
         let resolved = wide_to_string(&resolved);
         assert!(resolved.to_ascii_lowercase().contains(r"\cmd.exe"));
         assert!(resolved.ends_with('\0'));
+    }
+
+    #[test]
+    fn command_line_block_quotes_program_and_args() {
+        let block = command_line_block(
+            OsStr::new(r"C:\tools\probe.exe"),
+            &["plain".into(), "two words".into()],
+        );
+        assert_eq!(
+            wide_to_string(&block),
+            "C:\\tools\\probe.exe plain \"two words\"\0"
+        );
+    }
+
+    #[test]
+    fn anon_pipe_ends_transfer_bytes_and_close_to_eof() {
+        use std::fs::File;
+        use std::io::{Read, Write};
+        use std::process::ChildStdout;
+
+        let (ours, theirs) = anon_pipe(true).expect("create stdio pipe");
+        // The child's synchronous end behaves like a regular file handle.
+        let mut writer = File::from(theirs);
+        writer.write_all(b"guardrail").expect("write child end");
+        drop(writer);
+
+        // Our end is overlapped, which is exactly what ChildStdout requires.
+        let mut reader = ChildStdout::from(ours);
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer).expect("read parent end");
+        assert_eq!(buffer, b"guardrail");
+    }
+
+    #[test]
+    fn prepared_stdio_handles_are_not_inheritable_in_host() {
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+
+        let stdio = prepare_stdio(StdioMode::Null, StdioMode::Piped, StdioMode::Piped)
+            .expect("prepare stdio");
+        for handle in [&stdio.child_stdin, &stdio.child_stdout, &stdio.child_stderr] {
+            let mut flags = 0;
+            // SAFETY: handle is live and flags is a valid out-pointer.
+            let queried = unsafe { GetHandleInformation(handle.as_raw_handle(), &mut flags) };
+            assert_ne!(queried, 0, "query handle flags");
+            assert_eq!(
+                flags & HANDLE_FLAG_INHERIT,
+                0,
+                "host-side stdio sources must remain non-inheritable"
+            );
+        }
+    }
+
+    #[test]
+    fn null_device_accepts_reads_and_writes() {
+        use std::fs::File;
+        use std::io::{Read, Write};
+
+        let mut writable = File::from(open_null(StreamDirection::Write).expect("open NUL"));
+        writable.write_all(b"discarded").expect("write NUL");
+
+        let mut readable = File::from(open_null(StreamDirection::Read).expect("open NUL"));
+        let mut buffer = [0u8; 4];
+        assert_eq!(readable.read(&mut buffer).expect("read NUL"), 0);
     }
 }

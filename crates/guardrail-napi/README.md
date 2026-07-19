@@ -917,10 +917,10 @@ package SID and are not isolated from each other.
 - `stdio` is inherited from the parent process. Output capture is not yet
   supported.
 - No other parent file descriptor or handle reaches the child: on Linux and
-  macOS every descriptor above stderr is closed at exec, and on Windows handle
-  inheritance is disabled. Policies cannot revoke access to already-open
-  descriptors, so a long-lived host's sockets, pipes, and files must not leak
-  into the sandbox.
+  macOS every descriptor above stderr is closed at exec, and on Windows an
+  explicit handle list restricts inheritance to the three standard streams.
+  Policies cannot revoke access to already-open descriptors, so a long-lived
+  host's sockets, pipes, and files must not leak into the sandbox.
 - `cwd` is passed per spawn:
 
   ```js

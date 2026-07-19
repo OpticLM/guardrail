@@ -2,18 +2,18 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 
 static NAMESPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn probe() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
+fn probe() -> SandboxCommand {
+    SandboxCommand::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
 }
 
 fn probe_dir() -> PathBuf {
@@ -23,7 +23,7 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+fn spawn_child(config: &SandboxConfig, command: SandboxCommand) -> guardrail_core::SandboxChild {
     WindowsBackend::new(config.clone())
         .expect("backend")
         .spawn(command)
@@ -39,9 +39,11 @@ fn inherited_env_is_cleared() {
     let mut config = builder_with_windows_runtime_env();
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
-    command.args(["check-env", "GUARDRAIL_SECRET", "leaked"]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec![
+        "check-env".into(),
+        "GUARDRAIL_SECRET".into(),
+        "leaked".into(),
+    ];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -61,9 +63,7 @@ fn explicitly_added_env_reaches_child() {
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.env.insert("GREETING".into(), "hello".into());
     let mut command = probe();
-    command.args(["check-env", "GREETING", "hello"]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["check-env".into(), "GREETING".into(), "hello".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");

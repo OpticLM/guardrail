@@ -2,21 +2,19 @@
 
 #![cfg(target_os = "linux")]
 
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 
-use guardrail_core::{Backend, SandboxConfig, UserNamespacePolicy};
+use guardrail_core::{Backend, SandboxCommand, SandboxConfig, UserNamespacePolicy};
 use guardrail_linux::LinuxBackend;
 
 mod common;
 
-fn probe(args: &[&str]) -> Command {
+fn probe(args: &[&str]) -> SandboxCommand {
     common::probe(args)
 }
 
 fn status(config: &SandboxConfig, args: &[&str]) -> ExitStatus {
-    let mut cmd = probe(args);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(args);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -98,7 +96,10 @@ fn user_namespace_creation_is_denied_gracefully_by_default() {
 fn user_namespace_creation_follows_an_allow_policy() {
     // Only provable on hosts that permit unprivileged user namespaces at all
     // (sysctls and LSM restrictions deny them with the same EPERM).
-    if !probe(&["unshare-user"])
+    if !std::process::Command::new(common::probe_path())
+        .arg("unshare-user")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .expect("run probe unsandboxed")
         .success()

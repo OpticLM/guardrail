@@ -4,6 +4,17 @@
 //! Object, places them in a cached AppContainer for filesystem/network
 //! confinement, and resumes them only after all policy is installed.
 //!
+//! Standard handles cross the process boundary through an inert, permanently
+//! suspended helper process. Guardrail duplicates file, pipe, and device
+//! handles into that isolated handle table and declares the helper as the
+//! child's parent during creation, so those host copies stay non-inheritable.
+//! Windows forbids duplicating console handles for another process, so a child
+//! using a real console gets a launch-specific helper that inherits exactly
+//! those console handles during its own creation. Every helper belongs to a
+//! kill-on-close Job Object and never executes user code. Consequently, system
+//! process inspectors report a helper—not the host—as a sandboxed child's
+//! immediate parent.
+//!
 //! # IPC
 //!
 //! The Linux-only `linux_ipc` policy is ignored here; Windows has no

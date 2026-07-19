@@ -1,9 +1,9 @@
 #![cfg(target_os = "macos")]
 
 use std::fmt;
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
 
-use guardrail_core::{Backend, Error, FsAccess, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Backend, Error, FsAccess, NetworkPolicy, SandboxConfig, StdioMode};
 use guardrail_macos::MacosBackend;
 
 mod common;
@@ -26,14 +26,13 @@ fn assert_denied(config: &SandboxConfig, args: &[&str]) {
 
 fn run(config: &SandboxConfig, args: &[&str]) -> RunResult {
     let mut command = common::probe(args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    command.env_clear();
-    command.envs(&config.env);
+    command.stdout = StdioMode::Piped;
+    command.stderr = StdioMode::Piped;
 
     let child = MacosBackend::new(config.clone())
         .and_then(|backend| backend.spawn(command))
         .unwrap_or_else(|err| panic!("spawn failed for {args:?}: {err:?}\nconfig: {config:#?}"));
-    let output = child.into_inner().wait_with_output().expect("wait");
+    let output = child.wait_with_output().expect("wait");
 
     RunResult {
         status: output.status,
@@ -76,10 +75,8 @@ fn target_binary_runs_with_explicit_runtime_grants() {
 #[test]
 fn read_rule_does_not_grant_execute() {
     let config = common::read_only_base();
-    let mut command = common::probe(&["noop"]);
-    command.env_clear();
-    command.envs(&config.env);
-    let result = MacosBackend::new(config.clone()).and_then(|backend| backend.spawn(command));
+    let command = common::probe(&["noop"]);
+    let result = MacosBackend::new(config).and_then(|backend| backend.spawn(command));
 
     match result {
         Err(Error::Spawn(_)) => {}

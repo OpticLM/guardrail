@@ -1,6 +1,6 @@
 //! Handle to a running sandboxed process.
 
-use std::process::{Child, ExitStatus};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Output};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(windows)]
@@ -8,10 +8,28 @@ use std::any::Any;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 
+/// Parent-side ends of a Windows raw child's piped standard streams.
+///
+/// The Windows backend fills each field for a stream spawned with
+/// [`StdioMode::Piped`](crate::StdioMode::Piped) and leaves it `None`
+/// otherwise. Each handle wrapped here must be asynchronous (opened
+/// overlapped), as [`From<OwnedHandle>`] for the `Child*` types requires.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct WindowsChildStdio {
+    /// Write end of the child's stdin pipe.
+    pub stdin: Option<ChildStdin>,
+    /// Read end of the child's stdout pipe.
+    pub stdout: Option<ChildStdout>,
+    /// Read end of the child's stderr pipe.
+    pub stderr: Option<ChildStderr>,
+}
+
 /// A handle to a spawned, sandboxed child process.
 ///
 /// Most backends wrap [`std::process::Child`]. Windows can instead wrap raw
-/// process and Job Object handles so the process tree dies with the sandbox.
+/// process and Job Object handles (plus the parent ends of any stdio pipes)
+/// so the process tree dies with the sandbox.
 #[derive(Debug)]
 pub struct SandboxChild {
     inner: SandboxChildInner,
@@ -25,6 +43,7 @@ enum SandboxChildInner {
         process: OwnedHandle,
         job: OwnedHandle,
         pid: u32,
+        stdio: WindowsChildStdio,
         _guards: Vec<Box<dyn Any + Send>>,
     },
 }
@@ -40,11 +59,18 @@ impl SandboxChild {
     }
 
     /// Wait for the child to exit, returning its status.
+    ///
+    /// As with [`Child::wait`], the parent's end of the child's stdin pipe,
+    /// if any, is closed first so a child reading stdin to EOF cannot
+    /// deadlock against this wait.
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         match &mut self.inner {
             SandboxChildInner::Child(child) => child.wait(),
             #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { process, .. } => windows_wait(process),
+            SandboxChildInner::WindowsRaw { process, stdio, .. } => {
+                drop(stdio.stdin.take());
+                windows_wait(process)
+            }
         }
     }
 
@@ -57,29 +83,77 @@ impl SandboxChild {
         }
     }
 
-    /// Borrow the underlying [`Child`] (e.g. to take its stdio handles).
-    pub fn inner_mut(&mut self) -> &mut Child {
+    /// Take the parent's write end of the child's stdin pipe, if the command
+    /// piped stdin and it has not been taken already.
+    ///
+    /// Dropping the returned handle closes the pipe, signalling EOF to the
+    /// child.
+    pub fn get_stdin(&mut self) -> Option<ChildStdin> {
         match &mut self.inner {
-            SandboxChildInner::Child(child) => child,
+            SandboxChildInner::Child(child) => child.stdin.take(),
             #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { .. } => {
-                panic!("raw Windows SandboxChild has no std::process::Child")
-            }
+            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stdin.take(),
         }
     }
 
-    /// Consume the handle and return the underlying [`Child`].
-    pub fn into_inner(self) -> Child {
+    /// Take the parent's read end of the child's stdout pipe, if the command
+    /// piped stdout and it has not been taken already.
+    pub fn get_stdout(&mut self) -> Option<ChildStdout> {
+        match &mut self.inner {
+            SandboxChildInner::Child(child) => child.stdout.take(),
+            #[cfg(windows)]
+            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stdout.take(),
+        }
+    }
+
+    /// Take the parent's read end of the child's stderr pipe, if the command
+    /// piped stderr and it has not been taken already.
+    pub fn get_stderr(&mut self) -> Option<ChildStderr> {
+        match &mut self.inner {
+            SandboxChildInner::Child(child) => child.stderr.take(),
+            #[cfg(windows)]
+            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stderr.take(),
+        }
+    }
+
+    /// Wait for the child to exit, collecting its remaining piped output.
+    ///
+    /// As with [`Child::wait_with_output`], the child's stdin pipe (if any)
+    /// is closed first to avoid deadlock, and only streams spawned with
+    /// [`StdioMode::Piped`](crate::StdioMode::Piped) — and not already taken
+    /// through the accessors above — contribute output bytes.
+    pub fn wait_with_output(self) -> std::io::Result<Output> {
         match self.inner {
-            SandboxChildInner::Child(child) => child,
+            SandboxChildInner::Child(child) => child.wait_with_output(),
             #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { .. } => {
-                panic!("raw Windows SandboxChild has no std::process::Child")
+            SandboxChildInner::WindowsRaw {
+                process,
+                job: _job,
+                pid: _,
+                mut stdio,
+                _guards,
+            } => {
+                drop(stdio.stdin.take());
+                let (stdout, stderr) =
+                    windows_read_to_end(stdio.stdout.take(), stdio.stderr.take())?;
+                let status = windows_wait(&process)?;
+                // Mirror the struct's drop order: handles first, then stdio,
+                // cleanup guards last.
+                drop(process);
+                drop(_job);
+                drop(stdio);
+                drop(_guards);
+                Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                })
             }
         }
     }
 
-    /// Construct a Windows child from already-owned process and Job handles.
+    /// Construct a Windows child from already-owned process and Job handles,
+    /// plus the parent ends of any stdio pipes.
     ///
     /// # Safety
     ///
@@ -87,10 +161,15 @@ impl SandboxChild {
     /// the Job Object that owns that process tree. Both handles must be unique
     /// owned handles whose lifetimes are transferred to this `SandboxChild`.
     #[cfg(windows)]
-    pub unsafe fn from_windows_handles(process: OwnedHandle, job: OwnedHandle, pid: u32) -> Self {
+    pub unsafe fn from_windows_handles(
+        process: OwnedHandle,
+        job: OwnedHandle,
+        pid: u32,
+        stdio: WindowsChildStdio,
+    ) -> Self {
         // SAFETY: delegated to from_windows_handles_with_guards with no extra
         // cleanup guards.
-        unsafe { Self::from_windows_handles_with_guards(process, job, pid, Vec::new()) }
+        unsafe { Self::from_windows_handles_with_guards(process, job, pid, stdio, Vec::new()) }
     }
 
     /// Construct a Windows child and keep backend cleanup guards alive with it.
@@ -104,6 +183,7 @@ impl SandboxChild {
         process: OwnedHandle,
         job: OwnedHandle,
         pid: u32,
+        stdio: WindowsChildStdio,
         guards: Vec<Box<dyn Any + Send>>,
     ) -> Self {
         Self {
@@ -111,6 +191,7 @@ impl SandboxChild {
                 process,
                 job,
                 pid,
+                stdio,
                 _guards: guards,
             },
         }
@@ -398,6 +479,38 @@ impl From<SandboxChild> for SharedSandboxChild {
     fn from(child: SandboxChild) -> Self {
         SharedSandboxChild::new(child)
     }
+}
+
+/// Drain the child's piped stdout and stderr to EOF concurrently.
+///
+/// stderr is read on a helper thread so a child interleaving large writes on
+/// both pipes cannot fill one while the parent is blocked reading the other.
+#[cfg(windows)]
+fn windows_read_to_end(
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    use std::io::Read;
+
+    let stderr_reader = stderr.map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            pipe.read_to_end(&mut buffer).map(|_| buffer)
+        })
+    });
+
+    let mut stdout_buffer = Vec::new();
+    if let Some(mut pipe) = stdout {
+        pipe.read_to_end(&mut stdout_buffer)?;
+    }
+    let stderr_buffer = match stderr_reader {
+        Some(handle) => match handle.join() {
+            Ok(result) => result?,
+            Err(_) => return Err(std::io::Error::other("stderr reader thread panicked")),
+        },
+        None => Vec::new(),
+    };
+    Ok((stdout_buffer, stderr_buffer))
 }
 
 #[cfg(windows)]

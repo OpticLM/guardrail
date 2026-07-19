@@ -62,9 +62,7 @@ fn sandboxed_child_cannot_use_the_leaked_fd() {
     let file = open_secret_without_cloexec(&dir);
 
     let config = common::base();
-    let mut cmd = common::probe(&["read-fd", &file.as_raw_fd().to_string(), SECRET]);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = common::probe(&["read-fd", &file.as_raw_fd().to_string(), SECRET]);
     let mut child = LinuxBackend::new(config)
         .expect("backend")
         .spawn(cmd)

@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::sync::Arc;
 
 use napi::Task;
@@ -15,7 +15,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use guardrail::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxConfig,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxCommand, SandboxConfig,
     SharedSandboxChild, UserNamespacePolicy,
 };
 
@@ -411,14 +411,14 @@ fn spawn_with_backend(
     args: Option<Vec<String>>,
     cwd: Option<String>,
 ) -> Result<SandboxChild> {
-    let mut cmd = Command::new(&command);
+    let mut cmd = SandboxCommand::new(command);
     if let Some(args) = args {
-        cmd.args(args);
+        cmd.args = args.into_iter().map(Into::into).collect();
     }
     if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
+        cmd.current_dir = Some(cwd.into());
     }
-    // stdio is inherited by default for std::process::Command::spawn().
+    // stdio stays at the SandboxCommand default: inherited from this process.
 
     let child = backend.spawn(cmd).map_err(to_napi_err)?;
 

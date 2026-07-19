@@ -1,8 +1,7 @@
 use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
 
-use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxConfig};
+use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
 use crate::{rlimit, seatbelt};
 
@@ -35,13 +34,17 @@ impl Backend for MacosBackend {
         })
     }
 
-    fn spawn(&self, mut command: Command) -> Result<SandboxChild> {
-        command.env_clear();
-        command.envs(&self.config.env);
-
+    fn spawn(&self, command: SandboxCommand) -> Result<SandboxChild> {
+        // The launcher argv is built from the SandboxCommand; the launcher
+        // execve then receives exactly the configuration environment.
         let launcher =
             seatbelt::PreparedLaunch::new(&self.seatbelt_profile, &command, &self.config.env)
                 .map_err(Error::Spawn)?;
+        // `into_std_command` applies cwd and stdio (dup2'd onto 0–2 before any
+        // pre_exec closure runs) and clears the inherited environment; program
+        // and args are never used because the pre_exec closure below always
+        // replaces the child with the launcher.
+        let mut command = command.into_std_command();
         let limits = self.config.limits;
         let mut inherited_fds = InheritedFdTable::new()
             .map_err(|err| Error::confinement("file-descriptor hygiene", err))?;

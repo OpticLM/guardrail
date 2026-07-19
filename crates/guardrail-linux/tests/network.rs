@@ -2,21 +2,19 @@
 
 use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 
-use guardrail_core::{Backend, IpcPolicy, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Backend, IpcPolicy, NetworkPolicy, SandboxCommand, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
 mod common;
 
-fn probe(args: &[&str]) -> Command {
+fn probe(args: &[&str]) -> SandboxCommand {
     common::probe(args)
 }
 
 fn status(config: &SandboxConfig, args: &[&str]) -> ExitStatus {
-    let mut cmd = probe(args);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(args);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
@@ -36,7 +34,10 @@ fn blocked_by_seccomp(config: &SandboxConfig, args: &[&str]) -> bool {
 /// (pre-5.1) or disabled via the `kernel.io_uring_disabled` sysctl, in which
 /// case the io_uring policy tests cannot prove anything about the filter.
 fn host_has_io_uring() -> bool {
-    probe(&["io-uring-setup"])
+    std::process::Command::new(common::probe_path())
+        .arg("io-uring-setup")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .expect("run probe unsandboxed")
         .code()

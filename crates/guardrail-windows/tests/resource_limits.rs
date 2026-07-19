@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -10,7 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -18,8 +18,8 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, Term
 
 static NAMESPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn probe() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
+fn probe() -> SandboxCommand {
+    SandboxCommand::new(env!("CARGO_BIN_EXE_guardrail-windows-probe"))
 }
 
 fn probe_dir() -> PathBuf {
@@ -29,7 +29,7 @@ fn probe_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::SandboxChild {
+fn spawn_child(config: &SandboxConfig, command: SandboxCommand) -> guardrail_core::SandboxChild {
     WindowsBackend::new(config.clone())
         .expect("backend")
         .spawn(command)
@@ -39,10 +39,8 @@ fn spawn_child(config: &SandboxConfig, command: Command) -> guardrail_core::Sand
 #[test]
 fn default_config_runs_command_under_job_object() {
     let config = builder_with_windows_runtime_env();
-    let mut command = Command::new("cmd");
-    command.args(["/C", "exit", "0"]);
-    command.env_clear();
-    command.envs(&config.env);
+    let mut command = SandboxCommand::new("cmd");
+    command.args = vec!["/C".into(), "exit".into(), "0".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -56,9 +54,7 @@ fn memory_limit_blocks_large_allocation() {
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.limits.memory_bytes = Some(64 * 1024 * 1024);
     let mut command = probe();
-    command.args(["alloc", "512"]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["alloc".into(), "512".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -74,9 +70,7 @@ fn without_limit_the_same_allocation_succeeds() {
     let mut config = builder_with_windows_runtime_env();
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     let mut command = probe();
-    command.args(["alloc", "512"]);
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["alloc".into(), "512".into()];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");
@@ -93,9 +87,7 @@ fn cpu_time_limit_kills_busy_loop() {
     config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
     config.limits.cpu_time_secs = Some(1);
     let mut command = probe();
-    command.arg("spin");
-    command.env_clear();
-    command.envs(&config.env);
+    command.args = vec!["spin".into()];
 
     let mut child = spawn_child(&config, command);
     let (cancel_watchdog, watchdog, watchdog_fired) =
@@ -126,10 +118,16 @@ fn cpu_time_limit_kills_busy_loop() {
 fn process_limit_is_applied() {
     let mut config = builder_with_windows_runtime_env();
     config.limits.max_processes = Some(1);
-    let mut command = Command::new("cmd");
-    command.args(["/C", "start", "/B", "cmd", "/C", "exit", "0"]);
-    command.env_clear();
-    command.envs(&config.env);
+    let mut command = SandboxCommand::new("cmd");
+    command.args = vec![
+        "/C".into(),
+        "start".into(),
+        "/B".into(),
+        "cmd".into(),
+        "/C".into(),
+        "exit".into(),
+        "0".into(),
+    ];
 
     let mut child = spawn_child(&config, command);
     let status = child.wait().expect("wait");

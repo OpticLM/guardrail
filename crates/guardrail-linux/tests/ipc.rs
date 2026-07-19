@@ -2,22 +2,20 @@
 
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::time::Duration;
 
-use guardrail_core::{Backend, IpcPolicy, NetworkPolicy, SandboxConfig};
+use guardrail_core::{Backend, IpcPolicy, NetworkPolicy, SandboxCommand, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
 mod common;
 
-fn probe(args: &[&str]) -> Command {
+fn probe(args: &[&str]) -> SandboxCommand {
     common::probe(args)
 }
 
 fn status(config: &SandboxConfig, args: &[&str]) -> ExitStatus {
-    let mut cmd = probe(args);
-    cmd.env_clear();
-    cmd.envs(&config.env);
+    let cmd = probe(args);
     let mut child = LinuxBackend::new(config.clone())
         .expect("backend")
         .spawn(cmd)
