@@ -2,12 +2,13 @@ use std::os::unix::process::CommandExt;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
-use crate::{fs, net, ns, rlimit, seccomp, support};
+use crate::{fs, ipc, net, ns, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
     config: SandboxConfig,
     fs_rules: fs::CompiledRules,
+    ipc_policy: ipc::Policy,
     net_ruleset: Option<fs::PreparedRuleset>,
     seccomp_programs: Vec<seccompiler::BpfProgram>,
 }
@@ -28,11 +29,13 @@ impl LinuxBackend {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
         ns::probe_namespace_support()?;
+        let ipc_policy = ipc::Policy::new(&config)?;
         let net_ruleset = net::prepare(&config)?;
         let seccomp_programs = seccomp::build(&config)?;
         Ok(Self {
             config,
             fs_rules,
+            ipc_policy,
             net_ruleset,
             seccomp_programs,
         })
@@ -59,6 +62,7 @@ impl Backend for LinuxBackend {
         // adds only the freshly mounted private /dev/shm to Landlock.
         let limits = self.config.limits;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
+        let ipc_ruleset = self.ipc_policy.prepare()?;
         let net_ruleset = self
             .net_ruleset
             .as_ref()
@@ -102,6 +106,15 @@ impl Backend for LinuxBackend {
                 //     (see crate::net), same single raw syscall.
                 if let Some(net_ruleset) = &net_ruleset {
                     net_ruleset.restrict_self()?;
+                }
+
+                // (4c) Create the sandbox's IPC domain. On ABI v6+ this
+                //     scopes abstract Unix sockets and signals; on ABI v9+
+                //     it additionally mediates host pathname Unix sockets.
+                //     Applying this layer last keeps every process and socket
+                //     the child creates within the same or a nested domain.
+                if let Some(ipc_ruleset) = &ipc_ruleset {
+                    ipc_ruleset.restrict_self()?;
                 }
 
                 // (5) Descriptor hygiene: mark everything above stderr

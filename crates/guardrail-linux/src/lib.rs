@@ -52,6 +52,31 @@
 //! on a path while write or execute stays allowed there — a hidden path
 //! cannot remain writable.
 //!
+//! # Landlock IPC domain and ABI differences
+//!
+//! Every spawn also enters its own Landlock domain for the IPC operations the
+//! running kernel can mediate. The policy is deliberately best-effort across
+//! ABI versions; upgrading the kernel adds isolation without making older
+//! supported kernels fail:
+//!
+//! | Runtime Landlock ABI | Abstract Unix sockets | Signals | Host-created pathname Unix sockets |
+//! | --- | --- | --- | --- |
+//! | v2-v5 | not scoped | not scoped | unrestricted; `linux_unix_sockets` is ignored without validating or opening its paths |
+//! | v6-v8 | connections/sends to host-created sockets are denied; same-domain sockets work | sending outside the sandbox domain is denied | unrestricted; `linux_unix_sockets` is ignored without validating or opening its paths |
+//! | v9+ | same as v6-v8 | same as v6-v8 | denied by default; `linux_unix_sockets` grants named socket paths or hierarchies; same-domain sockets work |
+//!
+//! On ABI v9+, pathname grants use `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` and
+//! cover `connect(2)` plus messages sent with an explicit pathname recipient.
+//! They are independent of [`guardrail_core::FsAccess`]: read or write access
+//! to a socket's filesystem path does not allow connecting, and a socket grant
+//! does not grant file access. Grant paths must exist when the child is
+//! spawned. The raw stable ABI v9 UAPI is used because this crate's `landlock`
+//! dependency currently models through ABI v7.
+//!
+//! Scoping applies regardless of [`guardrail_core::IpcPolicy`]. Under
+//! `IpcPolicy::Strict`, seccomp's earlier Unix-socket creation denial remains
+//! the limiting rule; the Landlock behavior is observable with relaxed IPC.
+//!
 //! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
 //! pathname or abstract — fails with `EAFNOSUPPORT`, so the child cannot reach
 //! local services (D-Bus, container engines, agent sockets) or proxy data
@@ -133,6 +158,7 @@
 
 mod backend;
 mod fs;
+mod ipc;
 mod net;
 mod ns;
 mod rlimit;

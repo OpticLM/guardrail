@@ -869,6 +869,7 @@ marked *ignored* is an honest no-op there.
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
+| `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
@@ -880,6 +881,21 @@ servers usable, so the family-blind seccomp `bind`/`listen` traps cannot be
 installed. Landlock instead denies explicit TCP `bind`. The current Linux
 backend does not mediate UDP `bind` or `listen` on an unbound TCP socket, so
 those operations remain available under this combination.
+
+Linux creates a per-spawn Landlock IPC domain with behavior selected by the
+exact runtime ABI:
+
+| Landlock ABI | Abstract Unix sockets | Signals | Host-created pathname Unix sockets |
+| --- | --- | --- | --- |
+| v2-v5 | not scoped | not scoped | unrestricted; `linuxUnixSockets` entries are ignored without validation |
+| v6-v8 | host-created sockets denied; same-domain sockets work | sending outside the sandbox domain denied | unrestricted; `linuxUnixSockets` entries are ignored without validation |
+| v9+ | same as v6-v8 | same as v6-v8 | denied by default; grant an existing socket path or hierarchy with `linuxUnixSockets` |
+
+On ABI v9+, `linuxUnixSockets` controls connection and explicit-recipient send
+access only. It is independent of `fs`: read/write access to a socket path does
+not grant connection access, and a socket grant does not grant filesystem
+access. Grant paths are opened when each child is spawned, so they must exist
+then. Unix sockets created inside the same sandbox domain remain reachable.
 
 On Windows there is no configurable IPC option, but AppContainer baseline
 isolation still applies. Access to a securable object requires both the normal
@@ -924,6 +940,9 @@ package SID and are not isolated from each other.
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
   Unix and is unsupported on Windows in that state.
 - `linuxIpc` is Linux-only and ignored on macOS and Windows.
+- `linuxUnixSockets` is Linux-only and ignored on macOS and Windows. On Linux
+  it is enforced only on Landlock ABI v9+ and ignored without path validation
+  on older ABIs.
 - `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS.
 - `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows. On
   macOS, imports are trusted policy that can grant access absent from `fs` and

@@ -110,6 +110,14 @@ export interface SandboxOptions {
    */
   linuxIpc?: IpcPolicy
   /**
+   * Linux-only host pathname Unix socket or path-hierarchy grants,
+   * independent of `fs`. On Landlock ABI v9+ host-created pathname sockets
+   * are denied by default and these existing paths grant connection access.
+   * On older ABIs entries are ignored without being validated or opened.
+   * Ignored on macOS and Windows.
+   */
+  linuxUnixSockets?: Array<string>
+  /**
    * Linux-only user-namespace policy; `"deny"` (default) if omitted.
    * Ignored on macOS and Windows. Set `"allow"` only when the child runs
    * its own nested sandbox (Chromium/Electron, bubblewrap, rootless
@@ -184,6 +192,12 @@ export interface SpawnOptions {
    * Ignored on macOS and Windows.
    */
   linuxIpc?: IpcPolicy
+  /**
+   * Linux-only host pathname Unix socket or path-hierarchy grants,
+   * independent of `fs`. Enforced on Landlock ABI v9+; ignored without
+   * validation on older ABIs and ignored on macOS and Windows.
+   */
+  linuxUnixSockets?: Array<string>
   /**
    * Linux-only user-namespace policy; `"deny"` (default) if omitted.
    * Ignored on macOS and Windows. Set `"allow"` only when the child runs

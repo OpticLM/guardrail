@@ -43,6 +43,7 @@ pub fn base() -> SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
         linux_ipc: IpcPolicy::Strict,
+        linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![],
@@ -60,6 +61,7 @@ pub fn read_only_base() -> SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
         linux_ipc: IpcPolicy::Strict,
+        linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
         darwin_sandbox_profiles: vec![],
@@ -88,6 +90,23 @@ pub fn landlock_enforced() -> bool {
     std::fs::read_to_string("/sys/kernel/security/lsm")
         .map(|s| s.split(',').any(|m| m.trim() == "landlock"))
         .unwrap_or(false)
+}
+
+/// Exact runtime Landlock ABI. Unlike the dependency's ABI enum, this keeps
+/// values newer than the crate's currently modeled ABI v7.
+pub fn landlock_abi() -> i32 {
+    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1 << 0;
+    // SAFETY: the VERSION query requires a null attribute and zero size and
+    // does not install a ruleset.
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    i32::try_from(abi).expect("Landlock ABI must fit i32")
 }
 
 /// Whether deny-under-allow mount masking works on this host, exercised

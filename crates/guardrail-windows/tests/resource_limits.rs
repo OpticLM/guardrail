@@ -182,6 +182,7 @@ fn builder_with_windows_runtime_env() -> SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,
         linux_ipc: IpcPolicy::Strict,
+        linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],

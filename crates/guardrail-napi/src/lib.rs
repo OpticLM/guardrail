@@ -126,6 +126,12 @@ pub struct SandboxOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
+    /// Linux-only host pathname Unix socket or path-hierarchy grants,
+    /// independent of `fs`. On Landlock ABI v9+ host-created pathname sockets
+    /// are denied by default and these existing paths grant connection access.
+    /// On older ABIs entries are ignored without being validated or opened.
+    /// Ignored on macOS and Windows.
+    pub linux_unix_sockets: Option<Vec<String>>,
     /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
     /// Ignored on macOS and Windows. Set `"allow"` only when the child runs
     /// its own nested sandbox (Chromium/Electron, bubblewrap, rootless
@@ -172,6 +178,10 @@ pub struct SpawnOptions {
     /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
     /// Ignored on macOS and Windows.
     pub linux_ipc: Option<JsIpcPolicy>,
+    /// Linux-only host pathname Unix socket or path-hierarchy grants,
+    /// independent of `fs`. Enforced on Landlock ABI v9+; ignored without
+    /// validation on older ABIs and ignored on macOS and Windows.
+    pub linux_unix_sockets: Option<Vec<String>>,
     /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
     /// Ignored on macOS and Windows. Set `"allow"` only when the child runs
     /// its own nested sandbox (Chromium/Electron, bubblewrap, rootless
@@ -291,6 +301,12 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .linux_ipc
             .map(|i| i.into())
             .unwrap_or(IpcPolicy::Strict),
+        linux_unix_sockets: opts
+            .linux_unix_sockets
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         linux_user_namespaces: opts
             .linux_user_namespaces
             .map(|u| u.into())
@@ -307,6 +323,7 @@ impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
                 fs: options.fs,
                 network: options.network,
                 linux_ipc: options.linux_ipc,
+                linux_unix_sockets: options.linux_unix_sockets,
                 linux_user_namespaces: options.linux_user_namespaces,
                 memory_limit_mb: options.memory_limit_mb,
                 cpu_time_limit_secs: options.cpu_time_limit_secs,

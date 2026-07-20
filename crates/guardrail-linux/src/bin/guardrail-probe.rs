@@ -45,6 +45,19 @@
 //!   unix-bind-listen <NAME>
 //!                     bind an AF_UNIX stream socket to the abstract name NAME
 //!                     and listen on it; exit 0 if allowed, 3 if denied
+//!   unix-connect <PATH>
+//!                     connect to a pathname AF_UNIX stream server; exit 0 if
+//!                     allowed, 3 if denied
+//!   unix-path-roundtrip <PATH>
+//!                     bind and connect to a pathname AF_UNIX stream server;
+//!                     exit 0 if same-domain use works, 3 otherwise
+//!   unix-abstract-roundtrip <NAME>
+//!                     bind and connect to an abstract AF_UNIX stream server;
+//!                     exit 0 if same-domain use works, 3 otherwise
+//!   signal-zero <PID> check permission to signal PID without delivering a
+//!                     signal; exit 0 if allowed, 3 if denied
+//!   signal-child-zero fork a child and check permission to signal it without
+//!                     delivering a signal; exit 0 if allowed, 3 if denied
 //!   io-uring-setup    create an io_uring instance; exit 0 if allowed, 3 on ENOSYS
 //!   io-uring-enter    call io_uring_enter with an invalid fd; exit 0 if the
 //!                     kernel returns EBADF, 3 on ENOSYS
@@ -274,6 +287,84 @@ fn main() {
                 Ok(_) => exit(0),
                 Err(_) => exit(3),
             }
+        }
+        "unix-connect" => {
+            use std::os::unix::net::UnixStream;
+
+            let Some(path) = args.get(2) else {
+                exit(2);
+            };
+            match UnixStream::connect(path) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "unix-path-roundtrip" => {
+            use std::os::unix::net::{UnixListener, UnixStream};
+
+            let Some(path) = args.get(2) else {
+                exit(2);
+            };
+            let Ok(_listener) = UnixListener::bind(path) else {
+                exit(3);
+            };
+            match UnixStream::connect(path) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "unix-abstract-roundtrip" => {
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+
+            let Some(name) = args.get(2) else {
+                exit(2);
+            };
+            let Ok(addr) = SocketAddr::from_abstract_name(name.as_bytes()) else {
+                exit(2);
+            };
+            let Ok(_listener) = UnixListener::bind_addr(&addr) else {
+                exit(3);
+            };
+            match UnixStream::connect_addr(&addr) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "signal-zero" => {
+            let Some(pid) = args.get(2).and_then(|pid| pid.parse::<libc::pid_t>().ok()) else {
+                exit(2);
+            };
+            // SAFETY: signal 0 performs only permission and existence checks;
+            // it never delivers a signal to the target process.
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                exit(0);
+            }
+            exit(3);
+        }
+        "signal-child-zero" => {
+            // SAFETY: fork creates one child with no shared Rust execution;
+            // the child exits immediately through async-signal-safe _exit.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                exit(3);
+            }
+            if pid == 0 {
+                // SAFETY: terminates the forked child without running Rust
+                // destructors in the post-fork process.
+                unsafe { libc::_exit(0) };
+            }
+            // An exited child remains an addressable zombie until waitpid, so
+            // this permission check is race-free and delivers no signal.
+            // SAFETY: pid names the child created above; signal 0 is harmless.
+            let allowed = unsafe { libc::kill(pid, 0) } == 0;
+            let mut status = 0;
+            // SAFETY: pid is our unreaped child and status is writable.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            if allowed {
+                exit(0);
+            }
+            exit(3);
         }
         "io-uring-setup" => {
             // io_uring_setup(2) has no libc wrapper; a zeroed params block
@@ -553,7 +644,9 @@ fn main() {
                  rename-file|link-file|read-fd|\
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
                  socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-connect|\
-                 unix-bind-listen|io-uring-setup|io-uring-enter|io-uring-register|shm|\
+                 unix-bind-listen|unix-connect|unix-path-roundtrip|unix-abstract-roundtrip|\
+                 signal-zero|signal-child-zero|\
+                 io-uring-setup|io-uring-enter|io-uring-register|shm|\
                  ipc-namespace|posix-shm|private-shm-mount|\
                  ptrace-self|unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
             );

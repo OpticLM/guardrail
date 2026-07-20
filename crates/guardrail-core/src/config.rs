@@ -48,6 +48,7 @@ pub struct ResourceLimits {
 ///     limits: ResourceLimits::default(),
 ///     env: BTreeMap::new(),
 ///     linux_ipc: IpcPolicy::Strict,
+///     linux_unix_sockets: vec![],
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
@@ -78,6 +79,22 @@ pub struct SandboxConfig {
     /// can permit Unix-domain socket connections. On Windows it is ignored:
     /// AppContainer baseline isolation applies independently of this field.
     pub linux_ipc: IpcPolicy,
+    /// Linux-only grants for connecting or sending to host-created pathname
+    /// Unix sockets. Non-Linux backends ignore this field.
+    ///
+    /// Each entry identifies either one socket path or a path hierarchy. These
+    /// grants are independent of [`FsAccess`]: filesystem read/write access
+    /// never grants socket connection access, and a socket grant never grants
+    /// file access.
+    ///
+    /// The Linux backend uses this field only on Landlock ABI v9 and newer. On
+    /// those kernels, host-created pathname sockets are denied by default and
+    /// entries here grant `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` beneath the named
+    /// path. The paths must exist when a child is spawned. On ABI v2-v8 the
+    /// kernel cannot mediate pathname-socket connections, so the backend does
+    /// not validate or open these entries and pathname sockets remain
+    /// unrestricted by this field.
+    pub linux_unix_sockets: Vec<PathBuf>,
     /// Linux-only user-namespace policy. Non-Linux backends ignore this field.
     ///
     /// Enforced with seccomp by the Linux backend. Denied by default; allow it

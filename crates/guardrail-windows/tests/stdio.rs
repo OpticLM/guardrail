@@ -201,6 +201,7 @@ fn config_with_probe_grant() -> SandboxConfig {
         fs: vec![FsAccess::ReadAllow(probe_dir())],
         network: NetworkPolicy::Deny,
         linux_ipc: IpcPolicy::Strict,
+        linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,
         darwin_sandbox_profiles: vec![],

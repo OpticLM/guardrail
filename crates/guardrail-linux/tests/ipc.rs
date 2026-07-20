@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::os::linux::net::SocketAddrExt;
-use std::os::unix::net::{SocketAddr, UnixDatagram};
+use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener};
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -197,23 +197,140 @@ fn strict_blocks_unix_datagram_socketpair_escape() {
 }
 
 #[test]
-fn relaxed_allows_unix_datagram_socketpair_sendto() {
+fn abstract_host_socket_is_scoped_on_abi_v6_and_newer() {
     let name = format!("guardrail-ipc-relaxed-{}", std::process::id());
     let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract address");
     let receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract socket");
     let mut config = common::base();
     config.linux_ipc = IpcPolicy::Relaxed;
 
-    assert!(
-        allowed(&config, &["socketpair-unix-dgram-sendto", &name]),
-        "Relaxed IPC must allow datagram socketpairs to target named sockets"
+    let sent = allowed(&config, &["socketpair-unix-dgram-sendto", &name]);
+    if common::landlock_abi() >= 6 {
+        assert!(
+            !sent,
+            "ABI v6+ must deny sends to host-created abstract sockets"
+        );
+    } else {
+        assert!(
+            sent,
+            "ABI before v6 must leave abstract sockets unrestricted"
+        );
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set receive timeout");
+        let mut byte = [0];
+        assert_eq!(receiver.recv(&mut byte).expect("receive datagram"), 1);
+        assert_eq!(byte, *b"x");
+    }
+}
+
+#[test]
+fn host_pathname_socket_is_denied_by_default_on_abi_v9_and_newer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("host.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind host socket");
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+
+    let connected = allowed(
+        &config,
+        &["unix-connect", socket.to_str().expect("UTF-8 path")],
     );
-    receiver
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .expect("set receive timeout");
-    let mut byte = [0];
-    assert_eq!(receiver.recv(&mut byte).expect("receive datagram"), 1);
-    assert_eq!(byte, *b"x");
+    assert_eq!(
+        connected,
+        common::landlock_abi() < 9,
+        "host pathname sockets must be denied by default only when ABI v9 can mediate them"
+    );
+}
+
+#[test]
+fn explicit_pathname_socket_grant_allows_host_connection_on_abi_v9_and_newer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("host.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind host socket");
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+    config.linux_unix_sockets.push(socket.clone());
+
+    assert!(
+        allowed(
+            &config,
+            &["unix-connect", socket.to_str().expect("UTF-8 path")]
+        ),
+        "an explicit socket grant must allow the host connection; before ABI v9 the field is an ignored no-op"
+    );
+}
+
+#[test]
+fn filesystem_access_does_not_grant_host_pathname_socket_connection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("host.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind host socket");
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+    config.fs.extend([
+        FsAccess::ReadAllow(dir.path().into()),
+        FsAccess::WriteAllow(dir.path().into()),
+    ]);
+
+    let connected = allowed(
+        &config,
+        &["unix-connect", socket.to_str().expect("UTF-8 path")],
+    );
+    assert_eq!(
+        connected,
+        common::landlock_abi() < 9,
+        "FsAccess alone must not grant socket resolution on ABI v9+"
+    );
+}
+
+#[test]
+fn same_domain_pathname_socket_remains_usable() {
+    let path = format!("/dev/shm/guardrail-same-domain-{}.sock", std::process::id());
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+
+    assert!(
+        allowed(&config, &["unix-path-roundtrip", &path]),
+        "ABI v9 pathname mediation must not block a server created within the same Landlock domain"
+    );
+}
+
+#[test]
+fn same_domain_abstract_socket_remains_usable() {
+    let name = format!("guardrail-same-domain-{}", std::process::id());
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+
+    assert!(
+        allowed(&config, &["unix-abstract-roundtrip", &name]),
+        "ABI v6 abstract-socket scoping must preserve servers created within the same Landlock domain"
+    );
+}
+
+#[test]
+fn host_signal_is_scoped_on_abi_v6_and_newer() {
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+    let host_pid = std::process::id().to_string();
+
+    let permitted = allowed(&config, &["signal-zero", &host_pid]);
+    assert_eq!(
+        permitted,
+        common::landlock_abi() < 6,
+        "ABI v6+ must deny signal permission checks outside the sandbox domain; older ABIs must leave them unrestricted"
+    );
+}
+
+#[test]
+fn same_domain_signal_remains_usable() {
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+
+    assert!(
+        allowed(&config, &["signal-child-zero"]),
+        "signal permission checks for a child in the same Landlock domain must remain available"
+    );
 }
 
 #[test]
