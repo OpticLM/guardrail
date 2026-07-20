@@ -2,13 +2,14 @@
 //!
 //! Applies confinement entirely in-process around [`std::process::Command`]'s
 //! `pre_exec` hook: resource limits via `setrlimit`, plus Landlock filesystem
-//! rules and seccomp-BPF filters for network and IPC. Policies are compiled
-//! and the Landlock ruleset is fully built in the parent; the post-fork child
-//! only issues raw syscalls (`prctl`, `unshare`, `mount`, `setrlimit`,
-//! `landlock_restrict_self`, `close_range`, `seccomp`) over parent-prepared
-//! data — the async-signal-safe subset the `pre_exec` contract requires when
-//! the parent is multithreaded (e.g. Node via `guardrail-napi`). Every parent
-//! file descriptor above stderr is marked close-on-exec, so only stdio
+//! rules and seccomp-BPF filters for network and IPC. Policies and all
+//! host-path Landlock rules are built in the parent; the post-fork child only
+//! issues raw syscalls (`prctl`, `unshare`, `mount`, `setrlimit`,
+//! `landlock_add_rule`, `landlock_restrict_self`, `close_range`, `seccomp`)
+//! over parent-prepared data — the async-signal-safe subset the `pre_exec`
+//! contract requires when the parent is multithreaded (e.g. Node via
+//! `guardrail-napi`). Every parent file descriptor above stderr is marked
+//! close-on-exec, so only stdio
 //! crosses into the child — policies cannot revoke access to descriptors
 //! that are already open, so inheriting one would bypass them. No external
 //! sandboxing binary is used.
@@ -27,14 +28,29 @@
 //! masks (`MNT_LOCKED`) against children permitted to create namespaces of
 //! their own. See `src/ns.rs` for the mechanism.
 //!
-//! This is the one feature that needs unprivileged user namespaces: when the
-//! host forbids them (Debian's `kernel.unprivileged_userns_clone=0`, Ubuntu
-//! 24.04's `apparmor_restrict_unprivileged_userns=1`,
-//! `user.max_user_namespaces=0`), constructing a backend for such a policy
-//! fails with a precise `Error::Unsupported` instead of approximating.
-//! Policies without deny-under-allow boundaries never create a namespace.
-//! One shape is rejected on any host: denying read on a path while write or
-//! execute stays allowed there — a hidden path cannot remain writable.
+//! # Per-spawn IPC isolation
+//!
+//! Every spawn enters a fresh IPC namespace, isolating its SysV shared
+//! memory, semaphore, and message-queue identifiers and its POSIX message
+//! queues from the host and from other spawns. POSIX shared memory and named
+//! semaphores are filesystem-backed instead, so `/dev/shm` is overmounted
+//! with a private 64 MiB tmpfs using `nosuid,nodev,noexec`. The child receives
+//! an internal Landlock read/write/create/remove grant for that private mount;
+//! granting the host `/dev/shm` in [`guardrail_core::FsAccess`] still cannot
+//! reveal host objects because the host mount has already been hidden.
+//!
+//! This isolation applies on every Landlock ABI supported by this backend; it
+//! is not a best-effort ABI-dependent feature. It needs unprivileged user
+//! namespaces, so when the host forbids them (Debian's
+//! `kernel.unprivileged_userns_clone=0`, Ubuntu 24.04's
+//! `apparmor_restrict_unprivileged_userns=1`, `user.max_user_namespaces=0`),
+//! constructing a backend fails with a precise `Error::Unsupported` instead
+//! of approximating.
+//!
+//! The same mandatory user + mount namespace contains deny-under-allow mount
+//! masks. One filesystem-policy shape is rejected on any host: denying read
+//! on a path while write or execute stays allowed there — a hidden path
+//! cannot remain writable.
 //!
 //! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
 //! pathname or abstract — fails with `EAFNOSUPPORT`, so the child cannot reach

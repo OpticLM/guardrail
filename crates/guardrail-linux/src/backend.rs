@@ -22,15 +22,12 @@ impl LinuxBackend {
     /// [`Backend::probe_support`]); when the policy composes
     /// `NetworkPolicy::OutboundOnly` with `IpcPolicy::Relaxed` and the kernel
     /// lacks Landlock network support (ABI v4, Linux 6.7+; see [`crate::net`]);
-    /// or — only when the policy denies paths beneath allowed parents — when
-    /// the host forbids the unprivileged user namespaces those deny boundaries
-    /// are enforced with (see [`crate::ns`]).
+    /// or when the host forbids the unprivileged IPC/user/mount namespaces
+    /// required for every sandbox's IPC isolation (see [`crate::ns`]).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
-        if !fs_rules.mount_plan.is_empty() {
-            ns::probe_mask_support()?;
-        }
+        ns::probe_namespace_support()?;
         let net_ruleset = net::prepare(&config)?;
         let seccomp_programs = seccomp::build(&config)?;
         Ok(Self {
@@ -55,10 +52,11 @@ impl Backend for LinuxBackend {
         command.envs(&self.config.env);
 
         // Everything the child needs crosses the fork as plain bytes or file
-        // descriptors prepared here in the parent: the Landlock ruleset is
-        // fully built (rule compilation, PathFd opens, add_rule) before
-        // fork(), the BPF programs were compiled in `new`, and the mount
-        // masking plan is CStrings and fixed buffers compiled in `new`.
+        // descriptors prepared here in the parent: all host-path Landlock
+        // rules (rule compilation, PathFd opens, add_rule) are built before
+        // fork(), the BPF programs were compiled in `new`, and the namespace
+        // plan is CStrings and fixed buffers compiled in `new`. The child
+        // adds only the freshly mounted private /dev/shm to Landlock.
         let limits = self.config.limits;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let net_ruleset = self
@@ -82,21 +80,21 @@ impl Backend for LinuxBackend {
                 //     async-signal-safe.
                 set_no_new_privs()?;
 
-                // (2) Mount masking for deny-under-allow boundaries, when the
-                //     policy has any: enter a user + mount namespace and glue
-                //     masks over denied paths. Must precede Landlock, which
-                //     denies mount-topology changes once enforced. The forked
-                //     child is single-threaded, as unshare(CLONE_NEWUSER)
-                //     requires.
-                if let Some(namespace) = namespace.as_mut() {
-                    namespace.enter()?;
-                }
+                // (2) Enter fresh IPC/user/mount namespaces, mount the private
+                //     /dev/shm, and install any deny-under-allow mount masks.
+                //     This must precede Landlock, which denies mount-topology
+                //     changes once enforced. The forked child is
+                //     single-threaded, as unshare(CLONE_NEWUSER) requires.
+                namespace.enter()?;
 
                 // (3) Resource limits.
                 rlimit::apply(&limits)?;
 
-                // (4) Filesystem confinement: enforce the parent-built
-                //     Landlock ruleset — one landlock_restrict_self(2) call.
+                // (4) Grant the newly mounted private /dev/shm in this
+                //     spawn's parent-built Landlock ruleset, then enforce it.
+                //     The host /dev/shm is already hidden and is never
+                //     referenced by this rule.
+                landlock_ruleset.allow_private_shm()?;
                 landlock_ruleset.restrict_self()?;
 
                 // (4b) Network confinement for OutboundOnly + Relaxed IPC:

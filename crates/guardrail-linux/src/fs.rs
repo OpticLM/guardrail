@@ -35,6 +35,17 @@ use guardrail_core::{Error, FsAccess, Result};
 
 use crate::ns;
 
+// Stable Landlock UAPI values through ABI v2. The private `/dev/shm` rule
+// allows every V2 read/write/create/remove/refer right, but not Execute.
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_uint = 1;
+const PRIVATE_SHM_ACCESS_FS: u64 = 0x3ffe;
+
+#[repr(C, packed)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct CompiledRules {
     read_paths: BTreeSet<PathBuf>,
@@ -63,9 +74,8 @@ pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
     })
 }
 
-/// A Landlock ruleset fully built in the parent: ruleset creation,
-/// compatibility checks, and per-path rules already happened, so the only
-/// thing that crosses `fork()` is this file descriptor.
+/// A Landlock ruleset built in the parent with all host-path rules. The child
+/// adds only its newly mounted private `/dev/shm` before enforcement.
 #[derive(Debug)]
 pub(crate) struct PreparedRuleset {
     fd: OwnedFd,
@@ -84,6 +94,46 @@ impl PreparedRuleset {
             .try_clone()
             .map_err(|e| Error::confinement("landlock", e))?;
         Ok(Self { fd })
+    }
+
+    /// Add the child-private `/dev/shm` hierarchy to this spawn's ruleset.
+    /// Called after the tmpfs is mounted but before the ruleset is enforced,
+    /// so this rule identifies the private mount rather than the hidden host
+    /// `/dev/shm`. Only raw syscalls are used in the post-fork child.
+    pub(crate) fn allow_private_shm(&self) -> std::io::Result<()> {
+        // SAFETY: path is a NUL-terminated literal and flags are scalar.
+        let path_fd = unsafe {
+            libc::open(
+                c"/dev/shm".as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if path_fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let attr = LandlockPathBeneathAttr {
+            allowed_access: PRIVATE_SHM_ACCESS_FS,
+            parent_fd: path_fd,
+        };
+        // SAFETY: the ruleset fd and path fd are live, attr has the packed
+        // kernel UAPI layout, and flags must be zero.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                self.fd.as_raw_fd(),
+                LANDLOCK_RULE_PATH_BENEATH,
+                &attr,
+                0 as libc::c_uint,
+            )
+        };
+        let result = if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        // SAFETY: path_fd was opened above and is owned here.
+        unsafe { libc::close(path_fd) };
+        result
     }
 
     /// Enforce the ruleset on the calling thread. Called inside `pre_exec` in
@@ -113,11 +163,12 @@ impl PreparedRuleset {
     }
 }
 
-/// Build a Landlock ruleset for compiled positive paths, entirely in the
-/// parent before `fork()`. Enforcement in the child is a separate, raw step
-/// ([`PreparedRuleset::restrict_self`]); building here keeps allocation, path
-/// opening, and error formatting out of the `pre_exec` closure, which the
-/// [`pre_exec` contract] requires under multithreaded parents such as Node.
+/// Build a Landlock ruleset for compiled host paths in the parent before
+/// `fork()`. The child adds its private `/dev/shm` with raw syscalls, then
+/// enforces the result with [`PreparedRuleset::restrict_self`]. Building
+/// everything else here keeps allocation, host-path opening, and error
+/// formatting out of the `pre_exec` closure, which the [`pre_exec` contract]
+/// requires under multithreaded parents such as Node.
 ///
 /// Fails closed: on a kernel that cannot enforce Landlock, `handle_access`
 /// errors under [`CompatLevel::HardRequirement`] and the spawn is aborted

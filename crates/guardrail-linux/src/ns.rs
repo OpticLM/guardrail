@@ -1,4 +1,8 @@
-//! Mount-namespace masking for deny rules beneath allowed subtrees.
+//! Per-spawn IPC isolation and mount-namespace masking.
+//!
+//! Every child gets a fresh IPC namespace for SysV IPC and POSIX message
+//! queues, plus a private `/dev/shm` tmpfs for POSIX shared memory and named
+//! semaphores. The tmpfs is capped at 64 MiB and mounted `nosuid,nodev,noexec`.
 //!
 //! Landlock rules are purely additive grants, so an ordered policy such as
 //! `allow(root)` then `deny(root/secret)` cannot be expressed as Landlock
@@ -19,9 +23,9 @@
 //! when the mask is a hiding tmpfs. Bind clones are live mounts, so files
 //! created later on either side keep following the policy.
 //!
-//! The mounts live in a per-spawn user + mount namespace created inside
-//! `pre_exec` (the forked child is single-threaded, which
-//! `unshare(CLONE_NEWUSER)` requires). Propagation is set to
+//! The mounts live in a per-spawn user + mount namespace created alongside
+//! the IPC namespace inside `pre_exec` (the forked child is single-threaded,
+//! which `unshare(CLONE_NEWUSER)` requires). Propagation is set to
 //! `MS_SLAVE|MS_REC` first so nothing leaks back to the host. After masking,
 //! a *second* `unshare(CLONE_NEWUSER|CLONE_NEWNS)` locks every mask mount
 //! (`MNT_LOCKED`): even a child legitimately permitted to create nested
@@ -56,6 +60,7 @@ pub(crate) const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 const FSOPEN_CLOEXEC: libc::c_uint = 0x1;
 const FSMOUNT_CLOEXEC: libc::c_uint = 0x1;
 const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
+const PRIVATE_SHM_OPTIONS: &CStr = c"mode=1777,size=67108864";
 
 /// `struct mount_attr` for `mount_setattr(2)`. Mirrored locally for the same
 /// target-coverage reason as the constants above.
@@ -109,14 +114,15 @@ pub(crate) struct MountPlan {
 }
 
 impl MountPlan {
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.clone_sources.is_empty() && self.ops.is_empty() && self.seal_readonly.is_empty()
     }
 }
 
-/// Per-spawn state for entering the masking namespace: the plan, the uid/gid
-/// map lines, and slots for the clone descriptors. Built in the parent so
-/// `enter` allocates nothing after `fork()`.
+/// Per-spawn state for entering the IPC/user/mount namespaces: the masking
+/// plan, uid/gid map lines, and slots for clone descriptors. Built in the
+/// parent so `enter` allocates nothing after `fork()`.
 pub(crate) struct PreparedNamespace {
     plan: MountPlan,
     uid_map: Vec<u8>,
@@ -125,28 +131,25 @@ pub(crate) struct PreparedNamespace {
 }
 
 impl PreparedNamespace {
-    /// Prepare namespace entry for `plan`; `None` when no masking is needed
-    /// (the spawn then runs without any namespace, exactly as before).
-    pub(crate) fn new(plan: &MountPlan) -> Option<Self> {
-        if plan.is_empty() {
-            return None;
-        }
+    /// Prepare mandatory namespace entry and the optional masking `plan`.
+    pub(crate) fn new(plan: &MountPlan) -> Self {
         let (uid, gid) = current_uid_gid();
-        Some(Self {
+        Self {
             plan: plan.clone(),
             uid_map: identity_map(uid),
             gid_map: identity_map(gid),
             clone_fds: vec![-1; plan.clone_sources.len()].into_boxed_slice(),
-        })
+        }
     }
 
-    /// Enter the masking namespace and install every mask. Called inside
-    /// `pre_exec` in the freshly forked child: raw syscalls over parent-built
-    /// data only. Descriptors opened here are `O_CLOEXEC` and closed as soon
-    /// as they are consumed; on error the failed spawn tears the child down,
-    /// so no cleanup path is needed.
+    /// Enter the fresh namespaces, mount private `/dev/shm`, and install every
+    /// mask. Called inside `pre_exec` in the freshly forked child: raw syscalls
+    /// over parent-built data only. Descriptors opened here are `O_CLOEXEC`
+    /// and closed as soon as they are consumed; on error the failed spawn
+    /// tears the child down, so no cleanup path is needed.
     pub(crate) fn enter(&mut self) -> io::Result<()> {
-        enter_user_mount_ns(&self.uid_map, &self.gid_map)?;
+        enter_user_mount_ipc_ns(&self.uid_map, &self.gid_map)?;
+        mount_private_shm()?;
 
         // Clone every re-exposed subtree before any mask shadows its path. The
         // plan pairs each source with a slot, so iterate them in lockstep.
@@ -180,6 +183,24 @@ impl PreparedNamespace {
         enter_user_mount_ns(&self.uid_map, &self.gid_map)?;
         Ok(())
     }
+}
+
+/// Hide the host's `/dev/shm` behind a per-spawn tmpfs. The fixed 64 MiB cap
+/// keeps POSIX shared memory from consuming an unbounded amount of RAM/swap;
+/// the mount flags prevent this internal IPC store from carrying executables,
+/// device nodes, or set-ID semantics.
+fn mount_private_shm() -> io::Result<()> {
+    // SAFETY: all pointers are NUL-terminated literals and the flags/data are
+    // immutable for the duration of the call.
+    check_rc(unsafe {
+        libc::mount(
+            c"guardrail-shm".as_ptr(),
+            c"/dev/shm".as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            PRIVATE_SHM_OPTIONS.as_ptr().cast(),
+        )
+    })
 }
 
 fn apply_op(op: &MaskOp, clone_fds: &mut [libc::c_int]) -> io::Result<()> {
@@ -320,12 +341,25 @@ fn hide_file(path: &CStr) -> io::Result<()> {
     Ok(())
 }
 
-/// `unshare(CLONE_NEWUSER | CLONE_NEWNS)`, map the current euid/egid onto
-/// themselves, and stop mount propagation to the host. Requires a
-/// single-threaded caller (the post-`fork` child).
+/// Enter the first user + mount namespace together with a fresh IPC namespace.
+fn enter_user_mount_ipc_ns(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
+    enter_namespaces(
+        libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC,
+        uid_map,
+        gid_map,
+    )
+}
+
+/// Enter the second user + mount namespace that locks the installed mounts.
 fn enter_user_mount_ns(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
+    enter_namespaces(libc::CLONE_NEWUSER | libc::CLONE_NEWNS, uid_map, gid_map)
+}
+
+/// Enter `flags`, map the current euid/egid onto themselves, and stop mount
+/// propagation to the host. Requires a single-threaded post-`fork` caller.
+fn enter_namespaces(flags: libc::c_int, uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
     // SAFETY: unshare takes only a scalar flags argument.
-    check_rc(unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) })?;
+    check_rc(unsafe { libc::unshare(flags) })?;
     // An unprivileged process may write exactly one mapping line for its own
     // euid/egid; gid_map requires setgroups to be denied first.
     write_file(c"/proc/self/setgroups", b"deny")?;
@@ -344,18 +378,11 @@ fn enter_user_mount_ns(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
     })
 }
 
-/// Verify that the mount-masking prerequisites hold: an unprivileged user +
-/// mount namespace can be created and configured. Runs in a disposable
-/// forked child (async-signal-safe calls only) so the caller's process state
-/// is untouched; the child reports failure by exiting with the raw errno.
-///
-/// Called by `LinuxBackend::new` only when the compiled policy actually
-/// contains deny-under-allow boundaries: policies without them never create
-/// a namespace and work regardless of this probe.
-pub(crate) fn probe_mask_support() -> Result<()> {
-    let (uid, gid) = current_uid_gid();
-    let uid_map = identity_map(uid);
-    let gid_map = identity_map(gid);
+/// Verify the mandatory per-spawn IPC/user/mount namespaces and private
+/// `/dev/shm` mount. Runs the exact empty-plan setup in a disposable forked
+/// child so the caller's process state is untouched.
+pub(crate) fn probe_namespace_support() -> Result<()> {
+    let mut namespace = PreparedNamespace::new(&MountPlan::default());
 
     // SAFETY: fork takes no arguments; the child below only calls
     // async-signal-safe functions (unshare, open, write, close, mount,
@@ -363,12 +390,12 @@ pub(crate) fn probe_mask_support() -> Result<()> {
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(Error::confinement(
-            "mount masking probe",
+            "namespace isolation probe",
             io::Error::last_os_error(),
         ));
     }
     if pid == 0 {
-        let code = match enter_user_mount_ns(&uid_map, &gid_map) {
+        let code = match namespace.enter() {
             Ok(()) => 0,
             Err(err) => err.raw_os_error().unwrap_or(libc::EIO),
         };
@@ -385,7 +412,7 @@ pub(crate) fn probe_mask_support() -> Result<()> {
         }
         if rc < 0 && last_errno() != libc::EINTR {
             return Err(Error::confinement(
-                "mount masking probe",
+                "namespace isolation probe",
                 io::Error::last_os_error(),
             ));
         }
@@ -400,13 +427,12 @@ pub(crate) fn probe_mask_support() -> Result<()> {
         "probe child terminated abnormally".into()
     };
     Err(Error::Unsupported(format!(
-        "this policy denies a path beneath an allowed parent, which the Linux \
-         backend enforces with mount masks inside an unprivileged user \
-         namespace; creating one failed: {detail}. Enable unprivileged user \
+        "the Linux backend requires a fresh IPC namespace and a private \
+         /dev/shm inside unprivileged user and mount namespaces for every \
+         sandbox; creating them failed: {detail}. Enable unprivileged user \
          namespaces (Debian: sysctl kernel.unprivileged_userns_clone=1; \
          Ubuntu 24.04+: sysctl kernel.apparmor_restrict_unprivileged_userns=0; \
-         also check user.max_user_namespaces) or restructure the policy so no \
-         deny rule falls beneath an allow rule"
+         also check user.max_user_namespaces)"
     )))
 }
 

@@ -52,6 +52,13 @@
 //!                     if the kernel returns EINVAL, 3 on ENOSYS
 //!   shm               create a SysV shared-memory segment; exit 0 if allowed,
 //!                     3 if denied
+//!   ipc-namespace [HOLD_MS]
+//!                     print `/proc/self/ns/ipc`, then remain alive for up to
+//!                     2000 milliseconds; exit 0 on success
+//!   posix-shm         create, map, use, and unlink a POSIX shared-memory
+//!                     object; exit 0 on success, 3 if unavailable
+//!   private-shm-mount verify `/dev/shm` is a tmpfs no larger than 64 MiB
+//!                     mounted nosuid,nodev,noexec; exit 0 if so, 3 otherwise
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
 //!   unshare-user      call unshare(CLONE_NEWUSER); exit 0 if allowed, 3 if denied
 //!   mount             call mount(2) with unprivileged-safe arguments; exit 0
@@ -339,6 +346,109 @@ fn main() {
             unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
             exit(0);
         }
+        "ipc-namespace" => {
+            use std::io::Write;
+
+            let hold_ms = args
+                .get(2)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(2000);
+            match std::fs::read_link("/proc/self/ns/ipc") {
+                Ok(link) => {
+                    print!("{}", link.display());
+                    if std::io::stdout().flush().is_err() {
+                        exit(3);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+                    exit(0);
+                }
+                Err(_) => exit(3),
+            }
+        }
+        "posix-shm" => {
+            let name = c"/guardrail-probe-posix-shm";
+            // SAFETY: name is a NUL-terminated POSIX shared-memory name and
+            // all remaining arguments are scalars.
+            let fd = unsafe {
+                libc::shm_open(
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                exit(3);
+            }
+            // SAFETY: fd is owned above and the length is scalar.
+            if unsafe { libc::ftruncate(fd, 4096) } != 0 {
+                // SAFETY: fd is owned above.
+                unsafe { libc::close(fd) };
+                // SAFETY: name identifies the object created above.
+                unsafe { libc::shm_unlink(name.as_ptr()) };
+                exit(3);
+            }
+            // SAFETY: fd is owned above and the mapping arguments describe
+            // one page backed by that object.
+            let mapping = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                )
+            };
+            if mapping == libc::MAP_FAILED {
+                // SAFETY: fd is owned above.
+                unsafe { libc::close(fd) };
+                // SAFETY: name identifies the object created above.
+                unsafe { libc::shm_unlink(name.as_ptr()) };
+                exit(3);
+            }
+            // SAFETY: mapping is a writable page owned above.
+            unsafe { mapping.cast::<u8>().write_volatile(0x5a) };
+            // SAFETY: mapping remains a readable page owned above.
+            let usable = unsafe { mapping.cast::<u8>().read_volatile() == 0x5a };
+            // SAFETY: mapping is owned above and has exactly this length.
+            unsafe { libc::munmap(mapping, 4096) };
+            // SAFETY: fd is owned above.
+            unsafe { libc::close(fd) };
+            // SAFETY: name identifies the object created above.
+            unsafe { libc::shm_unlink(name.as_ptr()) };
+            if usable { exit(0) } else { exit(3) }
+        }
+        "private-shm-mount" => {
+            let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            let mut vfs = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            // SAFETY: path is NUL-terminated and the out-pointer references
+            // writable storage for the kernel result structure.
+            let statfs_rc = unsafe { libc::statfs(c"/dev/shm".as_ptr(), fs.as_mut_ptr()) };
+            // SAFETY: path is NUL-terminated and the out-pointer references
+            // writable storage for the kernel result structure.
+            let statvfs_rc = unsafe { libc::statvfs(c"/dev/shm".as_ptr(), vfs.as_mut_ptr()) };
+            if statfs_rc != 0 || statvfs_rc != 0 {
+                exit(3);
+            }
+            // SAFETY: statfs succeeded and initialized its output.
+            let fs = unsafe { fs.assume_init() };
+            // SAFETY: statvfs succeeded and initialized its output.
+            let vfs = unsafe { vfs.assume_init() };
+            const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+            let Ok(block_size) = u128::try_from(fs.f_bsize) else {
+                exit(3);
+            };
+            let capacity = u128::from(fs.f_blocks) * block_size;
+            let required_flags = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+            if fs.f_type == TMPFS_MAGIC
+                && capacity <= 64 * 1024 * 1024
+                && vfs.f_flag & required_flags == required_flags
+            {
+                exit(0);
+            }
+            exit(3);
+        }
         "ptrace-self" => {
             // SAFETY: ptrace TRACEME takes no pointer args.
             let rc = unsafe {
@@ -444,6 +554,7 @@ fn main() {
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
                  socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-connect|\
                  unix-bind-listen|io-uring-setup|io-uring-enter|io-uring-register|shm|\
+                 ipc-namespace|posix-shm|private-shm-mount|\
                  ptrace-self|unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
             );
             exit(2);
