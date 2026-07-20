@@ -6,6 +6,8 @@
 #![deny(clippy::all)]
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(unix)]
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -14,6 +16,8 @@ use napi::Task;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+#[cfg(unix)]
+use guardrail::StdioMode;
 use guardrail::{
     Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxCommand, SandboxConfig,
     SharedSandboxChild, UserNamespacePolicy,
@@ -424,13 +428,35 @@ fn spawn_with_backend(
     if let Some(cwd) = cwd {
         cmd.current_dir = Some(cwd.into());
     }
-    // stdio stays at the SandboxCommand default: inherited from this process.
+    #[cfg(unix)]
+    materialize_inherited_stdio(&mut cmd)?;
 
     let child = backend.spawn(cmd).map_err(to_napi_err)?;
 
     Ok(SandboxChild {
         inner: SharedSandboxChild::new(child),
     })
+}
+
+#[cfg(unix)]
+fn materialize_inherited_stdio(command: &mut SandboxCommand) -> Result<()> {
+    // Node/libuv may keep FD_CLOEXEC on descriptors 0-2. Explicit file modes
+    // make Command dup the cloned descriptors onto the child's stdio slots.
+    command.stdin = duplicate_stdio(std::io::stdin().as_fd(), "stdin")?;
+    command.stdout = duplicate_stdio(std::io::stdout().as_fd(), "stdout")?;
+    command.stderr = duplicate_stdio(std::io::stderr().as_fd(), "stderr")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn duplicate_stdio(fd: BorrowedFd<'_>, name: &str) -> Result<StdioMode> {
+    let fd = fd.try_clone_to_owned().map_err(|err| {
+        Error::new(
+            Status::GenericFailure,
+            format!("failed to inherit {name}: {err}"),
+        )
+    })?;
+    Ok(StdioMode::File(fd.into()))
 }
 
 /// Handle to a spawned, sandboxed child process.

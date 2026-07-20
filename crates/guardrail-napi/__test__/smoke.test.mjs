@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { Worker } from 'node:worker_threads'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const require = createRequire(import.meta.url)
@@ -104,6 +105,54 @@ test('reuses a sandbox while Node workers churn allocations (Unix)', { skip: pro
   } finally {
     await Promise.all(workers.map((worker) => worker.terminate()))
   }
+})
+
+test('inherits Node standard streams on Unix', { skip: process.platform === 'win32' }, async () => {
+  // libuv marks Node's own descriptors close-on-exec. Run the binding in a
+  // nested Node process whose three standard streams are pipes, then require
+  // the sandboxed shell to read and write through those exact streams.
+  const bindingUrl = new URL('../index.js', import.meta.url).href
+  const darwinRuntimeProfile = fileURLToPath(
+    new URL('../../guardrail-macos/tests/fixtures/runtime.sb', import.meta.url),
+  )
+  const script = `
+    const guardrail = await import(${JSON.stringify(bindingUrl)})
+    const sandbox = await guardrail.Sandbox.build({
+      fs: [
+        { kind: 'read-allow', path: '/' },
+        { kind: 'execute-allow', path: '/' },
+      ],
+      network: 'full',
+      darwinSandboxProfiles: process.platform === 'darwin'
+        ? [${JSON.stringify(darwinRuntimeProfile)}]
+        : undefined,
+    })
+    const child = sandbox.spawn('/bin/sh', [
+      '-c',
+      'IFS= read -r line; printf "stdout:%s\\n" "$line"; printf "stderr:%s\\n" "$line" >&2',
+    ])
+    const result = await child.wait()
+    if (!result.success) throw new Error('sandboxed stdio probe failed: ' + JSON.stringify(result))
+  `
+
+  const { stdout, stderr } = await new Promise((resolve, reject) => {
+    const nested = execFile(
+      process.execPath,
+      ['--input-type=module', '--eval', script],
+      { encoding: 'utf8' },
+      (error, childStdout, childStderr) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve({ stdout: childStdout, stderr: childStderr })
+      },
+    )
+    nested.stdin.end('guardrail-stdin-marker\n')
+  })
+
+  assert.match(stdout, /^stdout:guardrail-stdin-marker$/m)
+  assert.match(stderr, /^stderr:guardrail-stdin-marker$/m)
 })
 
 test('spawns a sandboxed child and reports a clean exit (Windows)', { skip: process.platform !== 'win32' }, async () => {
