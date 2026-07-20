@@ -20,11 +20,12 @@ impl LinuxBackend {
     /// enforce Landlock ABI v2 (Linux 5.19+, required so write grants honor
     /// cross-directory rename and link) or fails the seccomp
     /// action-availability probe (see
-    /// [`Backend::probe_support`]); when the policy composes
-    /// `NetworkPolicy::OutboundOnly` with `IpcPolicy::Relaxed` and the kernel
-    /// lacks Landlock network support (ABI v4, Linux 6.7+; see [`crate::net`]);
+    /// [`Backend::probe_support`]); when `NetworkPolicy::OutboundOnly` is
+    /// requested and the kernel lacks Landlock network support (ABI v4,
+    /// Linux 6.7+; see the crate-level ABI table);
     /// or when the host forbids the unprivileged IPC/user/mount namespaces
-    /// required for every sandbox's IPC isolation (see [`crate::ns`]).
+    /// required for every sandbox's IPC isolation (see the crate-level
+    /// namespace documentation).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
@@ -101,9 +102,9 @@ impl Backend for LinuxBackend {
                 landlock_ruleset.allow_private_shm()?;
                 landlock_ruleset.restrict_self()?;
 
-                // (4b) Network confinement for OutboundOnly + Relaxed IPC:
-                //     a second parent-built Landlock layer denying TCP bind
-                //     (see crate::net), same single raw syscall.
+                // (4b) Network confinement for OutboundOnly: a second
+                //     parent-built Landlock layer denies explicit TCP bind
+                //     and, on ABI v10+, fixed UDP bind (see crate::net).
                 if let Some(net_ruleset) = &net_ruleset {
                     net_ruleset.restrict_self()?;
                 }

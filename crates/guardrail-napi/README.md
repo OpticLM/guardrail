@@ -865,37 +865,44 @@ marked *ignored* is an honest no-op there.
 | Option | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
-| `network` | seccomp socket-family filter; Landlock TCP-bind restriction for `outbound-only` + relaxed IPC | Seatbelt network rules | AppContainer capabilities |
+| `network` | seccomp socket-family filter; ABI-gated Landlock TCP/UDP-bind restrictions for `outbound-only` | Seatbelt network rules | AppContainer capabilities |
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
-| `linuxIpc` | seccomp (SysV/POSIX IPC, Unix sockets, ptrace) | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
+| `linuxIpc` | seccomp (SysV/POSIX IPC and Unix-socket creation); process inspection follows the Landlock domain hierarchy independently | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 
-On Linux, combining `network: 'outbound-only'` with `linuxIpc: 'relaxed'`
-requires Landlock ABI v4 (Linux 6.7+); `Sandbox.build()` and the one-shot
-`spawn()` throw `Unsupported` on older kernels. Relaxed IPC keeps Unix-domain
-servers usable, so the family-blind seccomp `bind`/`listen` traps cannot be
-installed. Landlock instead denies explicit TCP `bind`. The current Linux
-backend does not mediate UDP `bind` or `listen` on an unbound TCP socket, so
-those operations remain available under this combination.
+Linux applies the following exact-runtime-ABI behavior:
 
-Linux creates a per-spawn Landlock IPC domain with behavior selected by the
-exact runtime ABI:
+| Landlock ABI | `outbound-only` TCP bind | Abstract Unix sockets | Signals | Host-created pathname Unix sockets | `outbound-only` UDP bind |
+| --- | --- | --- | --- | --- | --- |
+| v2-v3 | unsupported: `Sandbox.build()` / `spawn()` throws because explicit TCP bind cannot be denied | not scoped | not scoped | unrestricted; `linuxUnixSockets` entries ignored without validation | not reached: `outbound-only` is unsupported |
+| v4-v5 | every explicit bind denied; `listen` on an unbound socket can still implicitly bind an ephemeral port | not scoped | not scoped | unrestricted; `linuxUnixSockets` entries ignored without validation | unrestricted |
+| v6-v8 | same as v4-v5 | host-created sockets denied; same-domain sockets work | sending outside the sandbox domain denied | unrestricted; `linuxUnixSockets` entries ignored without validation | unrestricted |
+| v9 | same as v4-v5 | same as v6-v8 | same as v6-v8 | denied by default; grant an existing socket path or hierarchy with `linuxUnixSockets` | unrestricted |
+| v10+ | same as v4-v5 | same as v6-v8 | same as v6-v8 | same as v9 | fixed local ports denied; explicit port 0 and kernel-selected ephemeral binding allowed |
 
-| Landlock ABI | Abstract Unix sockets | Signals | Host-created pathname Unix sockets |
-| --- | --- | --- | --- |
-| v2-v5 | not scoped | not scoped | unrestricted; `linuxUnixSockets` entries are ignored without validation |
-| v6-v8 | host-created sockets denied; same-domain sockets work | sending outside the sandbox domain denied | unrestricted; `linuxUnixSockets` entries are ignored without validation |
-| v9+ | same as v6-v8 | same as v6-v8 | denied by default; grant an existing socket path or hierarchy with `linuxUnixSockets` |
+The unbound TCP listener is an intentional residual: Landlock mediates
+explicit TCP `bind`, while `listen` can make the kernel choose a port without
+an explicit bind. This behavior does not depend on `linuxIpc`. `io_uring` is
+likewise network-coupled: its three syscalls return `ENOSYS` under `deny` and
+`outbound-only`, and remain available under `full` regardless of `linuxIpc`.
+
+Separately from this ABI matrix, every Linux spawn always gets a fresh IPC
+namespace and a private 64 MiB `/dev/shm` mounted `nosuid,nodev,noexec`. This
+is mandatory on every Landlock ABI supported by Guardrail, not best effort.
 
 On ABI v9+, `linuxUnixSockets` controls connection and explicit-recipient send
 access only. It is independent of `fs`: read/write access to a socket path does
 not grant connection access, and a socket grant does not grant filesystem
 access. Grant paths are opened when each child is spawned, so they must exist
 then. Unix sockets created inside the same sandbox domain remain reachable.
+`ptrace` and `process_vm_*` also work for processes in the same or a nested
+Landlock domain, while Landlock's implicit ptrace hierarchy denies inspection
+of host processes in the parent domain on every supported ABI. This is
+independent of ABI v6 signal scoping.
 
 On Windows there is no configurable IPC option, but AppContainer baseline
 isolation still applies. Access to a securable object requires both the normal
@@ -920,7 +927,7 @@ package SID and are not isolated from each other.
   check only queries whether the kernel reports the filter's `Trap` action.
   Ambient policy may still prevent filter installation, so a successful probe
   is not proof that spawning will succeed. The policy-specific Landlock ABI v4
-  check for outbound-only networking with relaxed IPC happens in
+  check for outbound-only networking happens in
   `Sandbox.build()` or one-shot `spawn()`, not `probeSupport()`.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.

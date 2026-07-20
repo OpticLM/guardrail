@@ -40,6 +40,11 @@
 //!                     abstract socket NAME; exit 0 if allowed, 3 if denied
 //!   tcp-bind          bind a TCP listener on 127.0.0.1:0; exit 0 if allowed,
 //!                     3 if denied
+//!   tcp-listen-unbound
+//!                     listen on an unbound TCP socket; exit 0 if the kernel
+//!                     implicitly assigns a port, 3 if denied
+//!   udp-bind PORT     bind a UDP socket on 127.0.0.1:PORT; exit 0 if allowed,
+//!                     3 if denied
 //!   tcp-connect <ADDR>
 //!                     connect a TCP stream to ADDR; exit 0 if allowed, 3 if denied
 //!   unix-bind-listen <NAME>
@@ -73,6 +78,15 @@
 //!   private-shm-mount verify `/dev/shm` is a tmpfs no larger than 64 MiB
 //!                     mounted nosuid,nodev,noexec; exit 0 if so, 3 otherwise
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
+//!   ptrace-child      attach to and inspect a forked child; exit 0 if allowed,
+//!                     3 if denied
+//!   process-vm-child  write and read a forked child's memory; exit 0 if
+//!                     allowed, 3 if denied
+//!   process-vm-host PID ADDRESS EXPECTED
+//!                     read EXPECTED from ADDRESS in PID; exit 0 if allowed,
+//!                     3 if denied
+//!   process-vm-target publish a readable marker and wait for stdin to close;
+//!                     used as an explicitly ptrace-opted-in host target
 //!   unshare-user      call unshare(CLONE_NEWUSER); exit 0 if allowed, 3 if denied
 //!   mount             call mount(2) with unprivileged-safe arguments; exit 0
 //!                     if the syscall reaches the kernel (any errno), never
@@ -88,6 +102,7 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+    use std::mem::size_of;
     use std::process::exit;
 
     let args: Vec<String> = std::env::args().collect();
@@ -264,6 +279,29 @@ fn main() {
             Ok(_) => exit(0),
             Err(_) => exit(3),
         },
+        "tcp-listen-unbound" => {
+            // SAFETY: socket takes scalar arguments.
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            if fd < 0 {
+                exit(3);
+            }
+            // listen(2) implicitly binds an unbound TCP socket to an
+            // ephemeral port without an explicit bind(2).
+            // SAFETY: fd is the live TCP socket created above.
+            let rc = unsafe { libc::listen(fd, 1) };
+            // SAFETY: fd is owned above.
+            unsafe { libc::close(fd) };
+            if rc == 0 { exit(0) } else { exit(3) }
+        }
+        "udp-bind" => {
+            let Some(port) = args.get(2).and_then(|port| port.parse::<u16>().ok()) else {
+                exit(2);
+            };
+            match std::net::UdpSocket::bind(("127.0.0.1", port)) {
+                Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
         "tcp-connect" => {
             let Some(address) = args.get(2) else {
                 exit(2);
@@ -556,6 +594,196 @@ fn main() {
                 exit(0);
             }
         }
+        "ptrace-child" => {
+            let marker: libc::c_long = 0x4755_4152;
+            // SAFETY: fork creates one child. The child uses only pause and
+            // _exit; the parent owns and reaps the resulting pid.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                exit(3);
+            }
+            if pid == 0 {
+                // SAFETY: pause has no arguments. The parent terminates this
+                // process after completing the inspection.
+                unsafe { libc::pause() };
+                // SAFETY: do not run Rust destructors in the forked child.
+                unsafe { libc::_exit(0) };
+            }
+
+            // SAFETY: pid names our live child and the remaining arguments
+            // are unused by PTRACE_ATTACH.
+            let attached = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_ATTACH,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } == 0;
+            if !attached {
+                kill_and_reap(pid);
+                exit(3);
+            }
+            let mut wait_status = 0;
+            // SAFETY: pid is the attached child and wait_status is writable.
+            if unsafe { libc::waitpid(pid, &mut wait_status, 0) } < 0 {
+                kill_and_reap(pid);
+                exit(3);
+            }
+            // fork preserves virtual addresses, so marker has the same
+            // address and value in the child until it is inspected here.
+            // SAFETY: pid is stopped under ptrace and marker's address points
+            // to a live c_long in the child.
+            let value = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_PEEKDATA,
+                    pid,
+                    std::ptr::addr_of!(marker).cast_mut().cast::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            };
+            // SAFETY: pid is still stopped under ptrace; signal 0 resumes it
+            // without delivering a signal.
+            let detached = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_DETACH,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } == 0;
+            kill_and_reap(pid);
+            if detached && value == marker {
+                exit(0);
+            }
+            exit(3);
+        }
+        "process-vm-child" => {
+            let marker: libc::c_long = 0x4755_4152;
+            // SAFETY: fork creates one child. The child uses only pause and
+            // _exit; the parent owns and reaps the resulting pid.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                exit(3);
+            }
+            if pid == 0 {
+                // SAFETY: pause has no arguments. The parent terminates this
+                // process after completing the inspection.
+                unsafe { libc::pause() };
+                // SAFETY: do not run Rust destructors in the forked child.
+                unsafe { libc::_exit(0) };
+            }
+
+            let replacement: libc::c_long = 0x5354_4554;
+            let local_write = libc::iovec {
+                iov_base: std::ptr::addr_of!(replacement).cast_mut().cast(),
+                iov_len: size_of::<libc::c_long>(),
+            };
+            let remote = libc::iovec {
+                iov_base: std::ptr::addr_of!(marker).cast_mut().cast(),
+                iov_len: size_of::<libc::c_long>(),
+            };
+            // SAFETY: both iovecs reference live c_long objects, and pid is
+            // our child with the same mapped address for marker.
+            let written = unsafe { libc::process_vm_writev(pid, &local_write, 1, &remote, 1, 0) };
+
+            let mut observed: libc::c_long = 0;
+            let local_read = libc::iovec {
+                iov_base: std::ptr::addr_of_mut!(observed).cast(),
+                iov_len: size_of::<libc::c_long>(),
+            };
+            // SAFETY: both iovecs reference live c_long objects, and pid is
+            // our child with the same mapped address for marker.
+            let read = unsafe { libc::process_vm_readv(pid, &local_read, 1, &remote, 1, 0) };
+            kill_and_reap(pid);
+
+            let wanted =
+                isize::try_from(size_of::<libc::c_long>()).expect("c_long size fits isize");
+            if written == wanted && read == wanted && observed == replacement {
+                exit(0);
+            }
+            exit(3);
+        }
+        "process-vm-host" => {
+            let Some(pid) = args.get(2).and_then(|pid| pid.parse::<libc::pid_t>().ok()) else {
+                exit(2);
+            };
+            let Some(address) = args
+                .get(3)
+                .and_then(|address| address.parse::<usize>().ok())
+            else {
+                exit(2);
+            };
+            let Some(expected) = args
+                .get(4)
+                .and_then(|expected| expected.parse::<libc::c_long>().ok())
+            else {
+                exit(2);
+            };
+            let mut observed: libc::c_long = 0;
+            let local = libc::iovec {
+                iov_base: std::ptr::addr_of_mut!(observed).cast(),
+                iov_len: size_of::<libc::c_long>(),
+            };
+            let remote = libc::iovec {
+                iov_base: address as *mut libc::c_void,
+                iov_len: size_of::<libc::c_long>(),
+            };
+            // SAFETY: local points to writable storage. The remote address is
+            // supplied by the test process; process_vm_readv reports an error
+            // instead of dereferencing it in this process when access fails.
+            let read = unsafe { libc::process_vm_readv(pid, &local, 1, &remote, 1, 0) };
+            let wanted =
+                isize::try_from(size_of::<libc::c_long>()).expect("c_long size fits isize");
+            if read == wanted && observed == expected {
+                exit(0);
+            }
+            exit(3);
+        }
+        "process-vm-target" => {
+            use std::io::{Read, Write};
+
+            let marker: libc::c_long = 0x4755_4152;
+            // Opt out of Yama's ancestry restriction so an unsandboxed sibling
+            // probe establishes that ordinary credentials permit this read.
+            // Landlock must still deny a reader in a child domain.
+            // SAFETY: PR_SET_PTRACER takes a scalar pid;
+            // PR_SET_PTRACER_ANY means any process otherwise permitted by the
+            // regular ptrace access checks.
+            let rc = unsafe {
+                libc::prctl(
+                    libc::PR_SET_PTRACER,
+                    libc::PR_SET_PTRACER_ANY,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                )
+            };
+            if rc != 0 {
+                let error = std::io::Error::last_os_error();
+                // Without Yama, no LSM handles PR_SET_PTRACER: the LSM hook
+                // returns -ENOSYS and generic prctl turns the unknown option
+                // into EINVAL. That means no exception is needed, so let the
+                // unsandboxed baseline below determine ordinary access.
+                if error.raw_os_error() != Some(libc::EINVAL) {
+                    exit(3);
+                }
+            }
+            println!(
+                "{} {} {marker}",
+                std::process::id(),
+                std::ptr::addr_of!(marker) as usize
+            );
+            if std::io::stdout().flush().is_err() {
+                exit(3);
+            }
+            let mut byte = [0u8; 1];
+            // EOF is the parent test's signal to exit.
+            if std::io::stdin().read(&mut byte).is_err() {
+                exit(3);
+            }
+            exit(0);
+        }
         "unshare-user" => {
             // SAFETY: unshare takes only a scalar flags argument.
             let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
@@ -643,16 +871,27 @@ fn main() {
                  <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|\
                  rename-file|link-file|read-fd|\
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
-                 socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-connect|\
+                 socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-listen-unbound|\
+                 udp-bind|tcp-connect|\
                  unix-bind-listen|unix-connect|unix-path-roundtrip|unix-abstract-roundtrip|\
                  signal-zero|signal-child-zero|\
                  io-uring-setup|io-uring-enter|io-uring-register|shm|\
                  ipc-namespace|posix-shm|private-shm-mount|\
-                 ptrace-self|unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
+                 ptrace-self|ptrace-child|process-vm-child|process-vm-host|process-vm-target|\
+                 unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
             );
             exit(2);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_and_reap(pid: libc::pid_t) {
+    // SAFETY: pid is a child created by this process. SIGKILL ensures it
+    // cannot remain paused.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // SAFETY: pid names our child; waitpid reaps it before the probe exits.
+    unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
 }
 
 #[cfg(target_os = "linux")]

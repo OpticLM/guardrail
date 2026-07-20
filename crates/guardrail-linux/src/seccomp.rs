@@ -11,10 +11,8 @@
 //! `add_kernel_surface_rules`.
 //!
 //! seccomp cannot see a socket fd's family, so under `OutboundOnly` the
-//! whole-syscall `bind`/`listen` traps are installed only while
-//! `IpcPolicy::Strict` guarantees no Unix-domain socket exists to hit them;
-//! with `IpcPolicy::Relaxed`, denying TCP bind is the Landlock network layer's
-//! job (see `crate::net`).
+//! family-aware TCP and UDP bind restrictions live in the Landlock network
+//! layer (see `crate::net`).
 //!
 //! Three more filters are stacked as needed; the kernel runs every installed
 //! filter and applies the highest-precedence action (Trap > Errno > Allow):
@@ -33,8 +31,8 @@
 //!   redirected to a named socket with `connect` or `sendto`.
 //!   Connection-oriented `socketpair`s stay available.
 //!
-//! * io_uring is denied with `ENOSYS` unless both policies are at their most
-//!   permissive level: ring-submitted operations (`IORING_OP_SOCKET`,
+//! * io_uring is denied with `ENOSYS` unless the network policy is `Full`:
+//!   ring-submitted operations (`IORING_OP_SOCKET`,
 //!   `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not syscalls, so leaving
 //!   io_uring available would bypass the socket rules. With `ENOSYS` — not
 //!   Trap — runtimes that probe io_uring for file I/O (libuv/Node,
@@ -71,15 +69,9 @@ const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 
 // Legacy x32 entries whose base numbers differ from native x86-64.
 #[cfg(target_arch = "x86_64")]
-const X32_SYS_PTRACE: i64 = 521;
-#[cfg(target_arch = "x86_64")]
 const X32_SYS_MQ_NOTIFY: i64 = 527;
 #[cfg(target_arch = "x86_64")]
 const X32_SYS_KEXEC_LOAD: i64 = 528;
-#[cfg(target_arch = "x86_64")]
-const X32_SYS_PROCESS_VM_READV: i64 = 539;
-#[cfg(target_arch = "x86_64")]
-const X32_SYS_PROCESS_VM_WRITEV: i64 = 540;
 
 // 294 is the asm-generic slot. libc omits the constant on aarch64-musl and on
 // riscv64, where the syscall is not currently implemented.
@@ -166,19 +158,11 @@ const STRICT_ONLY_IPC: &[i64] = &[
     libc::SYS_mq_getsetattr,
 ];
 
-/// Process-inspection syscalls blocked at BOTH levels. Never benign for a
-/// sandbox: they let code read/modify other processes' memory.
-const ALWAYS_BLOCKED_IPC: &[i64] = &[
-    libc::SYS_ptrace,
-    libc::SYS_process_vm_readv,
-    libc::SYS_process_vm_writev,
-];
-
 /// io_uring syscalls, denied with `ENOSYS` unless the network policy is
-/// `Full` and the IPC policy is `Relaxed`. Operations submitted through a
-/// ring never pass the syscall filter, so neither the socket-family rules nor
-/// the `AF_UNIX` rule can see them. `enter` and `register` are included
-/// besides `setup` so an inherited or fd-passed ring is equally unusable.
+/// `Full`. Operations submitted through a ring never pass the syscall filter,
+/// so the socket-family rules cannot see them. `enter` and `register` are
+/// included besides `setup` so an inherited or fd-passed ring is equally
+/// unusable.
 const IO_URING_SYSCALLS: &[i64] = &[
     libc::SYS_io_uring_setup,
     libc::SYS_io_uring_enter,
@@ -214,7 +198,7 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
 /// unconditional kernel-attack-surface denylist.
 fn violation_rules(config: &SandboxConfig) -> Result<RuleMap> {
     let mut rules = RuleMap::new();
-    add_network_rules(&mut rules, config.network, config.linux_ipc)?;
+    add_network_rules(&mut rules, config.network)?;
     add_ipc_rules(&mut rules, config.linux_ipc)?;
     add_kernel_surface_rules(&mut rules, config.linux_user_namespaces);
     Ok(rules)
@@ -269,8 +253,8 @@ fn clone_newuser_rule() -> Result<SeccompRule> {
 fn enosys_rules(config: &SandboxConfig) -> RuleMap {
     let mut rules = RuleMap::new();
     // io_uring can recreate any denied socket operation, so it stays denied
-    // unless both policies sit at their most permissive level.
-    if config.network != NetworkPolicy::Full || config.linux_ipc == IpcPolicy::Strict {
+    // unless the network policy is fully open.
+    if config.network != NetworkPolicy::Full {
         for &syscall in IO_URING_SYSCALLS {
             add_whole_syscall_rule(&mut rules, syscall);
         }
@@ -358,7 +342,7 @@ pub(crate) fn apply(programs: &[BpfProgram]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy, ipc: IpcPolicy) -> Result<()> {
+fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
     match policy {
         NetworkPolicy::Deny => {
             // Block every non-Unix family, including families added by future
@@ -377,15 +361,8 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy, ipc: IpcPolicy)
                 libc::SYS_socket,
                 socket_domain_allowlist_rule(&[libc::AF_UNIX, libc::AF_INET, libc::AF_INET6])?,
             );
-            // seccomp cannot see a socket fd's family at bind/listen time, so
-            // whole-syscall traps are only sound while Strict IPC guarantees no
-            // Unix-domain socket exists to hit them. Under Relaxed IPC, Unix
-            // servers are IpcPolicy's to allow, and denying TCP bind moves to
-            // the family-aware Landlock network layer (see `crate::net`).
-            if ipc == IpcPolicy::Strict {
-                add_whole_syscall_rule(rules, libc::SYS_bind);
-                add_whole_syscall_rule(rules, libc::SYS_listen);
-            }
+            // Family-aware bind restrictions are applied by Landlock (see
+            // `crate::net`); bind/listen must stay available for AF_UNIX.
         }
         NetworkPolicy::Full => {}
     }
@@ -393,9 +370,6 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy, ipc: IpcPolicy)
 }
 
 fn add_ipc_rules(rules: &mut RuleMap, policy: IpcPolicy) -> Result<()> {
-    for &sys in ALWAYS_BLOCKED_IPC {
-        add_whole_syscall_rule(rules, sys);
-    }
     if policy == IpcPolicy::Strict {
         for &sys in STRICT_ONLY_IPC {
             add_whole_syscall_rule(rules, sys);
@@ -420,11 +394,8 @@ fn add_whole_syscall_rule(rules: &mut RuleMap, syscall: i64) {
 #[cfg(target_arch = "x86_64")]
 fn syscall_numbers(syscall: i64) -> impl Iterator<Item = i64> {
     let x32_syscall = match syscall {
-        libc::SYS_ptrace => X32_SYS_PTRACE,
         libc::SYS_mq_notify => X32_SYS_MQ_NOTIFY,
         libc::SYS_kexec_load => X32_SYS_KEXEC_LOAD,
-        libc::SYS_process_vm_readv => X32_SYS_PROCESS_VM_READV,
-        libc::SYS_process_vm_writev => X32_SYS_PROCESS_VM_WRITEV,
         _ => syscall,
     };
     [syscall, x32_syscall | X32_SYSCALL_BIT].into_iter()
@@ -503,11 +474,8 @@ mod tests {
     #[test]
     fn x32_specific_syscalls_use_their_legacy_numbers() {
         for (native, x32) in [
-            (libc::SYS_ptrace, X32_SYS_PTRACE),
             (libc::SYS_mq_notify, X32_SYS_MQ_NOTIFY),
             (libc::SYS_kexec_load, X32_SYS_KEXEC_LOAD),
-            (libc::SYS_process_vm_readv, X32_SYS_PROCESS_VM_READV),
-            (libc::SYS_process_vm_writev, X32_SYS_PROCESS_VM_WRITEV),
         ] {
             assert_eq!(
                 syscall_numbers(native).collect::<Vec<_>>(),
@@ -536,11 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn io_uring_denial_requires_full_network_and_relaxed_ipc() {
+    fn io_uring_denial_depends_only_on_network_policy() {
         for (network, ipc, denied) in [
             (NetworkPolicy::Deny, IpcPolicy::Strict, true),
             (NetworkPolicy::Deny, IpcPolicy::Relaxed, true),
-            (NetworkPolicy::Full, IpcPolicy::Strict, true),
+            (NetworkPolicy::OutboundOnly, IpcPolicy::Strict, true),
+            (NetworkPolicy::OutboundOnly, IpcPolicy::Relaxed, true),
+            (NetworkPolicy::Full, IpcPolicy::Strict, false),
             (NetworkPolicy::Full, IpcPolicy::Relaxed, false),
         ] {
             let rules = enosys_rules(&config(network, ipc, UserNamespacePolicy::Deny));
@@ -553,8 +523,8 @@ mod tests {
     }
 
     #[test]
-    fn outbound_only_bind_listen_traps_follow_the_ipc_policy() {
-        for (ipc, trapped) in [(IpcPolicy::Strict, true), (IpcPolicy::Relaxed, false)] {
+    fn outbound_only_never_uses_family_blind_bind_listen_traps() {
+        for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
             let rules = violation_rules(&config(
                 NetworkPolicy::OutboundOnly,
                 ipc,
@@ -562,9 +532,8 @@ mod tests {
             ))
             .expect("violation rules");
             for sys in [libc::SYS_bind, libc::SYS_listen] {
-                assert_eq!(
-                    rules.contains_key(&sys),
-                    trapped,
+                assert!(
+                    !rules.contains_key(&sys),
                     "syscall {sys} trap under OutboundOnly with {ipc:?} IPC"
                 );
             }
@@ -654,8 +623,8 @@ mod tests {
             UserNamespacePolicy::Allow,
         ))
         .expect("filters");
-        // Trap (ptrace + kernel surface) and EPERM (bpf/perf/userfaultfd)
-        // remain; the unix-socket and ENOSYS filters have nothing to deny.
+        // Trap (kernel surface) and EPERM (bpf/perf/userfaultfd) remain; the
+        // Unix-socket and ENOSYS filters have nothing to deny.
         assert_eq!(programs.len(), 2);
     }
 

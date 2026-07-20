@@ -52,18 +52,21 @@
 //! on a path while write or execute stays allowed there — a hidden path
 //! cannot remain writable.
 //!
-//! # Landlock IPC domain and ABI differences
+//! # Landlock ABI behavior
 //!
 //! Every spawn also enters its own Landlock domain for the IPC operations the
-//! running kernel can mediate. The policy is deliberately best-effort across
-//! ABI versions; upgrading the kernel adds isolation without making older
-//! supported kernels fail:
+//! running kernel can mediate. IPC scoping, pathname sockets, and UDP bind are
+//! deliberately best-effort across ABI versions. TCP bind is the exception:
+//! `OutboundOnly` fails closed on ABI v2-v3 because that policy's explicit
+//! bind guarantee cannot be enforced there.
 //!
-//! | Runtime Landlock ABI | Abstract Unix sockets | Signals | Host-created pathname Unix sockets |
-//! | --- | --- | --- | --- |
-//! | v2-v5 | not scoped | not scoped | unrestricted; `linux_unix_sockets` is ignored without validating or opening its paths |
-//! | v6-v8 | connections/sends to host-created sockets are denied; same-domain sockets work | sending outside the sandbox domain is denied | unrestricted; `linux_unix_sockets` is ignored without validating or opening its paths |
-//! | v9+ | same as v6-v8 | same as v6-v8 | denied by default; `linux_unix_sockets` grants named socket paths or hierarchies; same-domain sockets work |
+//! | Runtime Landlock ABI | `OutboundOnly` TCP bind | Abstract Unix sockets | Signals | Host-created pathname Unix sockets | `OutboundOnly` UDP bind |
+//! | --- | --- | --- | --- | --- | --- |
+//! | v2-v3 | unsupported: backend construction fails because explicit TCP bind cannot be denied | not scoped | not scoped | unrestricted; `linux_unix_sockets` is ignored without validation | not reached: `OutboundOnly` is unsupported |
+//! | v4-v5 | every explicit bind denied; `listen` on an unbound socket can still implicitly bind an ephemeral port | not scoped | not scoped | unrestricted; `linux_unix_sockets` is ignored without validation | unrestricted |
+//! | v6-v8 | same as v4-v5 | host-created sockets denied; same-domain sockets work | sending outside the sandbox domain denied | unrestricted; `linux_unix_sockets` is ignored without validation | unrestricted |
+//! | v9 | same as v4-v5 | same as v6-v8 | same as v6-v8 | denied by default; `linux_unix_sockets` grants an existing socket path or hierarchy; same-domain sockets work | unrestricted |
+//! | v10+ | same as v4-v5 | same as v6-v8 | same as v6-v8 | same as v9 | fixed local ports denied; explicit port 0 and kernel-selected ephemeral binding allowed |
 //!
 //! On ABI v9+, pathname grants use `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` and
 //! cover `connect(2)` plus messages sent with an explicit pathname recipient.
@@ -71,7 +74,9 @@
 //! to a socket's filesystem path does not allow connecting, and a socket grant
 //! does not grant file access. Grant paths must exist when the child is
 //! spawned. The raw stable ABI v9 UAPI is used because this crate's `landlock`
-//! dependency currently models through ABI v7.
+//! dependency currently models through ABI v7. The network layer likewise
+//! uses ABI v10's stable raw `LANDLOCK_ACCESS_NET_BIND_UDP` and network-port
+//! rule layout.
 //!
 //! Scoping applies regardless of [`guardrail_core::IpcPolicy`]. Under
 //! `IpcPolicy::Strict`, seccomp's earlier Unix-socket creation denial remains
@@ -85,32 +90,32 @@
 //! merely probe optional sockets (nscd, syslog, ssh-agent) fall back;
 //! connection-oriented `socketpair`s created by the child keep working.
 //!
-//! # OutboundOnly and Unix-domain servers
+//! # OutboundOnly residual TCP listener
 //!
-//! `NetworkPolicy::OutboundOnly` restricts IP servers, but seccomp cannot see
-//! a socket fd's family at `bind`/`listen` time, so how that restriction is
-//! enforced follows the IPC policy. Under `IpcPolicy::Strict` no Unix-domain
-//! socket can exist, so family-blind whole-syscall traps (SIGSYS) are sound
-//! and used.
-//! Under `IpcPolicy::Relaxed` — which permits Unix-domain servers — the
-//! denial moves to a second Landlock ruleset handling `BindTcp` with no
-//! rules: binding a TCP socket to any port fails with `EACCES` while outbound
-//! `connect` and Unix-domain `bind`/`listen` are untouched. This requires
-//! Landlock ABI v4 (Linux 6.7+); on older kernels constructing a backend for
-//! that policy combination fails with `Error::Unsupported` instead of
-//! silently narrowing the contract. Two residuals of what the kernel can
-//! express today remain under that combination: `listen(2)` on an unbound
-//! TCP socket autobinds an ephemeral port without passing the LSM bind hook,
-//! and UDP bind is not yet covered (Landlock gained UDP rights in ABI v10,
-//! not yet exposed by the `landlock` crate). Compose with `IpcPolicy::Strict`
-//! when the child must not serve anything at all.
+//! `NetworkPolicy::OutboundOnly` uses a second Landlock ruleset handling
+//! `BindTcp` with no TCP port rules. On ABI v4+, every explicit TCP `bind(2)`
+//! therefore fails with `EACCES`, while outbound `connect(2)` and Unix-domain
+//! `bind`/`listen` remain untouched. `listen(2)` on an unbound TCP socket is
+//! intentionally preserved as an ephemeral-listener residual: the kernel
+//! implicitly selects a local port without passing through explicit
+//! `bind(2)`, so Landlock does not deny it. This behavior is independent of
+//! `IpcPolicy`.
 //!
-//! Unless the network policy is `Full` and the IPC policy is `Relaxed`, the
-//! `io_uring_*` syscalls fail with `ENOSYS`: ring-submitted operations
+//! Unless the network policy is `Full`, the `io_uring_*` syscalls fail with
+//! `ENOSYS`: ring-submitted operations
 //! (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not
 //! syscalls, so an open ring would bypass the socket rules. Runtimes that
 //! probe io_uring for file I/O see a kernel without io_uring and fall back to
 //! plain syscalls.
+//!
+//! # Process inspection
+//!
+//! `ptrace(2)`, `process_vm_readv(2)`, and `process_vm_writev(2)` remain
+//! available inside the sandbox domain. Landlock implicitly applies its
+//! domain hierarchy to ptrace access checks on every ABI supported here: a
+//! tracer can inspect a process in the same or a nested domain, but cannot
+//! inspect a host process in its parent domain. This is separate from the ABI
+//! v6 signal scope in the table above.
 //!
 //! # Kernel attack surface and threat model
 //!

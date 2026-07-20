@@ -1,10 +1,10 @@
 #![cfg(target_os = "linux")]
 
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
-use guardrail_core::{Backend, IpcPolicy, NetworkPolicy, SandboxCommand, SandboxConfig};
+use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, SandboxCommand, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
 mod common;
@@ -99,12 +99,12 @@ fn deny_leaves_unix_sockets_to_the_ipc_policy() {
 }
 
 #[test]
-fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind() {
+fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_tcp_bind() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
     // Relaxed IPC isolates the network filter for the AF_UNIX probe.
     config.linux_ipc = IpcPolicy::Relaxed;
-    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+    if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
     }
@@ -127,7 +127,7 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_bind()
     assert_eq!(
         status(&config, &["tcp-bind"]).code(),
         Some(3),
-        "binding a TCP listener must be denied under OutboundOnly with Relaxed IPC"
+        "an explicit TCP bind must be denied by Landlock under OutboundOnly"
     );
 }
 
@@ -136,7 +136,7 @@ fn outbound_only_with_relaxed_ipc_allows_unix_bind_listen() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
     config.linux_ipc = IpcPolicy::Relaxed;
-    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+    if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
     }
@@ -152,7 +152,7 @@ fn outbound_only_with_relaxed_ipc_keeps_ipv4_and_ipv6_connections() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
     config.linux_ipc = IpcPolicy::Relaxed;
-    if let Some(reason) = outbound_relaxed_unsupported_reason(&config) {
+    if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
     }
@@ -169,26 +169,95 @@ fn outbound_only_with_relaxed_ipc_keeps_ipv4_and_ipv6_connections() {
 }
 
 #[test]
-fn outbound_only_with_strict_ipc_keeps_trapping_bind() {
+fn outbound_only_preserves_the_unbound_tcp_listener_residual() {
+    for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
+        let mut config = common::base();
+        config.network = NetworkPolicy::OutboundOnly;
+        config.linux_ipc = ipc;
+        if let Some(reason) = outbound_unsupported_reason(&config) {
+            eprintln!("skipping: {reason}");
+            return;
+        }
+        assert!(
+            allowed(&config, &["tcp-listen-unbound"]),
+            "listen on an unbound TCP socket must retain its implicit ephemeral bind under {ipc:?} IPC"
+        );
+        assert_eq!(
+            status(&config, &["tcp-bind"]).code(),
+            Some(3),
+            "an explicit TCP bind must still be denied under {ipc:?} IPC"
+        );
+    }
+}
+
+#[test]
+fn outbound_only_udp_bind_is_best_effort_by_exact_abi() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
-    config.linux_ipc = IpcPolicy::Strict;
-    // With no Unix-domain sockets creatable, the family-blind whole-syscall
-    // traps stay sound and keep the harder SIGSYS denial.
+    config.linux_ipc = IpcPolicy::Relaxed;
+    if let Some(reason) = outbound_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
     assert!(
-        blocked_by_seccomp(&config, &["tcp-bind"]),
-        "binding/listening must be trapped under OutboundOnly with Strict IPC"
+        allowed(&config, &["udp-bind", "0"]),
+        "an explicit UDP port-0 bind must remain available"
+    );
+
+    let port = unused_udp_port().to_string();
+    let fixed_allowed = allowed(&config, &["udp-bind", &port]);
+    assert_eq!(
+        fixed_allowed,
+        common::landlock_abi() < 10,
+        "fixed UDP bind must be denied only when ABI v10 can mediate it"
     );
 }
 
-/// The `Unsupported` reason when the host kernel lacks the Landlock network
-/// support (ABI v4) that OutboundOnly + Relaxed IPC requires, so tests can
-/// skip with it.
+#[test]
+fn outbound_only_network_layer_does_not_narrow_filesystem_refer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source_dir = dir.path().join("source");
+    let destination_dir = dir.path().join("destination");
+    std::fs::create_dir(&source_dir).expect("create source directory");
+    std::fs::create_dir(&destination_dir).expect("create destination directory");
+    let source = source_dir.join("file");
+    let destination = destination_dir.join("file");
+    std::fs::write(&source, b"data").expect("write source");
+
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
+    config.fs.push(FsAccess::WriteAllow(dir.path().into()));
+    if let Some(reason) = outbound_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+
+    assert!(
+        allowed(
+            &config,
+            &[
+                "rename-file",
+                source.to_str().expect("UTF-8 source"),
+                destination.to_str().expect("UTF-8 destination"),
+            ],
+        ),
+        "the network-only Landlock layer must preserve cross-directory rename granted by FsAccess"
+    );
+}
+
+fn unused_udp_port() -> u16 {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind temporary UDP socket");
+    socket.local_addr().expect("temporary UDP address").port()
+}
+
+/// The `Unsupported` reason when the host kernel lacks Landlock ABI v4,
+/// which is required to preserve OutboundOnly's explicit TCP-bind guarantee.
 #[expect(
     clippy::panic,
     reason = "an unexpected backend error invalidates the test harness"
 )]
-fn outbound_relaxed_unsupported_reason(config: &SandboxConfig) -> Option<String> {
+fn outbound_unsupported_reason(config: &SandboxConfig) -> Option<String> {
     match LinuxBackend::new(config.clone()) {
         Ok(_) => None,
         Err(guardrail_core::Error::Unsupported(reason)) => Some(reason),
@@ -220,6 +289,12 @@ fn deny_and_outbound_only_block_io_uring_with_enosys() {
     for policy in [NetworkPolicy::Deny, NetworkPolicy::OutboundOnly] {
         let mut config = common::base();
         config.network = policy;
+        if policy == NetworkPolicy::OutboundOnly
+            && let Some(reason) = outbound_unsupported_reason(&config)
+        {
+            eprintln!("skipping OutboundOnly: {reason}");
+            continue;
+        }
         for &probe in IO_URING_PROBES {
             // Exit 3 is reserved for ENOSYS by these probe modes; unexpected
             // host errors exit 2 and SIGSYS has no exit code.
@@ -233,38 +308,20 @@ fn deny_and_outbound_only_block_io_uring_with_enosys() {
 }
 
 #[test]
-fn full_network_and_relaxed_ipc_allow_io_uring_syscalls() {
+fn full_network_allows_io_uring_regardless_of_ipc_policy() {
     if !host_has_io_uring() {
         eprintln!("skipping: io_uring unavailable on this host");
         return;
     }
-    let mut config = common::base();
-    config.network = NetworkPolicy::Full;
-    config.linux_ipc = IpcPolicy::Relaxed;
-    for &probe in IO_URING_PROBES {
-        assert!(
-            allowed(&config, &[probe]),
-            "{probe} must be allowed under Full network and Relaxed IPC"
-        );
-    }
-}
-
-#[test]
-fn strict_ipc_blocks_io_uring_despite_full_network() {
-    if !host_has_io_uring() {
-        eprintln!("skipping: io_uring unavailable on this host");
-        return;
-    }
-    // IORING_OP_SOCKET could recreate an AF_UNIX socket without passing the
-    // syscall filter, so Strict IPC must keep io_uring at ENOSYS.
-    let mut config = common::base();
-    config.network = NetworkPolicy::Full;
-    config.linux_ipc = IpcPolicy::Strict;
-    for &probe in IO_URING_PROBES {
-        assert_eq!(
-            status(&config, &[probe]).code(),
-            Some(3),
-            "{probe} must fail with ENOSYS while IPC is Strict"
-        );
+    for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
+        let mut config = common::base();
+        config.network = NetworkPolicy::Full;
+        config.linux_ipc = ipc;
+        for &probe in IO_URING_PROBES {
+            assert!(
+                allowed(&config, &[probe]),
+                "{probe} must be allowed under Full network with {ipc:?} IPC"
+            );
+        }
     }
 }

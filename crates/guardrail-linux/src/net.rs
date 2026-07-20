@@ -1,102 +1,206 @@
-//! Family-aware network confinement via the Landlock network LSM (ABI v4,
-//! Linux 6.7+).
+//! Family-aware `OutboundOnly` bind confinement via Landlock.
 //!
-//! seccomp cannot see a socket fd's family at `bind`/`listen` time, so under
-//! `NetworkPolicy::OutboundOnly` the family-blind seccomp traps would also
-//! kill the Unix-domain servers that `IpcPolicy::Relaxed` permits. For that
-//! policy combination the explicit TCP-bind denial moves here: a Landlock
-//! ruleset handling `AccessNet::BindTcp` with no rules denies binding a TCP
-//! socket to any port (`EACCES`), while outbound `connect` stays unrestricted
-//! because `ConnectTcp` is not handled. Fails closed: on kernels without
-//! Landlock ABI v4 the backend refuses to construct instead of running the
-//! child with the contract silently narrowed.
+//! seccomp cannot recover a socket's family from its fd at `bind`/`listen`
+//! time, so Landlock handles the IP-specific restrictions. ABI v4+ denies
+//! every explicit TCP bind by handling `LANDLOCK_ACCESS_NET_BIND_TCP` without
+//! granting any port. ABI v10+ also handles UDP bind and grants only port 0,
+//! preserving kernel-selected ephemeral binds while denying fixed local
+//! ports. UDP bind remains unrestricted on ABI v4-v9.
 //!
-//! Known residuals of what the kernel can express today, documented in the
-//! crate docs: `listen(2)` on an unbound TCP socket autobinds an ephemeral
-//! port without passing the LSM bind hook, and UDP bind is not yet covered
-//! (Landlock gained UDP rights in ABI v10, which the `landlock` crate does
-//! not expose yet). `IpcPolicy::Strict` keeps the stricter whole-syscall
-//! seccomp traps instead.
+//! `listen(2)` on an unbound TCP socket implicitly selects an ephemeral port
+//! without an explicit `bind(2)` and remains available on every supported ABI.
+//! ABI v2-v3 cannot enforce the TCP-bind part of `OutboundOnly`, so backend
+//! construction fails closed for that policy.
 
-use std::os::fd::OwnedFd;
+use std::mem::size_of;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::path::Path;
 
-use landlock::{AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr};
-
-use guardrail_core::{Error, IpcPolicy, NetworkPolicy, Result, SandboxConfig};
+use guardrail_core::{Error, NetworkPolicy, Result, SandboxConfig};
+use landlock::PathFd;
 
 use crate::fs::PreparedRuleset;
+use crate::ipc::query_abi;
 
-/// Build the Landlock network ruleset for `config`, entirely in the parent:
-/// `Some` ruleset denying all TCP bind when `OutboundOnly` composes with
-/// `Relaxed` IPC, `None` when the seccomp filters already cover the policy.
+// Stable values from include/uapi/linux/landlock.h.
+const LANDLOCK_RULE_NET_PORT: libc::c_uint = 2;
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_uint = 1;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_NET_BIND_TCP: u64 = 1 << 0;
+const LANDLOCK_ACCESS_NET_BIND_UDP: u64 = 1 << 2;
+
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
+
+#[repr(C)]
+struct LandlockNetPortAttr {
+    allowed_access: u64,
+    port: u64,
+}
+
+#[repr(C, packed)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbiFeatures {
+    bind_tcp: bool,
+    bind_udp: bool,
+}
+
+const fn features_for_abi(abi: i32) -> AbiFeatures {
+    AbiFeatures {
+        bind_tcp: abi >= 4,
+        bind_udp: abi >= 10,
+    }
+}
+
+/// Build the Landlock network layer for `OutboundOnly` in the parent.
 pub(crate) fn prepare(config: &SandboxConfig) -> Result<Option<PreparedRuleset>> {
-    if config.network != NetworkPolicy::OutboundOnly || config.linux_ipc != IpcPolicy::Relaxed {
+    if config.network != NetworkPolicy::OutboundOnly {
         return Ok(None);
     }
 
-    let ruleset = Ruleset::default()
-        // Error out instead of silently skipping the denial when the kernel
-        // predates Landlock ABI v4 (Linux 6.7).
-        .set_compatibility(CompatLevel::HardRequirement)
-        // Handling BindTcp with no rules denies TCP bind on every port;
-        // ConnectTcp is left unhandled so outbound connections are untouched.
-        .handle_access(AccessNet::BindTcp)
-        .map_err(unsupported)?
-        .create()
-        .map_err(unsupported)?;
+    let abi = query_abi()?;
+    let features = features_for_abi(abi);
+    if !features.bind_tcp {
+        return Err(Error::Unsupported(format!(
+            "NetworkPolicy::OutboundOnly requires Landlock network support \
+             (ABI v4+); the running kernel reports ABI v{abi}"
+        )));
+    }
 
-    let fd = Option::<OwnedFd>::from(ruleset).ok_or_else(|| {
-        Error::Unsupported(
-            "Landlock network ruleset is not enforced on this kernel; refusing \
-             to run the child without the OutboundOnly TCP-bind denial"
-                .into(),
+    let attr = LandlockRulesetAttr {
+        // Every Landlock layer implicitly denies REFER, even when it is not
+        // listed. Handle it and grant it at `/` below so this network-only
+        // layer does not narrow the filesystem policy.
+        handled_access_fs: LANDLOCK_ACCESS_FS_REFER,
+        handled_access_net: LANDLOCK_ACCESS_NET_BIND_TCP
+            | if features.bind_udp {
+                LANDLOCK_ACCESS_NET_BIND_UDP
+            } else {
+                0
+            },
+        scoped: 0,
+    };
+    // SAFETY: attr is the stable three-u64 UAPI prefix. ABI v10+ accepts this
+    // shorter form and treats its later quiet-access fields as zero.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr,
+            size_of::<LandlockRulesetAttr>(),
+            0 as libc::c_uint,
         )
-    })?;
+    };
+    if fd < 0 {
+        return Err(Error::confinement(
+            "landlock network",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: a successful landlock_create_ruleset returns a new owned fd.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+
+    add_path_grant(&fd, Path::new("/"), LANDLOCK_ACCESS_FS_REFER)?;
+    if features.bind_udp {
+        // A port-0 rule specifically grants kernel-assigned ephemeral UDP
+        // binding. Every nonzero local port remains denied by this layer.
+        add_port_grant(&fd, LANDLOCK_ACCESS_NET_BIND_UDP, 0)?;
+    }
+
     Ok(Some(PreparedRuleset::new(fd)))
 }
 
-fn unsupported(err: landlock::RulesetError) -> Error {
-    Error::Unsupported(format!(
-        "NetworkPolicy::OutboundOnly with IpcPolicy::Relaxed requires Landlock \
-         network support (ABI v4, Linux 6.7+) to deny TCP bind while \
-         permitting Unix-domain ones: {err}"
-    ))
+fn add_path_grant(ruleset_fd: &OwnedFd, path: &Path, allowed_access: u64) -> Result<()> {
+    let path_fd = PathFd::new(path).map_err(|e| Error::confinement("landlock network path", e))?;
+    let attr = LandlockPathBeneathAttr {
+        allowed_access,
+        parent_fd: path_fd.as_fd().as_raw_fd(),
+    };
+    // SAFETY: both descriptors are live, attr has the packed path-beneath
+    // UAPI layout, and flags must be zero.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd.as_raw_fd(),
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr,
+            0 as libc::c_uint,
+        )
+    };
+    if rc != 0 {
+        return Err(Error::confinement(
+            "landlock network path",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn add_port_grant(ruleset_fd: &OwnedFd, allowed_access: u64, port: u64) -> Result<()> {
+    let attr = LandlockNetPortAttr {
+        allowed_access,
+        port,
+    };
+    // SAFETY: ruleset_fd is a live Landlock ruleset descriptor, attr has the
+    // stable two-u64 network-port UAPI layout, and flags must be zero.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd.as_raw_fd(),
+            LANDLOCK_RULE_NET_PORT,
+            &attr,
+            0 as libc::c_uint,
+        )
+    };
+    if rc != 0 {
+        return Err(Error::confinement(
+            "landlock network port",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn config(network: NetworkPolicy, ipc: IpcPolicy) -> SandboxConfig {
-        SandboxConfig {
-            network,
-            linux_ipc: ipc,
-            ..SandboxConfig::default()
-        }
-    }
-
     #[test]
-    fn only_outbound_only_with_relaxed_ipc_builds_a_net_ruleset() {
-        for (network, ipc, wanted) in [
-            (NetworkPolicy::Deny, IpcPolicy::Strict, false),
-            (NetworkPolicy::Deny, IpcPolicy::Relaxed, false),
-            (NetworkPolicy::OutboundOnly, IpcPolicy::Strict, false),
-            (NetworkPolicy::OutboundOnly, IpcPolicy::Relaxed, true),
-            (NetworkPolicy::Full, IpcPolicy::Strict, false),
-            (NetworkPolicy::Full, IpcPolicy::Relaxed, false),
-        ] {
-            match prepare(&config(network, ipc)) {
-                Ok(ruleset) => assert_eq!(
-                    ruleset.is_some(),
-                    wanted,
-                    "net ruleset for network={network:?} ipc={ipc:?}"
-                ),
-                Err(Error::Unsupported(reason)) => {
-                    assert!(wanted, "unexpected Unsupported for {network:?}/{ipc:?}");
-                    eprintln!("skipping: Landlock ABI v4 unavailable: {reason}");
+    fn abi_policy_matrix_is_exact() {
+        for abi in [2, 3] {
+            assert_eq!(
+                features_for_abi(abi),
+                AbiFeatures {
+                    bind_tcp: false,
+                    bind_udp: false,
                 }
-                Err(other) => panic!("unexpected error: {other:?}"),
-            }
+            );
+        }
+        for abi in [4, 5, 6, 7, 8, 9] {
+            assert_eq!(
+                features_for_abi(abi),
+                AbiFeatures {
+                    bind_tcp: true,
+                    bind_udp: false,
+                }
+            );
+        }
+        for abi in [10, 11, 99] {
+            assert_eq!(
+                features_for_abi(abi),
+                AbiFeatures {
+                    bind_tcp: true,
+                    bind_udp: true,
+                }
+            );
         }
     }
 }

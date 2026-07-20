@@ -123,7 +123,7 @@ impl Policy {
     }
 }
 
-fn query_abi() -> Result<i32> {
+pub(crate) fn query_abi() -> Result<i32> {
     // SAFETY: VERSION requires a null attribute and zero size and changes no
     // process state.
     let abi = unsafe {

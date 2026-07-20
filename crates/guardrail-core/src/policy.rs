@@ -46,11 +46,12 @@ pub enum NetworkPolicy {
     /// [`IpcPolicy`].
     ///
     /// Backends restrict IP-server setup where their native mechanism can
-    /// distinguish it from allowed local IPC. On Linux with
-    /// [`IpcPolicy::Relaxed`], explicit TCP `bind` is denied, but UDP `bind`
-    /// and `listen` on an unbound TCP socket remain available because the
-    /// current Linux enforcement layers cannot mediate them. See the Linux
-    /// backend documentation for details.
+    /// distinguish it from allowed local IPC. On Linux, explicit TCP `bind`
+    /// is denied on Landlock ABI v4+, but `listen` on an unbound TCP socket
+    /// retains its implicit ephemeral bind. ABI v10+ also denies fixed UDP
+    /// binds while allowing port 0; ABI v4-v9 leaves UDP bind unrestricted.
+    /// Backend construction fails for this policy on ABI v2-v3. See the Linux
+    /// backend documentation for the exact ABI matrix.
     OutboundOnly,
     /// No network restrictions are added.
     Full,
@@ -103,17 +104,19 @@ pub enum UserNamespacePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpcPolicy {
     /// Deny SysV shared memory / message queues / semaphores, POSIX message
-    /// queues, process inspection (`ptrace`, `process_vm_*`), and creating
-    /// Unix-domain sockets (`socket(AF_UNIX)`, pathname or abstract) and
-    /// datagram `socketpair`s, whose endpoints can be redirected to named
-    /// sockets. Pipes, connection-oriented `socketpair`s, and anonymous
-    /// `mmap` remain available to the child.
+    /// queues, and creating Unix-domain sockets (`socket(AF_UNIX)`, pathname
+    /// or abstract) and datagram `socketpair`s, whose endpoints can be
+    /// redirected to named sockets. Pipes, connection-oriented `socketpair`s,
+    /// anonymous `mmap`, and process inspection inside the sandbox's Landlock
+    /// domain remain available. Landlock's implicit ptrace hierarchy denies
+    /// inspection of host/outside-domain processes independently.
     #[default]
     Strict,
     /// Permit SysV / POSIX IPC and Unix-domain sockets, including Unix-domain
     /// servers (`bind`/`listen`) — also under [`NetworkPolicy::OutboundOnly`],
     /// which keeps denying explicit TCP `bind` on Linux. Process inspection
-    /// (`ptrace`, `process_vm_*`) stays denied.
+    /// works inside the sandbox's Landlock domain; host/outside-domain targets
+    /// remain unavailable through Landlock's implicit ptrace hierarchy.
     ///
     /// [`NetworkPolicy::OutboundOnly`]: crate::NetworkPolicy::OutboundOnly
     Relaxed,

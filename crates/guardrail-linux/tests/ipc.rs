@@ -1,8 +1,9 @@
 #![cfg(target_os = "linux")]
 
+use std::io::{BufRead, BufReader};
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener};
-use std::process::ExitStatus;
+use std::process::{Command as StdCommand, ExitStatus, Stdio};
 use std::time::Duration;
 
 use guardrail_core::{
@@ -125,15 +126,60 @@ fn relaxed_allows_shared_memory() {
 }
 
 #[test]
-fn ptrace_is_blocked_at_both_levels() {
+fn process_inspection_works_inside_the_sandbox_domain() {
     for level in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
         let mut config = common::base();
         config.linux_ipc = level;
-        assert!(
-            !allowed(&config, &["ptrace-self"]),
-            "ptrace must be blocked under {level:?} IPC"
-        );
+        for probe in ["ptrace-self", "ptrace-child", "process-vm-child"] {
+            assert!(
+                allowed(&config, &[probe]),
+                "{probe} must work within the Landlock domain under {level:?} IPC"
+            );
+        }
     }
+}
+
+#[test]
+fn process_inspection_cannot_reach_the_host_domain() {
+    let mut target = StdCommand::new(common::probe_path())
+        .arg("process-vm-target")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn opted-in host target");
+    let mut published = String::new();
+    BufReader::new(target.stdout.take().expect("target stdout"))
+        .read_line(&mut published)
+        .expect("read target marker");
+    let fields: Vec<_> = published.split_whitespace().collect();
+    assert_eq!(fields.len(), 3, "target must publish pid, address, value");
+
+    let baseline = StdCommand::new(common::probe_path())
+        .args(["process-vm-host", fields[0], fields[1], fields[2]])
+        .status()
+        .expect("run unsandboxed reader");
+    if !baseline.success() {
+        eprintln!(
+            "skipping host-domain process inspection: ordinary unsandboxed access is unavailable"
+        );
+        drop(target.stdin.take());
+        assert!(target.wait().expect("wait host target").success());
+        return;
+    }
+
+    let mut config = common::base();
+    config.linux_ipc = IpcPolicy::Relaxed;
+
+    assert!(
+        !allowed(
+            &config,
+            &["process-vm-host", fields[0], fields[1], fields[2]]
+        ),
+        "Landlock's implicit ptrace hierarchy must deny process_vm_readv from the sandbox domain into its host parent domain"
+    );
+
+    drop(target.stdin.take());
+    assert!(target.wait().expect("wait host target").success());
 }
 
 #[test]
