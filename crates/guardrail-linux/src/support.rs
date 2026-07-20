@@ -21,9 +21,12 @@ pub(crate) fn probe_required_features() -> Result<()> {
     Ok(())
 }
 
-/// Verify that Landlock can enforce the same ABI v1 access rights `fs::apply`
-/// uses. The probe runs on a disposable thread because Landlock confinement
-/// cannot be removed once applied.
+/// Verify that Landlock can enforce the same ABI v2 access rights
+/// `fs::prepare` uses. ABI v2 (Linux 5.19+) is the floor because write grants
+/// carry the `Refer` right, without which cross-directory rename and link are
+/// unconditionally denied; older kernels are unsupported. The probe runs on a
+/// disposable thread because Landlock confinement cannot be removed once
+/// applied.
 fn probe_landlock_enforcement() -> Result<()> {
     std::thread::Builder::new()
         .name("guardrail-landlock-probe".into())
@@ -41,7 +44,7 @@ fn probe_landlock_enforcement() -> Result<()> {
 fn enforce_landlock_on_probe_thread() -> Result<()> {
     let status = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(AccessFs::from_all(ABI::V1))
+        .handle_access(AccessFs::from_all(ABI::V2))
         .and_then(|ruleset| ruleset.create())
         .and_then(|ruleset| ruleset.restrict_self())
         .map_err(|e| {
@@ -123,7 +126,7 @@ mod tests {
     }
 
     fn apply_permissive_landlock_layer() -> bool {
-        let access = AccessFs::from_all(ABI::V1);
+        let access = AccessFs::from_all(ABI::V2);
         let Ok(root) = PathFd::new("/") else {
             return false;
         };

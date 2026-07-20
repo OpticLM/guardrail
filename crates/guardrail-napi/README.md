@@ -176,10 +176,7 @@ Tested result: a dependency-free Rust binary builds successfully with
 `cargo build --offline`.
 
 Current Linux backend limitation: `cargo fetch` needs `network: 'full'` on this
-backend, not `outbound-only`. Building a downloaded dependency can still fail
-with `Invalid cross-device link (os error 18)` while rustc persists artifacts.
-This comes from Landlock cross-directory link/rename behavior in the current
-backend; it is not fixed by broader filesystem grants.
+backend, not `outbound-only`.
 
 ### pnpm
 
@@ -345,11 +342,6 @@ await jjSandbox.spawn(jjBin, ['--ignore-working-copy', 'status'], {
 
 Tested result: `jj --ignore-working-copy status`, `jj --ignore-working-copy log`,
 and `jj root` completed successfully against an existing jj repo.
-
-Current Linux backend limitation: `jj git init`, default `jj status`, and
-commands that snapshot or write commits can fail with `Invalid cross-device link
-(os error 18)` while writing Git objects. This matches Landlock's cross-directory
-link/rename restriction for the backend's current ABI choice.
 
 ### GitHub CLI (`gh`)
 
@@ -906,7 +898,9 @@ package SID and are not isolated from each other.
   fails, and spawning throws if confinement cannot actually be applied. A
   child is never run unconstrained as a fallback.
 - Call `probeSupport()` to detect known incompatibilities up front. On Linux,
-  it verifies Landlock enforcement on a disposable thread, but the seccomp
+  it verifies Landlock ABI v2 enforcement (Linux 5.19+; required so write
+  grants honor cross-directory rename and link) on a disposable thread, but
+  the seccomp
   check only queries whether the kernel reports the filter's `Trap` action.
   Ambient policy may still prevent filter installation, so a successful probe
   is not proof that spawning will succeed. The policy-specific Landlock ABI v4

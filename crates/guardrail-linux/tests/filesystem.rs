@@ -281,6 +281,136 @@ fn write_rule_does_not_grant_read() {
     assert!(!allowed(&config, &["read-file", secret.to_str().unwrap()]));
 }
 
+/// Issue #24: write grants carry Landlock's `Refer` right (ABI v2), so
+/// rename and hard-link between two write-allowed directories succeed — even
+/// across two separate grant roots, the shape atomic saves, build caches, and
+/// package managers rely on.
+#[test]
+fn rename_and_link_between_write_allowed_dirs_succeed() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&dst).unwrap();
+    std::fs::write(src.join("moved.txt"), b"m").unwrap();
+    std::fs::write(src.join("linked.txt"), b"l").unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([
+        FsAccess::WriteAllow(src.clone()),
+        FsAccess::WriteAllow(dst.clone()),
+    ]);
+
+    assert!(
+        allowed(
+            &config,
+            &[
+                "rename-file",
+                src.join("moved.txt").to_str().unwrap(),
+                dst.join("moved.txt").to_str().unwrap(),
+            ]
+        ),
+        "rename between two write-allowed directories must succeed"
+    );
+    assert!(
+        allowed(
+            &config,
+            &[
+                "link-file",
+                src.join("linked.txt").to_str().unwrap(),
+                dst.join("linked.txt").to_str().unwrap(),
+            ]
+        ),
+        "hard link between two write-allowed directories must succeed"
+    );
+}
+
+#[test]
+fn same_directory_rename_stays_allowed() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"a").unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([FsAccess::WriteAllow(tmp.path().into())]);
+
+    assert!(
+        allowed(
+            &config,
+            &[
+                "rename-file",
+                tmp.path().join("a.txt").to_str().unwrap(),
+                tmp.path().join("b.txt").to_str().unwrap(),
+            ]
+        ),
+        "rename within one write-allowed directory must succeed"
+    );
+}
+
+/// Cross-directory rename and link stay denied when either end of the move
+/// lacks a write grant.
+#[test]
+fn rename_and_link_denied_without_write_grant_on_either_side() {
+    if !common::landlock_enforced() {
+        eprintln!("skipping: Landlock not enforced on this kernel");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let granted = tmp.path().join("granted");
+    let ungranted = tmp.path().join("ungranted");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::create_dir(&ungranted).unwrap();
+    std::fs::write(granted.join("out.txt"), b"o").unwrap();
+    std::fs::write(ungranted.join("in.txt"), b"i").unwrap();
+
+    let mut config = common::base();
+    config.fs.extend([FsAccess::WriteAllow(granted.clone())]);
+
+    assert!(
+        !allowed(
+            &config,
+            &[
+                "rename-file",
+                granted.join("out.txt").to_str().unwrap(),
+                ungranted.join("out.txt").to_str().unwrap(),
+            ]
+        ),
+        "rename into a directory without a write grant must be denied"
+    );
+    assert!(
+        !allowed(
+            &config,
+            &[
+                "rename-file",
+                ungranted.join("in.txt").to_str().unwrap(),
+                granted.join("in.txt").to_str().unwrap(),
+            ]
+        ),
+        "rename out of a directory without a write grant must be denied"
+    );
+    assert!(
+        !allowed(
+            &config,
+            &[
+                "link-file",
+                granted.join("out.txt").to_str().unwrap(),
+                ungranted.join("link.txt").to_str().unwrap(),
+            ]
+        ),
+        "hard link into a directory without a write grant must be denied"
+    );
+}
+
 #[test]
 fn missing_deny_descendant_inside_allow_fails_before_spawn() {
     let tmp = TempDir::new().unwrap();

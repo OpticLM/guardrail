@@ -16,7 +16,9 @@ impl LinuxBackend {
     /// Create a new Linux backend.
     ///
     /// Fails closed with [`Error::Unsupported`] when the running kernel cannot
-    /// enforce Landlock or fails the seccomp action-availability probe (see
+    /// enforce Landlock ABI v2 (Linux 5.19+, required so write grants honor
+    /// cross-directory rename and link) or fails the seccomp
+    /// action-availability probe (see
     /// [`Backend::probe_support`]); when the policy composes
     /// `NetworkPolicy::OutboundOnly` with `IpcPolicy::Relaxed` and the kernel
     /// lacks Landlock network support (ABI v4, Linux 6.7+; see [`crate::net`]);
@@ -144,7 +146,7 @@ fn set_no_new_privs() -> std::io::Result<()> {
 /// pipe after this closure returns; stdio was `dup2`ed onto 0–2 before any
 /// `pre_exec` closure runs, so it is unaffected. `close_range(2)` is
 /// async-signal-safe; `CLOSE_RANGE_CLOEXEC` exists since Linux 5.11, and every
-/// kernel that passes the Landlock probe (5.13+) has it, so there is no
+/// kernel that passes the Landlock probe (5.19+) has it, so there is no
 /// fallback path — fail closed instead. The raw syscall avoids the glibc
 /// 2.34+ / musl wrapper requirement.
 fn scrub_inherited_fds() -> std::io::Result<()> {

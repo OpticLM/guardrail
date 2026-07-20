@@ -20,6 +20,10 @@
 //!                     exit 0 if the read succeeds, 3 if it is denied or the
 //!                     path never appears
 //!   write-file <PATH> write one byte to PATH; exit 0 if allowed, 3 if denied
+//!   rename-file <SRC> <DST>
+//!                     rename SRC to DST; exit 0 if allowed, 3 if denied
+//!   link-file <SRC> <DST>
+//!                     hard-link SRC to DST; exit 0 if allowed, 3 if denied
 //!   read-fd <FD> <EXPECTED>
 //!                     read from the (supposedly inherited) descriptor FD;
 //!                     exit 0 if it yields EXPECTED, 3 if the read fails or
@@ -150,6 +154,24 @@ fn main() {
             let path = args.get(2).map(String::as_str).unwrap_or("");
             match std::fs::write(path, b"x") {
                 Ok(_) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "rename-file" => {
+            let (Some(src), Some(dst)) = (args.get(2), args.get(3)) else {
+                exit(2);
+            };
+            match std::fs::rename(src, dst) {
+                Ok(()) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "link-file" => {
+            let (Some(src), Some(dst)) = (args.get(2), args.get(3)) else {
+                exit(2);
+            };
+            match std::fs::hard_link(src, dst) {
+                Ok(()) => exit(0),
                 Err(_) => exit(3),
             }
         }
@@ -417,7 +439,8 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
-                 <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|read-fd|\
+                 <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|\
+                 rename-file|link-file|read-fd|\
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
                  socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-connect|\
                  unix-bind-listen|io-uring-setup|io-uring-enter|io-uring-register|shm|\

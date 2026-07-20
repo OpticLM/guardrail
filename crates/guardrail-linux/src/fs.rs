@@ -127,9 +127,12 @@ impl PreparedRuleset {
 ///
 /// [`pre_exec` contract]: std::os::unix::process::CommandExt::pre_exec
 pub(crate) fn prepare(rules: &CompiledRules) -> Result<PreparedRuleset> {
-    // Pin ABI v1 for the broadest kernel support; the read/exec/write rights
-    // this sandbox needs all exist in v1.
-    let abi = ABI::V1;
+    // Pin ABI v2 (Linux 5.19+): its `Refer` right is required for write
+    // grants to honor cross-directory rename and link, which the portable
+    // `WriteAllow` contract promises (issue #24). Kernels without v2 fail the
+    // hard requirement below and in `support::probe_required_features` —
+    // they are unsupported rather than silently less capable.
+    let abi = ABI::V2;
 
     let mut ruleset = Ruleset::default()
         // Error out instead of the default silent best-effort downgrade when
@@ -164,7 +167,7 @@ pub(crate) fn prepare(rules: &CompiledRules) -> Result<PreparedRuleset> {
         access_for_right(FsRight::Execute, abi),
     )?;
 
-    // With every V1 right hard-required above, a created ruleset always
+    // With every V2 right hard-required above, a created ruleset always
     // carries a real descriptor; `None` means the crate downgraded to a dummy
     // ruleset that would enforce nothing — refuse to run the child.
     let fd = Option::<OwnedFd>::from(ruleset).ok_or_else(|| {
@@ -842,9 +845,11 @@ mod tests {
 
     #[test]
     fn write_access_uses_write_only_rights() {
-        let write = access_for_right(FsRight::Write, ABI::V1);
+        let write = access_for_right(FsRight::Write, ABI::V2);
 
-        assert_eq!(write, AccessFs::from_write(ABI::V1));
+        assert_eq!(write, AccessFs::from_write(ABI::V2));
+        // Cross-directory rename/link (issue #24) rides on the v2 Refer right.
+        assert!(write.contains(AccessFs::Refer));
         assert!(!write.intersects(read_access()));
         assert!(!write.intersects(execute_access()));
     }

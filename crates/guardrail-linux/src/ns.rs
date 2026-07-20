@@ -43,7 +43,8 @@ use guardrail_core::{Error, Result};
 // include/uapi/linux/fcntl.h). Defined locally because the libc crate does
 // not expose all of them on every supported target (e.g. musl); the values
 // are stable kernel ABI, present since Linux 5.2 (5.12 for mount_setattr) —
-// older than the 5.13 Landlock floor `probe_support` already enforces.
+// older than the 5.19 Landlock ABI v2 floor `probe_support` already
+// enforces.
 const OPEN_TREE_CLONE: libc::c_uint = 0x1;
 const OPEN_TREE_CLOEXEC: libc::c_uint = libc::O_CLOEXEC as libc::c_uint;
 const AT_RECURSIVE: libc::c_uint = 0x8000;

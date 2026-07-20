@@ -100,7 +100,13 @@
 //!
 //! Fails closed: constructing a [`LinuxBackend`] returns `Error::Unsupported`
 //! when Landlock enforcement or the seccomp action-availability probe fails;
-//! spawning aborts if actual filter installation fails. Probe known
+//! spawning aborts if actual filter installation fails. The kernel floor is
+//! Landlock ABI v2 (Linux 5.19+): write grants carry Landlock's `Refer`
+//! right, so renaming or hard-linking across write-allowed directories works
+//! (subject to the kernel's `Refer` constraint that a move may not grant the
+//! file more access than it had), and older kernels — where such operations
+//! always fail with `EXDEV` — are rejected instead of silently narrowing the
+//! `WriteAllow` contract. Probe known
 //! incompatibilities up front with `LinuxBackend::probe_support()`. The
 //! Landlock probe verifies enforcement on a disposable thread. The seccomp
 //! probe only queries whether the kernel reports the filters' `Trap` and
