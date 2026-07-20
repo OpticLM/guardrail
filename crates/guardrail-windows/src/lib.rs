@@ -17,9 +17,8 @@
 //!
 //! # IPC
 //!
-//! The Linux-only `linux_ipc` policy is ignored here; Windows has no
-//! configurable IPC knob. AppContainer baseline isolation applies
-//! independently:
+//! Windows has no configurable IPC knob. AppContainer baseline isolation
+//! applies independently:
 //!
 //! * The child's token pairs the user's SIDs with the profile's package SID
 //!   (plus any capability SIDs), and a securable object — named pipe, event,

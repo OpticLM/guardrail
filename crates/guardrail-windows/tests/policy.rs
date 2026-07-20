@@ -12,7 +12,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    Backend, FsAccess, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
     UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
@@ -588,7 +588,6 @@ fn builder_with_system_root() -> SandboxConfig {
     SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,

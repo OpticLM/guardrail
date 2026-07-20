@@ -83,8 +83,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> Result<String> {
         }
     }
 
-    // `linux_ipc` is Linux-only and deliberately not consulted here: under
-    // `(deny default)` IPC is already denied, and custom `.sb` profile imports
+    // Under `(deny default)` IPC is denied, and custom `.sb` profile imports
     // are the escape hatch for workloads that need more IPC.
 
     Ok(source)
@@ -274,9 +273,7 @@ fn invalid_path(message: &str, path: &Path) -> Error {
 mod tests {
     use std::collections::BTreeMap;
 
-    use guardrail_core::{
-        IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
-    };
+    use guardrail_core::{NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy};
 
     use super::*;
 
@@ -284,7 +281,6 @@ mod tests {
         SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -309,7 +305,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -359,7 +354,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/in".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -395,7 +389,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(future_alias.clone())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -438,7 +431,6 @@ mod tests {
                 FsAccess::ReadDeny(secret_alias.clone()),
             ],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -465,7 +457,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadDeny("/tmp/secret".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -487,7 +478,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::WriteAllow("/tmp/work".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -510,7 +500,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::WriteDeny("/tmp/work".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -533,7 +522,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ExecuteAllow("/tmp/bin".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -561,7 +549,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ExecuteDeny("/tmp/bin".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -594,7 +581,6 @@ mod tests {
                 FsAccess::WriteAllow("/tmp/out".into()),
             ],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -633,7 +619,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::OutboundOnly,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -652,7 +637,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Full,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -671,7 +655,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(r#"/tmp/name"with-quote"#.into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -693,7 +676,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow(r"/tmp/name\with-slash".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),

@@ -183,16 +183,13 @@ impl InheritedFdTable {
 mod tests {
     use std::collections::BTreeMap;
 
-    use guardrail_core::{
-        IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
-    };
+    use guardrail_core::{NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy};
 
     #[test]
     fn crate_smoke_test_builds_a_default_config() {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),

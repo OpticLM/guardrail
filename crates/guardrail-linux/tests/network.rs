@@ -4,7 +4,7 @@ use std::net::{TcpListener, UdpSocket};
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
-use guardrail_core::{Backend, FsAccess, IpcPolicy, NetworkPolicy, SandboxCommand, SandboxConfig};
+use guardrail_core::{Backend, FsAccess, NetworkPolicy, SandboxCommand, SandboxConfig};
 use guardrail_linux::LinuxBackend;
 
 mod common;
@@ -87,14 +87,12 @@ fn deny_blocks_vsock_socket_creation() {
 }
 
 #[test]
-fn deny_leaves_unix_sockets_to_the_ipc_policy() {
+fn deny_allows_unix_sockets() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
-    // Relaxed IPC isolates the network filter: AF_UNIX must pass it.
-    config.linux_ipc = IpcPolicy::Relaxed;
     assert!(
         allowed(&config, &["socket-unix"]),
-        "the network Deny filter must not block AF_UNIX; that is IpcPolicy's job"
+        "the network Deny filter must not block host-local AF_UNIX"
     );
 }
 
@@ -102,8 +100,6 @@ fn deny_leaves_unix_sockets_to_the_ipc_policy() {
 fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_tcp_bind() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
-    // Relaxed IPC isolates the network filter for the AF_UNIX probe.
-    config.linux_ipc = IpcPolicy::Relaxed;
     if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
@@ -132,10 +128,9 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_tcp_bi
 }
 
 #[test]
-fn outbound_only_with_relaxed_ipc_allows_unix_bind_listen() {
+fn outbound_only_allows_unix_bind_listen() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
-    config.linux_ipc = IpcPolicy::Relaxed;
     if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
@@ -143,15 +138,14 @@ fn outbound_only_with_relaxed_ipc_allows_unix_bind_listen() {
     let name = format!("guardrail-outbound-unix-{}", std::process::id());
     assert!(
         allowed(&config, &["unix-bind-listen", &name]),
-        "an abstract Unix-domain server must be allowed under OutboundOnly with Relaxed IPC"
+        "an abstract Unix-domain server must be allowed under OutboundOnly"
     );
 }
 
 #[test]
-fn outbound_only_with_relaxed_ipc_keeps_ipv4_and_ipv6_connections() {
+fn outbound_only_keeps_ipv4_and_ipv6_connections() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
-    config.linux_ipc = IpcPolicy::Relaxed;
     if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
@@ -163,38 +157,34 @@ fn outbound_only_with_relaxed_ipc_keeps_ipv4_and_ipv6_connections() {
         let address = listener.local_addr().expect("listener address").to_string();
         assert!(
             allowed(&config, &["tcp-connect", &address]),
-            "an outbound {family} TCP connection must be allowed under OutboundOnly with Relaxed IPC"
+            "an outbound {family} TCP connection must be allowed under OutboundOnly"
         );
     }
 }
 
 #[test]
 fn outbound_only_preserves_the_unbound_tcp_listener_residual() {
-    for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
-        let mut config = common::base();
-        config.network = NetworkPolicy::OutboundOnly;
-        config.linux_ipc = ipc;
-        if let Some(reason) = outbound_unsupported_reason(&config) {
-            eprintln!("skipping: {reason}");
-            return;
-        }
-        assert!(
-            allowed(&config, &["tcp-listen-unbound"]),
-            "listen on an unbound TCP socket must retain its implicit ephemeral bind under {ipc:?} IPC"
-        );
-        assert_eq!(
-            status(&config, &["tcp-bind"]).code(),
-            Some(3),
-            "an explicit TCP bind must still be denied under {ipc:?} IPC"
-        );
+    let mut config = common::base();
+    config.network = NetworkPolicy::OutboundOnly;
+    if let Some(reason) = outbound_unsupported_reason(&config) {
+        eprintln!("skipping: {reason}");
+        return;
     }
+    assert!(
+        allowed(&config, &["tcp-listen-unbound"]),
+        "listen on an unbound TCP socket must retain its implicit ephemeral bind"
+    );
+    assert_eq!(
+        status(&config, &["tcp-bind"]).code(),
+        Some(3),
+        "an explicit TCP bind must still be denied"
+    );
 }
 
 #[test]
 fn outbound_only_udp_bind_is_best_effort_by_exact_abi() {
     let mut config = common::base();
     config.network = NetworkPolicy::OutboundOnly;
-    config.linux_ipc = IpcPolicy::Relaxed;
     if let Some(reason) = outbound_unsupported_reason(&config) {
         eprintln!("skipping: {reason}");
         return;
@@ -308,20 +298,17 @@ fn deny_and_outbound_only_block_io_uring_with_enosys() {
 }
 
 #[test]
-fn full_network_allows_io_uring_regardless_of_ipc_policy() {
+fn full_network_allows_io_uring() {
     if !host_has_io_uring() {
         eprintln!("skipping: io_uring unavailable on this host");
         return;
     }
-    for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
-        let mut config = common::base();
-        config.network = NetworkPolicy::Full;
-        config.linux_ipc = ipc;
-        for &probe in IO_URING_PROBES {
-            assert!(
-                allowed(&config, &[probe]),
-                "{probe} must be allowed under Full network with {ipc:?} IPC"
-            );
-        }
+    let mut config = common::base();
+    config.network = NetworkPolicy::Full;
+    for &probe in IO_URING_PROBES {
+        assert!(
+            allowed(&config, &[probe]),
+            "{probe} must be allowed under Full network"
+        );
     }
 }

@@ -19,7 +19,7 @@ use napi_derive::napi;
 #[cfg(unix)]
 use guardrail::StdioMode;
 use guardrail::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, PlatformBackend, SandboxCommand, SandboxConfig,
+    Backend, FsAccess, NetworkPolicy, PlatformBackend, SandboxCommand, SandboxConfig,
     SharedSandboxChild, UserNamespacePolicy,
 };
 
@@ -42,26 +42,6 @@ impl From<JsNetworkPolicy> for NetworkPolicy {
             JsNetworkPolicy::Deny => NetworkPolicy::Deny,
             JsNetworkPolicy::OutboundOnly => NetworkPolicy::OutboundOnly,
             JsNetworkPolicy::Full => NetworkPolicy::Full,
-        }
-    }
-}
-
-/// Linux-only IPC confinement level for the child: `"strict"` | `"relaxed"`.
-/// Mirrors `guardrail::IpcPolicy`. Ignored on macOS and Windows (see
-/// `linuxIpc` on the options objects).
-#[napi(string_enum, js_name = "IpcPolicy")]
-pub enum JsIpcPolicy {
-    #[napi(value = "strict")]
-    Strict,
-    #[napi(value = "relaxed")]
-    Relaxed,
-}
-
-impl From<JsIpcPolicy> for IpcPolicy {
-    fn from(p: JsIpcPolicy) -> Self {
-        match p {
-            JsIpcPolicy::Strict => IpcPolicy::Strict,
-            JsIpcPolicy::Relaxed => IpcPolicy::Relaxed,
         }
     }
 }
@@ -111,9 +91,8 @@ pub struct JsFsAccess {
     pub path: String,
 }
 
-/// Sandbox policy. All fields optional; omitting everything
-/// yields the maximally restrictive default (no fs, no network, strict Linux
-/// IPC, empty environment).
+/// Sandbox policy. All fields optional; omitting everything yields no
+/// filesystem or network access and an empty environment.
 #[napi(object)]
 #[derive(Default)]
 pub struct SandboxOptions {
@@ -123,13 +102,12 @@ pub struct SandboxOptions {
     pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
-    /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
-    /// Ignored on macOS and Windows.
-    pub linux_ipc: Option<JsIpcPolicy>,
     /// Linux-only host pathname Unix socket or path-hierarchy grants,
     /// independent of `fs`. On Landlock ABI v9+ host-created pathname sockets
     /// are denied by default and these existing paths grant connection access.
     /// On older ABIs entries are ignored without being validated or opened.
+    /// A granted service may pass already-open file descriptors with
+    /// `SCM_RIGHTS`; their access is independent of `fs`.
     /// Ignored on macOS and Windows.
     pub linux_unix_sockets: Option<Vec<String>>,
     /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
@@ -165,7 +143,7 @@ pub struct SandboxOptions {
 }
 
 /// One-shot sandbox policy + launch options. All fields optional; omitting
-/// everything yields the maximally restrictive default.
+/// everything yields no filesystem or network access and an empty environment.
 #[napi(object)]
 #[derive(Default)]
 pub struct SpawnOptions {
@@ -175,12 +153,11 @@ pub struct SpawnOptions {
     pub fs: Option<Vec<JsFsAccess>>,
     /// Network confinement level; `"deny"` (default) if omitted.
     pub network: Option<JsNetworkPolicy>,
-    /// Linux-only IPC confinement level; `"strict"` (default) if omitted.
-    /// Ignored on macOS and Windows.
-    pub linux_ipc: Option<JsIpcPolicy>,
     /// Linux-only host pathname Unix socket or path-hierarchy grants,
     /// independent of `fs`. Enforced on Landlock ABI v9+; ignored without
-    /// validation on older ABIs and ignored on macOS and Windows.
+    /// validation on older ABIs and ignored on macOS and Windows. A granted
+    /// service may pass already-open file descriptors with `SCM_RIGHTS`;
+    /// their access is independent of `fs`.
     pub linux_unix_sockets: Option<Vec<String>>,
     /// Linux-only user-namespace policy; `"deny"` (default) if omitted.
     /// Ignored on macOS and Windows. Set `"allow"` only when the child runs
@@ -297,10 +274,6 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .unwrap_or(NetworkPolicy::Deny),
         limits,
         env,
-        linux_ipc: opts
-            .linux_ipc
-            .map(|i| i.into())
-            .unwrap_or(IpcPolicy::Strict),
         linux_unix_sockets: opts
             .linux_unix_sockets
             .unwrap_or_default()
@@ -322,7 +295,6 @@ impl From<SpawnOptions> for (SandboxOptions, Option<String>) {
             SandboxOptions {
                 fs: options.fs,
                 network: options.network,
-                linux_ipc: options.linux_ipc,
                 linux_unix_sockets: options.linux_unix_sockets,
                 linux_user_namespaces: options.linux_user_namespaces,
                 memory_limit_mb: options.memory_limit_mb,
@@ -409,9 +381,8 @@ impl Task for BuildSandboxTask {
 /// kernel reports the `Trap` action; it cannot prove that an ambient sandbox
 /// will permit installing the filter. Actual spawning remains authoritative
 /// and fails closed, so calling this first is optional. Policy-specific checks,
-/// such as the Landlock ABI v4 requirement for outbound-only networking with
-/// relaxed IPC, run when `Sandbox.build()` or one-shot `spawn()` constructs the
-/// backend.
+/// such as the Landlock ABI v4 requirement for outbound-only networking, run
+/// when `Sandbox.build()` or one-shot `spawn()` constructs the backend.
 #[napi]
 pub fn probe_support() -> Result<()> {
     PlatformBackend::probe_support().map_err(to_napi_err)

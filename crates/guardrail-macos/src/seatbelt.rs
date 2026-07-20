@@ -159,7 +159,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use guardrail_core::{
-        FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
+        FsAccess, NetworkPolicy, ResourceLimits, SandboxConfig, UserNamespacePolicy,
     };
 
     use super::*;
@@ -233,7 +233,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/generated-read".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -265,7 +264,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![FsAccess::ReadAllow("/tmp/has\0nul".into())],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),
@@ -297,7 +295,6 @@ mod tests {
         let config = SandboxConfig {
             fs: vec![],
             network: NetworkPolicy::Deny,
-            linux_ipc: IpcPolicy::Strict,
             linux_unix_sockets: vec![],
             limits: ResourceLimits::default(),
             env: BTreeMap::new(),

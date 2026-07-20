@@ -61,14 +61,6 @@ export type FsAccessKind =  'read-allow'|
 'execute-deny';
 
 /**
- * Linux-only IPC confinement level for the child: `"strict"` | `"relaxed"`.
- * Mirrors `guardrail::IpcPolicy`. Ignored on macOS and Windows (see
- * `linuxIpc` on the options objects).
- */
-export type IpcPolicy =  'strict'|
-'relaxed';
-
-/**
  * Network confinement level for the child: `"deny"` | `"outbound-only"` |
  * `"full"`. Mirrors `guardrail::NetworkPolicy`; the string values are the
  * ones typed by the JS caller.
@@ -84,16 +76,14 @@ export type NetworkPolicy =  'deny'|
  * kernel reports the `Trap` action; it cannot prove that an ambient sandbox
  * will permit installing the filter. Actual spawning remains authoritative
  * and fails closed, so calling this first is optional. Policy-specific checks,
- * such as the Landlock ABI v4 requirement for outbound-only networking with
- * relaxed IPC, run when `Sandbox.build()` or one-shot `spawn()` constructs the
- * backend.
+ * such as the Landlock ABI v4 requirement for outbound-only networking, run
+ * when `Sandbox.build()` or one-shot `spawn()` constructs the backend.
  */
 export declare function probeSupport(): void
 
 /**
- * Sandbox policy. All fields optional; omitting everything
- * yields the maximally restrictive default (no fs, no network, strict Linux
- * IPC, empty environment).
+ * Sandbox policy. All fields optional; omitting everything yields no
+ * filesystem or network access and an empty environment.
  */
 export interface SandboxOptions {
   /**
@@ -105,15 +95,12 @@ export interface SandboxOptions {
   /** Network confinement level; `"deny"` (default) if omitted. */
   network?: NetworkPolicy
   /**
-   * Linux-only IPC confinement level; `"strict"` (default) if omitted.
-   * Ignored on macOS and Windows.
-   */
-  linuxIpc?: IpcPolicy
-  /**
    * Linux-only host pathname Unix socket or path-hierarchy grants,
    * independent of `fs`. On Landlock ABI v9+ host-created pathname sockets
    * are denied by default and these existing paths grant connection access.
    * On older ABIs entries are ignored without being validated or opened.
+   * A granted service may pass already-open file descriptors with
+   * `SCM_RIGHTS`; their access is independent of `fs`.
    * Ignored on macOS and Windows.
    */
   linuxUnixSockets?: Array<string>
@@ -176,7 +163,7 @@ export declare function spawn(command: string, args?: Array<string> | undefined 
 
 /**
  * One-shot sandbox policy + launch options. All fields optional; omitting
- * everything yields the maximally restrictive default.
+ * everything yields no filesystem or network access and an empty environment.
  */
 export interface SpawnOptions {
   /**
@@ -188,14 +175,11 @@ export interface SpawnOptions {
   /** Network confinement level; `"deny"` (default) if omitted. */
   network?: NetworkPolicy
   /**
-   * Linux-only IPC confinement level; `"strict"` (default) if omitted.
-   * Ignored on macOS and Windows.
-   */
-  linuxIpc?: IpcPolicy
-  /**
    * Linux-only host pathname Unix socket or path-hierarchy grants,
    * independent of `fs`. Enforced on Landlock ABI v9+; ignored without
-   * validation on older ABIs and ignored on macOS and Windows.
+   * validation on older ABIs and ignored on macOS and Windows. A granted
+   * service may pass already-open file descriptors with `SCM_RIGHTS`;
+   * their access is independent of `fs`.
    */
   linuxUnixSockets?: Array<string>
   /**

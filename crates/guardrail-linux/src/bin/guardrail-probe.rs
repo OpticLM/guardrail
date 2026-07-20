@@ -53,6 +53,10 @@
 //!   unix-connect <PATH>
 //!                     connect to a pathname AF_UNIX stream server; exit 0 if
 //!                     allowed, 3 if denied
+//!   unix-recv-fd <PATH> <EXPECTED>
+//!                     connect to a pathname AF_UNIX stream server, receive a
+//!                     descriptor with SCM_RIGHTS, and read EXPECTED from it;
+//!                     exit 0 on success, 3 otherwise
 //!   unix-path-roundtrip <PATH>
 //!                     bind and connect to a pathname AF_UNIX stream server;
 //!                     exit 0 if same-domain use works, 3 otherwise
@@ -335,6 +339,76 @@ fn main() {
             match UnixStream::connect(path) {
                 Ok(_) => exit(0),
                 Err(_) => exit(3),
+            }
+        }
+        "unix-recv-fd" => {
+            use std::io::Read;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            use std::os::unix::net::UnixStream;
+
+            let (Some(path), Some(expected)) = (args.get(2), args.get(3)) else {
+                exit(2);
+            };
+            let Ok(stream) = UnixStream::connect(path) else {
+                exit(3);
+            };
+            let mut payload = [0u8; 1];
+            let mut iov = libc::iovec {
+                iov_base: payload.as_mut_ptr().cast(),
+                iov_len: payload.len(),
+            };
+            // `usize` storage gives cmsghdr its required native alignment.
+            let mut control = [0usize; 8];
+            // SAFETY: all fields are initialized below before recvmsg reads
+            // them; the zeroed pointer fields mean no optional addresses.
+            let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+            message.msg_iov = &mut iov;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = control.len() * size_of::<usize>();
+            // SAFETY: message points to live payload and control buffers and
+            // stream is a connected Unix socket.
+            if unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, 0) } != 1 {
+                exit(3);
+            }
+            // SAFETY: recvmsg initialized the ancillary-data region described
+            // by message; CMSG_FIRSTHDR validates that region's first header.
+            let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+            if header.is_null() {
+                exit(3);
+            }
+            #[expect(
+                clippy::multiple_unsafe_ops_per_block,
+                reason = "validating one cmsghdr requires reading its three fields and CMSG_LEN"
+            )]
+            // SAFETY: header is non-null and points within message's live
+            // control buffer.
+            let valid = unsafe {
+                (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SCM_RIGHTS
+                    && (*header).cmsg_len >= libc::CMSG_LEN(size_of::<libc::c_int>() as _) as usize
+            };
+            if !valid {
+                exit(3);
+            }
+            #[expect(
+                clippy::multiple_unsafe_ops_per_block,
+                reason = "CMSG_DATA locates the pointer consumed by read_unaligned"
+            )]
+            // SAFETY: the validated SCM_RIGHTS payload contains at least one
+            // c_int descriptor. read_unaligned also handles UAPI alignment.
+            let fd =
+                unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>()) };
+            if fd < 0 {
+                exit(3);
+            }
+            // SAFETY: SCM_RIGHTS installed a new descriptor owned by this
+            // process; File takes ownership and closes it on drop.
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let mut content = String::new();
+            match file.read_to_string(&mut content) {
+                Ok(_) if content == *expected => exit(0),
+                _ => exit(3),
             }
         }
         "unix-path-roundtrip" => {

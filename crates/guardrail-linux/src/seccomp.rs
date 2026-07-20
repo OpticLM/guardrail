@@ -1,35 +1,23 @@
-//! Network, IPC, and kernel-attack-surface confinement via seccomp-BPF
-//! denylists.
+//! Network and kernel-attack-surface confinement via seccomp-BPF denylists.
 //!
 //! Default action is Allow (arbitrary shell tools must keep working); specific
 //! syscalls/arguments are mapped to `VIOLATION_ACTION`. Trap is used so a
 //! violation terminates the child with SIGSYS, which the parent can observe.
-//! Network rules live here; IPC rules are added to the same filter via
-//! `add_ipc_rules`, and kernel-interface syscalls no shell tool legitimately
-//! calls (kernel code loading, keyring, host-state interference, and — under
-//! `UserNamespacePolicy::Deny` — the mount machinery) via
-//! `add_kernel_surface_rules`.
+//! Network rules live here, alongside kernel-interface syscalls no shell tool
+//! legitimately calls (kernel code loading, keyring, host-state interference,
+//! and — under `UserNamespacePolicy::Deny` — the mount machinery).
 //!
 //! seccomp cannot see a socket fd's family, so under `OutboundOnly` the
 //! family-aware TCP and UDP bind restrictions live in the Landlock network
 //! layer (see `crate::net`).
 //!
-//! Three more filters are stacked as needed; the kernel runs every installed
+//! Two more filters are stacked as needed; the kernel runs every installed
 //! filter and applies the highest-precedence action (Trap > Errno > Allow):
 //!
 //! * Kernel interfaces that legitimate tooling probes and must fall back from
 //!   gracefully — `bpf`, `perf_event_open`, `userfaultfd`, plus namespace
 //!   creation/joining under `UserNamespacePolicy::Deny` — fail with `EPERM`,
 //!   the same errno an unprivileged caller sees from a hardened kernel.
-//!
-//! * Under `IpcPolicy::Strict`, creating a Unix-domain socket — the road to
-//!   local services such as D-Bus or container engines, whether by pathname
-//!   or abstract name — fails with `EAFNOSUPPORT`. Errno rather than Trap
-//!   because well-behaved tools opportunistically probe optional local
-//!   sockets (nscd, syslog, ssh-agent) and must fall back instead of dying.
-//!   Datagram `socketpair`s are denied too because either endpoint can be
-//!   redirected to a named socket with `connect` or `sendto`.
-//!   Connection-oriented `socketpair`s stay available.
 //!
 //! * io_uring is denied with `ENOSYS` unless the network policy is `Full`:
 //!   ring-submitted operations (`IORING_OP_SOCKET`,
@@ -45,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 
-use guardrail_core::{Error, IpcPolicy, NetworkPolicy, Result, SandboxConfig, UserNamespacePolicy};
+use guardrail_core::{Error, NetworkPolicy, Result, SandboxConfig, UserNamespacePolicy};
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule,
@@ -56,10 +44,6 @@ use seccompiler::{
 /// graceful per-call failure instead of process termination.
 const VIOLATION_ACTION: SeccompAction = SeccompAction::Trap;
 
-/// Low bits containing the base socket type. `SOCK_NONBLOCK` and
-/// `SOCK_CLOEXEC` live above this mask and may be ORed into the type argument.
-const SOCKET_TYPE_MASK: u64 = 0xf;
-
 type RuleMap = BTreeMap<i64, Vec<SeccompRule>>;
 
 /// x32 uses the x86-64 audit architecture but sets bit 30 in the syscall
@@ -68,8 +52,6 @@ type RuleMap = BTreeMap<i64, Vec<SeccompRule>>;
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 
 // Legacy x32 entries whose base numbers differ from native x86-64.
-#[cfg(target_arch = "x86_64")]
-const X32_SYS_MQ_NOTIFY: i64 = 527;
 #[cfg(target_arch = "x86_64")]
 const X32_SYS_KEXEC_LOAD: i64 = 528;
 
@@ -132,32 +114,6 @@ const PROBED_KERNEL_SYSCALLS: &[i64] = &[
     libc::SYS_userfaultfd,
 ];
 
-/// Syscalls blocked only at the `Strict` level (SysV IPC + POSIX mqueue).
-const STRICT_ONLY_IPC: &[i64] = &[
-    // SysV shared memory
-    libc::SYS_shmget,
-    libc::SYS_shmat,
-    libc::SYS_shmdt,
-    libc::SYS_shmctl,
-    // SysV message queues
-    libc::SYS_msgget,
-    libc::SYS_msgsnd,
-    libc::SYS_msgrcv,
-    libc::SYS_msgctl,
-    // SysV semaphores
-    libc::SYS_semget,
-    libc::SYS_semop,
-    libc::SYS_semtimedop,
-    libc::SYS_semctl,
-    // POSIX message queues
-    libc::SYS_mq_open,
-    libc::SYS_mq_unlink,
-    libc::SYS_mq_timedsend,
-    libc::SYS_mq_timedreceive,
-    libc::SYS_mq_notify,
-    libc::SYS_mq_getsetattr,
-];
-
 /// io_uring syscalls, denied with `ENOSYS` unless the network policy is
 /// `Full`. Operations submitted through a ring never pass the syscall filter,
 /// so the socket-family rules cannot see them. `enter` and `register` are
@@ -179,13 +135,6 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
         SeccompAction::Errno(libc::EPERM as u32),
     )?);
 
-    if config.linux_ipc == IpcPolicy::Strict {
-        programs.push(compile(
-            unix_socket_rules()?,
-            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
-        )?);
-    }
-
     let enosys = enosys_rules(config);
     if !enosys.is_empty() {
         programs.push(compile(enosys, SeccompAction::Errno(libc::ENOSYS as u32))?);
@@ -194,12 +143,11 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
     Ok(programs)
 }
 
-/// Rules mapped to `VIOLATION_ACTION`: network policy, IPC policy, and the
-/// unconditional kernel-attack-surface denylist.
+/// Rules mapped to `VIOLATION_ACTION`: network policy and the unconditional
+/// kernel-attack-surface denylist.
 fn violation_rules(config: &SandboxConfig) -> Result<RuleMap> {
     let mut rules = RuleMap::new();
     add_network_rules(&mut rules, config.network)?;
-    add_ipc_rules(&mut rules, config.linux_ipc)?;
     add_kernel_surface_rules(&mut rules, config.linux_user_namespaces);
     Ok(rules)
 }
@@ -268,46 +216,6 @@ fn enosys_rules(config: &SandboxConfig) -> RuleMap {
     rules
 }
 
-/// Unix socket creation denials under `IpcPolicy::Strict`. Kept out of the
-/// Trap filter so tools probing optional local sockets get a graceful errno.
-fn unix_socket_rules() -> Result<RuleMap> {
-    let mut rules = RuleMap::new();
-    add_syscall_rule(
-        &mut rules,
-        libc::SYS_socket,
-        socket_domain_rule(libc::AF_UNIX)?,
-    );
-    add_syscall_rule(
-        &mut rules,
-        libc::SYS_socketpair,
-        unix_datagram_socketpair_rule()?,
-    );
-    Ok(rules)
-}
-
-/// A rule matching `socketpair(AF_UNIX, SOCK_DGRAM | flags, ..)`. Unlike
-/// connection-oriented pairs, Unix datagram endpoints can be redirected to
-/// pathname or abstract sockets outside the sandbox.
-fn unix_datagram_socketpair_rule() -> Result<SeccompRule> {
-    let conditions = vec![
-        SeccompCondition::new(
-            0, // arg0 = domain
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Eq,
-            libc::AF_UNIX as u64,
-        )
-        .map_err(|e| Error::confinement("seccomp", e))?,
-        SeccompCondition::new(
-            1, // arg1 = type
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::MaskedEq(SOCKET_TYPE_MASK),
-            libc::SOCK_DGRAM as u64,
-        )
-        .map_err(|e| Error::confinement("seccomp", e))?,
-    ];
-    SeccompRule::new(conditions).map_err(|e| Error::confinement("seccomp", e))
-}
-
 /// Compile `rules` into a BPF program mapping matches to `action`; everything
 /// else stays allowed.
 fn compile(rules: RuleMap, action: SeccompAction) -> Result<BpfProgram> {
@@ -346,7 +254,7 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
     match policy {
         NetworkPolicy::Deny => {
             // Block every non-Unix family, including families added by future
-            // kernels. AF_UNIX itself is IpcPolicy's decision (see `build`).
+            // kernels. AF_UNIX is host-local IPC, not network reach.
             add_syscall_rule(
                 rules,
                 libc::SYS_socket,
@@ -354,8 +262,8 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
             );
         }
         NetworkPolicy::OutboundOnly => {
-            // IP sockets pass this filter and AF_UNIX is IpcPolicy's decision
-            // (see `build`); every other family is blocked.
+            // IP and Unix sockets pass this filter; every other family is
+            // blocked.
             add_syscall_rule(
                 rules,
                 libc::SYS_socket,
@@ -365,15 +273,6 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
             // `crate::net`); bind/listen must stay available for AF_UNIX.
         }
         NetworkPolicy::Full => {}
-    }
-    Ok(())
-}
-
-fn add_ipc_rules(rules: &mut RuleMap, policy: IpcPolicy) -> Result<()> {
-    if policy == IpcPolicy::Strict {
-        for &sys in STRICT_ONLY_IPC {
-            add_whole_syscall_rule(rules, sys);
-        }
     }
     Ok(())
 }
@@ -394,7 +293,6 @@ fn add_whole_syscall_rule(rules: &mut RuleMap, syscall: i64) {
 #[cfg(target_arch = "x86_64")]
 fn syscall_numbers(syscall: i64) -> impl Iterator<Item = i64> {
     let x32_syscall = match syscall {
-        libc::SYS_mq_notify => X32_SYS_MQ_NOTIFY,
         libc::SYS_kexec_load => X32_SYS_KEXEC_LOAD,
         _ => syscall,
     };
@@ -423,18 +321,6 @@ fn socket_domain_allowlist_rule(allowed_families: &[libc::c_int]) -> Result<Secc
     SeccompRule::new(conditions).map_err(|e| Error::confinement("seccomp", e))
 }
 
-/// A rule matching `socket(domain == family, ..)`.
-fn socket_domain_rule(family: libc::c_int) -> Result<SeccompRule> {
-    let condition = SeccompCondition::new(
-        0, // arg0 = domain
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::Eq,
-        domain_as_u64(family),
-    )
-    .map_err(|e| Error::confinement("seccomp", e))?;
-    SeccompRule::new(vec![condition]).map_err(|e| Error::confinement("seccomp", e))
-}
-
 /// Widen a socket domain (`AF_*` constant, always non-negative) to the `u64`
 /// seccomp compares against. `try_from` rejects a negative value rather than
 /// silently reinterpreting the sign bit as `as` would.
@@ -446,14 +332,9 @@ fn domain_as_u64(family: libc::c_int) -> u64 {
 mod tests {
     use super::*;
 
-    fn config(
-        network: NetworkPolicy,
-        ipc: IpcPolicy,
-        user_namespaces: UserNamespacePolicy,
-    ) -> SandboxConfig {
+    fn config(network: NetworkPolicy, user_namespaces: UserNamespacePolicy) -> SandboxConfig {
         SandboxConfig {
             network,
-            linux_ipc: ipc,
             linux_user_namespaces: user_namespaces,
             ..SandboxConfig::default()
         }
@@ -473,82 +354,48 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn x32_specific_syscalls_use_their_legacy_numbers() {
-        for (native, x32) in [
-            (libc::SYS_mq_notify, X32_SYS_MQ_NOTIFY),
-            (libc::SYS_kexec_load, X32_SYS_KEXEC_LOAD),
-        ] {
-            assert_eq!(
-                syscall_numbers(native).collect::<Vec<_>>(),
-                vec![native, x32 | X32_SYSCALL_BIT]
-            );
-        }
+        assert_eq!(
+            syscall_numbers(libc::SYS_kexec_load).collect::<Vec<_>>(),
+            vec![libc::SYS_kexec_load, X32_SYS_KEXEC_LOAD | X32_SYSCALL_BIT]
+        );
     }
 
     #[test]
-    fn strict_ipc_selects_the_unix_socket_filter() {
-        let expected = compile(
-            unix_socket_rules().expect("unix socket rules"),
-            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
-        )
-        .expect("unix socket filter");
-
-        let strict = build(&SandboxConfig::default()).expect("strict filters");
-        assert!(strict.iter().any(|p| program_eq(p, &expected)));
-
-        let relaxed_config = SandboxConfig {
-            linux_ipc: IpcPolicy::Relaxed,
-            ..SandboxConfig::default()
-        };
-        let relaxed = build(&relaxed_config).expect("relaxed filters");
-        assert!(!relaxed.iter().any(|p| program_eq(p, &expected)));
-    }
-
-    #[test]
-    fn io_uring_denial_depends_only_on_network_policy() {
-        for (network, ipc, denied) in [
-            (NetworkPolicy::Deny, IpcPolicy::Strict, true),
-            (NetworkPolicy::Deny, IpcPolicy::Relaxed, true),
-            (NetworkPolicy::OutboundOnly, IpcPolicy::Strict, true),
-            (NetworkPolicy::OutboundOnly, IpcPolicy::Relaxed, true),
-            (NetworkPolicy::Full, IpcPolicy::Strict, false),
-            (NetworkPolicy::Full, IpcPolicy::Relaxed, false),
+    fn io_uring_denial_follows_network_policy() {
+        for (network, denied) in [
+            (NetworkPolicy::Deny, true),
+            (NetworkPolicy::OutboundOnly, true),
+            (NetworkPolicy::Full, false),
         ] {
-            let rules = enosys_rules(&config(network, ipc, UserNamespacePolicy::Deny));
+            let rules = enosys_rules(&config(network, UserNamespacePolicy::Deny));
             assert_eq!(
                 rules.contains_key(&libc::SYS_io_uring_setup),
                 denied,
-                "io_uring denial for network={network:?} ipc={ipc:?}"
+                "io_uring denial for network={network:?}"
             );
         }
     }
 
     #[test]
     fn outbound_only_never_uses_family_blind_bind_listen_traps() {
-        for ipc in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
-            let rules = violation_rules(&config(
-                NetworkPolicy::OutboundOnly,
-                ipc,
-                UserNamespacePolicy::Deny,
-            ))
-            .expect("violation rules");
-            for sys in [libc::SYS_bind, libc::SYS_listen] {
-                assert!(
-                    !rules.contains_key(&sys),
-                    "syscall {sys} trap under OutboundOnly with {ipc:?} IPC"
-                );
-            }
+        let rules = violation_rules(&config(
+            NetworkPolicy::OutboundOnly,
+            UserNamespacePolicy::Deny,
+        ))
+        .expect("violation rules");
+        for sys in [libc::SYS_bind, libc::SYS_listen] {
+            assert!(
+                !rules.contains_key(&sys),
+                "syscall {sys} trap under OutboundOnly"
+            );
         }
     }
 
     #[test]
     fn kernel_surface_is_trapped_regardless_of_policy() {
         for user_namespaces in [UserNamespacePolicy::Deny, UserNamespacePolicy::Allow] {
-            let rules = violation_rules(&config(
-                NetworkPolicy::Full,
-                IpcPolicy::Relaxed,
-                user_namespaces,
-            ))
-            .expect("violation rules");
+            let rules = violation_rules(&config(NetworkPolicy::Full, user_namespaces))
+                .expect("violation rules");
             for &sys in KERNEL_SURFACE_SYSCALLS {
                 assert!(
                     rules.contains_key(&sys),
@@ -564,12 +411,8 @@ mod tests {
             (UserNamespacePolicy::Deny, true),
             (UserNamespacePolicy::Allow, false),
         ] {
-            let rules = violation_rules(&config(
-                NetworkPolicy::Deny,
-                IpcPolicy::Strict,
-                user_namespaces,
-            ))
-            .expect("violation rules");
+            let rules = violation_rules(&config(NetworkPolicy::Deny, user_namespaces))
+                .expect("violation rules");
             for &sys in MOUNT_SYSCALLS {
                 assert_eq!(
                     rules.contains_key(&sys),
@@ -592,12 +435,8 @@ mod tests {
         assert!(!denied[&libc::SYS_clone].is_empty());
         assert!(enosys_rules(&SandboxConfig::default()).contains_key(&libc::SYS_clone3));
 
-        let allowed = probed_kernel_rules(&config(
-            NetworkPolicy::Deny,
-            IpcPolicy::Strict,
-            UserNamespacePolicy::Allow,
-        ))
-        .expect("probed rules");
+        let allowed = probed_kernel_rules(&config(NetworkPolicy::Deny, UserNamespacePolicy::Allow))
+            .expect("probed rules");
         for sys in [libc::SYS_unshare, libc::SYS_clone, libc::SYS_setns] {
             assert!(!allowed.contains_key(&sys));
         }
@@ -607,32 +446,16 @@ mod tests {
                 "probed denial must stay unconditional"
             );
         }
-        let enosys = enosys_rules(&config(
-            NetworkPolicy::Deny,
-            IpcPolicy::Strict,
-            UserNamespacePolicy::Allow,
-        ));
+        let enosys = enosys_rules(&config(NetworkPolicy::Deny, UserNamespacePolicy::Allow));
         assert!(!enosys.contains_key(&libc::SYS_clone3));
     }
 
     #[test]
     fn most_permissive_config_still_installs_the_unconditional_filters() {
-        let programs = build(&config(
-            NetworkPolicy::Full,
-            IpcPolicy::Relaxed,
-            UserNamespacePolicy::Allow,
-        ))
-        .expect("filters");
+        let programs =
+            build(&config(NetworkPolicy::Full, UserNamespacePolicy::Allow)).expect("filters");
         // Trap (kernel surface) and EPERM (bpf/perf/userfaultfd) remain; the
-        // Unix-socket and ENOSYS filters have nothing to deny.
+        // ENOSYS filter has nothing to deny.
         assert_eq!(programs.len(), 2);
-    }
-
-    fn program_eq(actual: &BpfProgram, expected: &BpfProgram) -> bool {
-        actual.len() == expected.len()
-            && actual
-                .iter()
-                .zip(expected)
-                .all(|(a, e)| (a.code, a.jt, a.jf, a.k) == (e.code, e.jt, e.jf, e.k))
     }
 }

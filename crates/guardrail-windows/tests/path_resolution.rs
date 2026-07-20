@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
-    Backend, Error, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand,
-    SandboxConfig, StdioMode, UserNamespacePolicy,
+    Backend, Error, FsAccess, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    StdioMode, UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 
@@ -161,7 +161,6 @@ fn config_with_runtime_env(label: &str) -> SandboxConfig {
     SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,

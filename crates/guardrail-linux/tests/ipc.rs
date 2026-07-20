@@ -1,15 +1,15 @@
 #![cfg(target_os = "linux")]
 
+use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::os::fd::AsRawFd;
 use std::os::linux::net::SocketAddrExt;
-use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener};
+use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
 use std::process::{Command as StdCommand, ExitStatus, Stdio};
+use std::thread;
 use std::time::Duration;
 
-use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, SandboxChild, SandboxCommand, SandboxConfig,
-    StdioMode,
-};
+use guardrail_core::{Backend, FsAccess, SandboxChild, SandboxCommand, SandboxConfig, StdioMode};
 use guardrail_linux::LinuxBackend;
 
 mod common;
@@ -106,36 +106,22 @@ fn private_shm_hides_host_objects_even_when_host_path_is_allowed() {
 }
 
 #[test]
-fn strict_blocks_shared_memory() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Strict;
-    assert!(
-        !allowed(&config, &["shm"]),
-        "SysV shared memory must be blocked under Strict IPC"
-    );
-}
-
-#[test]
-fn relaxed_allows_shared_memory() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+fn sysv_shared_memory_is_usable_in_the_fresh_namespace() {
+    let config = common::base();
     assert!(
         allowed(&config, &["shm"]),
-        "shared memory must be allowed under Relaxed IPC"
+        "SysV shared memory must work inside the fresh IPC namespace"
     );
 }
 
 #[test]
 fn process_inspection_works_inside_the_sandbox_domain() {
-    for level in [IpcPolicy::Strict, IpcPolicy::Relaxed] {
-        let mut config = common::base();
-        config.linux_ipc = level;
-        for probe in ["ptrace-self", "ptrace-child", "process-vm-child"] {
-            assert!(
-                allowed(&config, &[probe]),
-                "{probe} must work within the Landlock domain under {level:?} IPC"
-            );
-        }
+    let config = common::base();
+    for probe in ["ptrace-self", "ptrace-child", "process-vm-child"] {
+        assert!(
+            allowed(&config, &[probe]),
+            "{probe} must work within the Landlock domain"
+        );
     }
 }
 
@@ -167,8 +153,7 @@ fn process_inspection_cannot_reach_the_host_domain() {
         return;
     }
 
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     assert!(
         !allowed(
@@ -183,62 +168,15 @@ fn process_inspection_cannot_reach_the_host_domain() {
 }
 
 #[test]
-fn strict_blocks_unix_socket_creation_with_a_graceful_errno() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Strict;
-    // Exit 3, not SIGSYS: the denial is Errno(EAFNOSUPPORT) so tools probing
-    // optional local sockets fall back instead of dying.
-    assert_eq!(
-        status(&config, &["socket-unix"]).code(),
-        Some(3),
-        "creating an AF_UNIX socket must fail with an errno under Strict IPC"
-    );
-}
-
-#[test]
-fn strict_blocks_unix_socket_creation_even_with_full_network() {
-    let mut config = common::base();
-    config.network = NetworkPolicy::Full;
-    config.linux_ipc = IpcPolicy::Strict;
-    assert_eq!(
-        status(&config, &["socket-unix"]).code(),
-        Some(3),
-        "Strict IPC must deny AF_UNIX regardless of the network policy"
-    );
-}
-
-#[test]
-fn relaxed_allows_unix_socket_creation() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+fn unix_socket_and_socketpair_creation_are_usable() {
+    let config = common::base();
     assert!(
         allowed(&config, &["socket-unix"]),
-        "creating an AF_UNIX socket must be allowed under Relaxed IPC"
+        "creating an AF_UNIX socket must be allowed"
     );
-}
-
-#[test]
-fn strict_allows_unix_socketpair() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Strict;
     assert!(
         allowed(&config, &["socketpair-unix"]),
-        "socketpair must stay available under Strict IPC"
-    );
-}
-
-#[test]
-fn strict_blocks_unix_datagram_socketpair_escape() {
-    let name = format!("guardrail-ipc-strict-{}", std::process::id());
-    let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract address");
-    let _receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract socket");
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Strict;
-
-    assert_eq!(
-        status(&config, &["socketpair-unix-dgram-sendto", &name]).code(),
-        Some(3),
-        "Strict IPC must block datagram socketpairs that can target named sockets"
+        "connection-oriented Unix socketpair must be allowed"
     );
 }
 
@@ -247,8 +185,7 @@ fn abstract_host_socket_is_scoped_on_abi_v6_and_newer() {
     let name = format!("guardrail-ipc-relaxed-{}", std::process::id());
     let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract address");
     let receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract socket");
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     let sent = allowed(&config, &["socketpair-unix-dgram-sendto", &name]);
     if common::landlock_abi() >= 6 {
@@ -275,8 +212,7 @@ fn host_pathname_socket_is_denied_by_default_on_abi_v9_and_newer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("host.sock");
     let _listener = UnixListener::bind(&socket).expect("bind host socket");
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     let connected = allowed(
         &config,
@@ -295,7 +231,6 @@ fn explicit_pathname_socket_grant_allows_host_connection_on_abi_v9_and_newer() {
     let socket = dir.path().join("host.sock");
     let _listener = UnixListener::bind(&socket).expect("bind host socket");
     let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
     config.linux_unix_sockets.push(socket.clone());
 
     assert!(
@@ -308,12 +243,108 @@ fn explicit_pathname_socket_grant_allows_host_connection_on_abi_v9_and_newer() {
 }
 
 #[test]
+fn granted_host_service_can_pass_an_open_file_descriptor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("host.sock");
+    let secret = dir.path().join("secret.txt");
+    let expected = "descriptor capability";
+    std::fs::write(&secret, expected).expect("write host file");
+    let file = File::open(&secret).expect("open host file before sandboxing");
+    let listener = UnixListener::bind(&socket).expect("bind host socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+
+    let mut config = common::base();
+    config.linux_unix_sockets.push(socket.clone());
+    assert!(
+        !allowed(
+            &config,
+            &["read-file", secret.to_str().expect("UTF-8 path")]
+        ),
+        "the backing path must remain unavailable through FsAccess"
+    );
+
+    let sender = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    send_fd(&stream, &file);
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "sandbox did not connect to granted host socket"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept host socket: {error}"),
+            }
+        }
+    });
+
+    assert!(
+        allowed(
+            &config,
+            &[
+                "unix-recv-fd",
+                socket.to_str().expect("UTF-8 path"),
+                expected,
+            ]
+        ),
+        "a granted service may pass an already-open descriptor independently of FsAccess"
+    );
+    sender.join().expect("host sender thread");
+}
+
+#[expect(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "constructing and sending one SCM_RIGHTS control message is one UAPI operation"
+)]
+fn send_fd(stream: &UnixStream, file: &File) {
+    let mut payload = [b'x'];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    // `usize` storage gives cmsghdr its required native alignment.
+    let mut control = [0usize; 8];
+    // SAFETY: all pointer-bearing fields are initialized below before sendmsg.
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE computes the buffer size for the scalar payload size.
+    message.msg_controllen =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize };
+    // SAFETY: message's control buffer is live, aligned, and large enough for
+    // one descriptor, so its first header and payload are writable.
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        assert!(!header.is_null(), "SCM_RIGHTS header");
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
+        std::ptr::write_unaligned(
+            libc::CMSG_DATA(header).cast::<libc::c_int>(),
+            file.as_raw_fd(),
+        );
+        assert_eq!(
+            libc::sendmsg(stream.as_raw_fd(), &message, 0),
+            1,
+            "send SCM_RIGHTS descriptor"
+        );
+    }
+}
+
+#[test]
 fn filesystem_access_does_not_grant_host_pathname_socket_connection() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("host.sock");
     let _listener = UnixListener::bind(&socket).expect("bind host socket");
     let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
     config.fs.extend([
         FsAccess::ReadAllow(dir.path().into()),
         FsAccess::WriteAllow(dir.path().into()),
@@ -333,8 +364,7 @@ fn filesystem_access_does_not_grant_host_pathname_socket_connection() {
 #[test]
 fn same_domain_pathname_socket_remains_usable() {
     let path = format!("/dev/shm/guardrail-same-domain-{}.sock", std::process::id());
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     assert!(
         allowed(&config, &["unix-path-roundtrip", &path]),
@@ -345,8 +375,7 @@ fn same_domain_pathname_socket_remains_usable() {
 #[test]
 fn same_domain_abstract_socket_remains_usable() {
     let name = format!("guardrail-same-domain-{}", std::process::id());
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     assert!(
         allowed(&config, &["unix-abstract-roundtrip", &name]),
@@ -356,8 +385,7 @@ fn same_domain_abstract_socket_remains_usable() {
 
 #[test]
 fn host_signal_is_scoped_on_abi_v6_and_newer() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
     let host_pid = std::process::id().to_string();
 
     let permitted = allowed(&config, &["signal-zero", &host_pid]);
@@ -370,26 +398,10 @@ fn host_signal_is_scoped_on_abi_v6_and_newer() {
 
 #[test]
 fn same_domain_signal_remains_usable() {
-    let mut config = common::base();
-    config.linux_ipc = IpcPolicy::Relaxed;
+    let config = common::base();
 
     assert!(
         allowed(&config, &["signal-child-zero"]),
         "signal permission checks for a child in the same Landlock domain must remain available"
-    );
-}
-
-#[test]
-fn default_ipc_is_strict() {
-    // The default must be Strict (matches guardrail-core's default).
-    let config = common::base();
-    assert!(
-        !allowed(&config, &["shm"]),
-        "default IPC level must behave as Strict (shm blocked)"
-    );
-    assert_eq!(
-        status(&config, &["socket-unix"]).code(),
-        Some(3),
-        "default IPC level must behave as Strict (AF_UNIX blocked)"
     );
 }

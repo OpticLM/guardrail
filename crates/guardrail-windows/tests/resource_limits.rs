@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
+    Backend, FsAccess, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
     UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
@@ -181,7 +181,6 @@ fn builder_with_windows_runtime_env() -> SandboxConfig {
     SandboxConfig {
         fs: vec![],
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,

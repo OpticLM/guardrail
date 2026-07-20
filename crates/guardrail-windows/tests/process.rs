@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
-    Backend, FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxChild, SandboxCommand,
-    SandboxConfig, StdioMode, UserNamespacePolicy,
+    Backend, FsAccess, NetworkPolicy, ResourceLimits, SandboxChild, SandboxCommand, SandboxConfig,
+    StdioMode, UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 
@@ -87,7 +87,6 @@ fn config_with_probe_grant() -> SandboxConfig {
     SandboxConfig {
         fs: vec![FsAccess::ReadAllow(probe_dir())],
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env,

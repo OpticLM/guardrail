@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::policy::{FsAccess, IpcPolicy, NetworkPolicy, UserNamespacePolicy};
+use crate::policy::{FsAccess, NetworkPolicy, UserNamespacePolicy};
 
 /// Resource limits applied to the sandboxed child.
 ///
@@ -47,7 +47,6 @@ pub struct ResourceLimits {
 ///     network: NetworkPolicy::Deny,
 ///     limits: ResourceLimits::default(),
 ///     env: BTreeMap::new(),
-///     linux_ipc: IpcPolicy::Strict,
 ///     linux_unix_sockets: vec![],
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
 ///     darwin_sandbox_profiles: vec![],
@@ -72,13 +71,6 @@ pub struct SandboxConfig {
     /// entry must be absolute; a relative entry makes bare-program spawning
     /// fail with `InvalidInput` (see the backend crate docs).
     pub env: BTreeMap<String, String>,
-    /// Linux-only IPC confinement level. Non-Linux backends ignore this field.
-    ///
-    /// Enforced with seccomp by the Linux backend. On macOS it is ignored: IPC
-    /// follows the generated and imported Seatbelt rules, and network grants
-    /// can permit Unix-domain socket connections. On Windows it is ignored:
-    /// AppContainer baseline isolation applies independently of this field.
-    pub linux_ipc: IpcPolicy,
     /// Linux-only grants for connecting or sending to host-created pathname
     /// Unix sockets. Non-Linux backends ignore this field.
     ///
@@ -94,6 +86,11 @@ pub struct SandboxConfig {
     /// kernel cannot mediate pathname-socket connections, so the backend does
     /// not validate or open these entries and pathname sockets remain
     /// unrestricted by this field.
+    ///
+    /// A service reached through a granted socket can pass file descriptors
+    /// with `SCM_RIGHTS`. Those descriptors retain the access of the already
+    /// open host objects they refer to, independently of [`FsAccess`]. Treat a
+    /// socket grant as trust in the service and the capabilities it may send.
     pub linux_unix_sockets: Vec<PathBuf>,
     /// Linux-only user-namespace policy. Non-Linux backends ignore this field.
     ///

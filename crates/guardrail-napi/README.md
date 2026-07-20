@@ -20,7 +20,6 @@ const sandbox = await Sandbox.build({
     { kind: 'execute-allow', path: '/tmp/work' },
   ],
   network: 'deny', // 'deny' | 'outbound-only' | 'full'
-  linuxIpc: 'strict', // Linux-only: 'strict' | 'relaxed'
   linuxUserNamespaces: 'deny', // Linux-only: 'deny' | 'allow'
   memoryLimitMb: 256,
   env: {
@@ -47,7 +46,7 @@ Node 26.1.0, pnpm 11.5.1, Cargo 1.95.0, Go 1.26.4, Git 2.54.0, jj 0.41.0, and
 GitHub CLI 2.92.0.
 
 Guardrail is intentionally literal: the child sees only the filesystem,
-network, IPC, resource limits, working directory, and environment you declare.
+network, resource limits, working directory, and environment you declare.
 There is no inherited environment fallback.
 
 ### Baseline Policy
@@ -129,7 +128,6 @@ const sandbox = await Sandbox.build({
   fs,
   env,
   network: 'deny',
-  linuxIpc: 'strict',
 })
 
 await sandbox.spawn('/usr/bin/grep', ['-q', 'needle', 'alpha.txt'], {
@@ -164,7 +162,6 @@ const cargoSandbox = await Sandbox.build({
     CARGO_TERM_COLOR: 'never',
   },
   network: 'deny',
-  linuxIpc: 'strict',
 })
 
 await cargoSandbox.spawn(`${rustSysroot}/bin/cargo`, ['build', '--offline'], {
@@ -220,7 +217,6 @@ const pnpmSandbox = await Sandbox.build({
     CI: '1',
   },
   network: 'full',
-  linuxIpc: 'strict',
 })
 
 await pnpmSandbox.spawn(
@@ -267,7 +263,6 @@ const goSandbox = await Sandbox.build({
     GOTOOLCHAIN: 'local',
   },
   network: 'deny',
-  linuxIpc: 'strict',
 })
 
 await goSandbox.spawn('/usr/bin/go', ['build', './...'], {
@@ -296,7 +291,6 @@ const gitSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  linuxIpc: 'strict',
 })
 
 await gitSandbox.spawn('/usr/bin/git', ['init'], {
@@ -332,7 +326,6 @@ const jjSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
   },
   network: 'deny',
-  linuxIpc: 'strict',
 })
 
 await jjSandbox.spawn(jjBin, ['--ignore-working-copy', 'status'], {
@@ -366,7 +359,6 @@ const ghSandbox = await Sandbox.build({
     // Add GH_TOKEN here if you want authenticated API calls.
   },
   network: 'outbound-only',
-  linuxIpc: 'strict',
 })
 
 await ghSandbox.spawn('/usr/bin/gh', ['api', 'rate_limit', '--jq', '.resources.core.limit'], {
@@ -498,9 +490,8 @@ Notes:
   real home directory unless you want the sandboxed tool to read or mutate it.
 - `network: 'outbound-only'` is enough for HTTPS client requests on macOS in
   these tests. Use `network: 'full'` only for tools that need inbound sockets.
-- `linuxIpc` is Linux-only and ignored on macOS. Seatbelt starts from `(deny
-  default)`, so Mach lookups and POSIX/SysV IPC need explicit imported `.sb`
-  grants.
+- Seatbelt starts from `(deny default)`, so Mach lookups and POSIX/SysV IPC
+  need explicit imported `.sb` grants.
   Note that `network: 'outbound-only'` and `'full'` also permit connecting to
   local Unix-domain sockets — Seatbelt treats those as network operations.
 
@@ -868,7 +859,6 @@ marked *ignored* is an honest no-op there.
 | `network` | seccomp socket-family filter; ABI-gated Landlock TCP/UDP-bind restrictions for `outbound-only` | Seatbelt network rules | AppContainer capabilities |
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
-| `linuxIpc` | seccomp (SysV/POSIX IPC and Unix-socket creation); process inspection follows the Landlock domain hierarchy independently | ignored — IPC follows generated/imported Seatbelt rules; network grants can permit Unix-socket connections | ignored — AppContainer baseline isolation applies independently; see backend limits |
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
@@ -886,9 +876,9 @@ Linux applies the following exact-runtime-ABI behavior:
 
 The unbound TCP listener is an intentional residual: Landlock mediates
 explicit TCP `bind`, while `listen` can make the kernel choose a port without
-an explicit bind. This behavior does not depend on `linuxIpc`. `io_uring` is
-likewise network-coupled: its three syscalls return `ENOSYS` under `deny` and
-`outbound-only`, and remain available under `full` regardless of `linuxIpc`.
+an explicit bind. `io_uring` is network-coupled: its three syscalls return
+`ENOSYS` under `deny` and `outbound-only`, and remain available under `full`
+because ring-submitted socket operations bypass syscall filtering.
 
 Separately from this ABI matrix, every Linux spawn always gets a fresh IPC
 namespace and a private 64 MiB `/dev/shm` mounted `nosuid,nodev,noexec`. This
@@ -898,7 +888,10 @@ On ABI v9+, `linuxUnixSockets` controls connection and explicit-recipient send
 access only. It is independent of `fs`: read/write access to a socket path does
 not grant connection access, and a socket grant does not grant filesystem
 access. Grant paths are opened when each child is spawned, so they must exist
-then. Unix sockets created inside the same sandbox domain remain reachable.
+then. A trusted granted service can pass file descriptors with `SCM_RIGHTS`;
+those descriptors carry their already-open access independently of `fs`.
+Treat each socket grant as trust in the service and the capabilities it may
+send. Unix sockets created inside the same sandbox domain remain reachable.
 `ptrace` and `process_vm_*` also work for processes in the same or a nested
 Landlock domain, while Landlock's implicit ptrace hierarchy denies inspection
 of host processes in the parent domain on every supported ABI. This is
@@ -915,8 +908,8 @@ package SID and are not isolated from each other.
 
 ## API Notes
 
-- The sandbox denies everything by default. Grant exactly the access the child
-  needs.
+- Filesystem and network access are denied by default. Grant exactly the
+  access the child needs.
 - The sandbox fails closed: `Sandbox.build` throws when a capability probe
   fails, and spawning throws if confinement cannot actually be applied. A
   child is never run unconstrained as a fallback.
@@ -946,7 +939,6 @@ package SID and are not isolated from each other.
 
 - `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
   Unix and is unsupported on Windows in that state.
-- `linuxIpc` is Linux-only and ignored on macOS and Windows.
 - `linuxUnixSockets` is Linux-only and ignored on macOS and Windows. On Linux
   it is enforced only on Landlock ABI v9+ and ignored without path validation
   on older ABIs.

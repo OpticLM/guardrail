@@ -50,7 +50,7 @@ const fn features_for_abi(abi: i32) -> AbiFeatures {
     }
 }
 
-/// Runtime-selected IPC policy. Paths are retained only when ABI v9 can
+/// Runtime-selected IPC domain. Paths are retained only when ABI v9 can
 /// enforce them, so older kernels never validate or open ignored grants.
 #[derive(Debug)]
 pub(crate) struct Policy {

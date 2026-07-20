@@ -18,7 +18,7 @@ pub use backend::Backend;
 pub use command::{SandboxCommand, StdioMode};
 pub use config::{ResourceLimits, SandboxConfig};
 pub use error::{Error, Result};
-pub use policy::{FsAccess, IpcPolicy, NetworkPolicy, UserNamespacePolicy};
+pub use policy::{FsAccess, NetworkPolicy, UserNamespacePolicy};
 #[cfg(windows)]
 pub use process::WindowsChildStdio;
 pub use process::{SandboxChild, SharedSandboxChild};

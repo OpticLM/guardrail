@@ -2,8 +2,8 @@
 //!
 //! Applies confinement entirely in-process around [`std::process::Command`]'s
 //! `pre_exec` hook: resource limits via `setrlimit`, plus Landlock filesystem
-//! rules and seccomp-BPF filters for network and IPC. Policies and all
-//! host-path Landlock rules are built in the parent; the post-fork child only
+//! rules and seccomp-BPF filters for network and kernel attack surface.
+//! Policies and all host-path Landlock rules are built in the parent; the post-fork child only
 //! issues raw syscalls (`prctl`, `unshare`, `mount`, `setrlimit`,
 //! `landlock_add_rule`, `landlock_restrict_self`, `close_range`, `seccomp`)
 //! over parent-prepared data — the async-signal-safe subset the `pre_exec`
@@ -55,8 +55,9 @@
 //! # Landlock ABI behavior
 //!
 //! Every spawn also enters its own Landlock domain for the IPC operations the
-//! running kernel can mediate. IPC scoping, pathname sockets, and UDP bind are
-//! deliberately best-effort across ABI versions. TCP bind is the exception:
+//! running kernel can mediate. Abstract-socket and signal scoping, pathname
+//! sockets, and UDP bind are deliberately best-effort across ABI versions.
+//! TCP bind is the exception:
 //! `OutboundOnly` fails closed on ABI v2-v3 because that policy's explicit
 //! bind guarantee cannot be enforced there.
 //!
@@ -73,22 +74,18 @@
 //! They are independent of [`guardrail_core::FsAccess`]: read or write access
 //! to a socket's filesystem path does not allow connecting, and a socket grant
 //! does not grant file access. Grant paths must exist when the child is
-//! spawned. The raw stable ABI v9 UAPI is used because this crate's `landlock`
-//! dependency currently models through ABI v7. The network layer likewise
-//! uses ABI v10's stable raw `LANDLOCK_ACCESS_NET_BIND_UDP` and network-port
-//! rule layout.
+//! spawned. A trusted service reached through a granted socket may pass file
+//! descriptors with `SCM_RIGHTS`; those descriptors carry their already-open
+//! access independently of `FsAccess`. Granting a socket therefore trusts the
+//! service and the capabilities it may send. The raw stable ABI v9 UAPI is
+//! used because this crate's `landlock` dependency currently models through
+//! ABI v7. The network layer likewise uses ABI v10's stable raw
+//! `LANDLOCK_ACCESS_NET_BIND_UDP` and network-port rule layout.
 //!
-//! Scoping applies regardless of [`guardrail_core::IpcPolicy`]. Under
-//! `IpcPolicy::Strict`, seccomp's earlier Unix-socket creation denial remains
-//! the limiting rule; the Landlock behavior is observable with relaxed IPC.
-//!
-//! Under `IpcPolicy::Strict` (the default), creating a Unix-domain socket —
-//! pathname or abstract — fails with `EAFNOSUPPORT`, so the child cannot reach
-//! local services (D-Bus, container engines, agent sockets) or proxy data
-//! through them. Unix datagram `socketpair`s fail too because their endpoints
-//! can be redirected to named sockets. The graceful errno lets tools that
-//! merely probe optional sockets (nscd, syslog, ssh-agent) fall back;
-//! connection-oriented `socketpair`s created by the child keep working.
+//! Unix-socket creation and `socketpair` are available. Same-domain pathname
+//! and abstract sockets work; reaching host-created sockets follows the ABI
+//! matrix and explicit grants above. SysV IPC and POSIX message queues are
+//! available inside the mandatory fresh IPC namespace described earlier.
 //!
 //! # OutboundOnly residual TCP listener
 //!
@@ -99,7 +96,7 @@
 //! intentionally preserved as an ephemeral-listener residual: the kernel
 //! implicitly selects a local port without passing through explicit
 //! `bind(2)`, so Landlock does not deny it. This behavior is independent of
-//! `IpcPolicy`.
+//! local IPC.
 //!
 //! Unless the network policy is `Full`, the `io_uring_*` syscalls fail with
 //! `ENOSYS`: ring-submitted operations

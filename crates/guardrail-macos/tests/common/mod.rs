@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use guardrail_core::{
-    FsAccess, IpcPolicy, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig,
-    UserNamespacePolicy,
+    FsAccess, NetworkPolicy, ResourceLimits, SandboxCommand, SandboxConfig, UserNamespacePolicy,
 };
 
 pub fn probe_path() -> PathBuf {
@@ -33,7 +32,6 @@ pub fn base() -> SandboxConfig {
     SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),
@@ -51,7 +49,6 @@ pub fn read_only_base() -> SandboxConfig {
     SandboxConfig {
         fs,
         network: NetworkPolicy::Deny,
-        linux_ipc: IpcPolicy::Strict,
         linux_unix_sockets: vec![],
         limits: ResourceLimits::default(),
         env: BTreeMap::new(),

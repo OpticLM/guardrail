@@ -33,17 +33,15 @@ pub enum FsAccess {
 /// Default is [`NetworkPolicy::Deny`].
 ///
 /// Unix-domain sockets are host-local IPC, not network reach, so no level
-/// restricts `AF_UNIX`; on Linux, whether creating Unix-domain sockets is
-/// allowed is decided by [`IpcPolicy`].
+/// restricts `AF_UNIX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
     /// Every socket family except `AF_UNIX` is denied.
     #[default]
     Deny,
     /// Outbound IPv4/IPv6 connections are allowed. Every other socket family
-    /// except `AF_UNIX` is denied. Whether Unix-domain sockets — servers
-    /// included — are available is the local-IPC decision; on Linux that is
-    /// [`IpcPolicy`].
+    /// except `AF_UNIX` is denied. Unix-domain sockets, including servers,
+    /// remain available.
     ///
     /// Backends restrict IP-server setup where their native mechanism can
     /// distinguish it from allowed local IPC. On Linux, explicit TCP `bind`
@@ -86,38 +84,4 @@ pub enum UserNamespacePolicy {
     /// child owns. Set this only when the child runs its own sandbox
     /// (Chromium/Electron, bubblewrap, rootless containers).
     Allow,
-}
-
-/// Inter-process-communication confinement level.
-/// Default is [`IpcPolicy::Strict`].
-///
-/// **Linux-only.** This policy is primarily enforced with seccomp by the Linux
-/// backend; when relaxed IPC composes with outbound-only networking, Landlock
-/// supplies the family-aware TCP-bind restriction. The macOS and Windows
-/// backends ignore [`SandboxConfig::linux_ipc`]. On macOS, IPC confinement
-/// follows the generated and imported Seatbelt rules, including any
-/// Unix-domain socket access enabled by network grants. On Windows,
-/// AppContainer baseline isolation applies independently. See each backend
-/// crate's documentation.
-///
-/// [`SandboxConfig::linux_ipc`]: crate::SandboxConfig::linux_ipc
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IpcPolicy {
-    /// Deny SysV shared memory / message queues / semaphores, POSIX message
-    /// queues, and creating Unix-domain sockets (`socket(AF_UNIX)`, pathname
-    /// or abstract) and datagram `socketpair`s, whose endpoints can be
-    /// redirected to named sockets. Pipes, connection-oriented `socketpair`s,
-    /// anonymous `mmap`, and process inspection inside the sandbox's Landlock
-    /// domain remain available. Landlock's implicit ptrace hierarchy denies
-    /// inspection of host/outside-domain processes independently.
-    #[default]
-    Strict,
-    /// Permit SysV / POSIX IPC and Unix-domain sockets, including Unix-domain
-    /// servers (`bind`/`listen`) — also under [`NetworkPolicy::OutboundOnly`],
-    /// which keeps denying explicit TCP `bind` on Linux. Process inspection
-    /// works inside the sandbox's Landlock domain; host/outside-domain targets
-    /// remain unavailable through Landlock's implicit ptrace hierarchy.
-    ///
-    /// [`NetworkPolicy::OutboundOnly`]: crate::NetworkPolicy::OutboundOnly
-    Relaxed,
 }
