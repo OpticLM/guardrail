@@ -41,9 +41,9 @@ const result = await child.wait()
 
 ## Linux Setup Guide
 
-This section is Linux-specific. It was tested on Fedora Linux 7.0.8 x86_64 with
-Node 26.1.0, pnpm 11.5.1, Cargo 1.95.0, Go 1.26.4, Git 2.54.0, jj 0.41.0, and
-GitHub CLI 2.92.0.
+This section is Linux-specific. It was tested on Fedora Linux 44 with kernel
+7.0.8 x86_64, Node 26.1.0, pnpm 11.15.1, Cargo 1.97.1, Go 1.26.5, Git 2.55.0,
+jj 0.41.0, and GitHub CLI 2.94.0.
 
 Guardrail is intentionally literal: the child sees only the filesystem,
 network, resource limits, working directory, and environment you declare.
@@ -305,8 +305,9 @@ Tested result: `git init` and `git status --short` completed successfully.
 
 ### jj
 
-Read-only jj inspection can work, but pass `--ignore-working-copy` so jj does
-not snapshot the working copy:
+jj works when its binary is readable/executable and the repository and config
+home are writable inside `workRoot`. Pass `--ignore-working-copy` only when you
+specifically want inspection without updating jj's working-copy snapshot:
 
 ```js
 const jjBin = '/home/me/.cargo/bin/jj'
@@ -328,13 +329,16 @@ const jjSandbox = await Sandbox.build({
   network: 'deny',
 })
 
-await jjSandbox.spawn(jjBin, ['--ignore-working-copy', 'status'], {
+await jjSandbox.spawn(jjBin, ['git', 'init', '--colocate'], {
+  cwd: `${workRoot}/repo`,
+}).wait()
+await jjSandbox.spawn(jjBin, ['status'], {
   cwd: `${workRoot}/repo`,
 }).wait()
 ```
 
-Tested result: `jj --ignore-working-copy status`, `jj --ignore-working-copy log`,
-and `jj root` completed successfully against an existing jj repo.
+Tested result: `jj git init --colocate`, normal `jj status` with a new file to
+snapshot, `jj log`, and `jj root` completed successfully.
 
 ### GitHub CLI (`gh`)
 
@@ -881,8 +885,9 @@ an explicit bind. `io_uring` is network-coupled: its three syscalls return
 because ring-submitted socket operations bypass syscall filtering.
 
 Separately from this ABI matrix, every Linux spawn always gets a fresh IPC
-namespace and a private 64 MiB `/dev/shm` mounted `nosuid,nodev,noexec`. This
-is mandatory on every Landlock ABI supported by Guardrail, not best effort.
+namespace, a private `/dev/mqueue` filesystem, and a private 64 MiB `/dev/shm`
+tmpfs. Both mounts use `nosuid,nodev,noexec`. This is mandatory on every
+Landlock ABI supported by Guardrail, not best effort.
 
 On ABI v9+, `linuxUnixSockets` controls connection and explicit-recipient send
 access only. It is independent of `fs`: read/write access to a socket path does
