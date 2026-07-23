@@ -29,6 +29,10 @@ impl CachedAppContainer {
         self.profile.restricting_sid()
     }
 
+    pub(crate) fn reallow_sid(&self) -> windows_sys::Win32::Security::PSID {
+        self.profile.reallow_sid()
+    }
+
     pub(crate) fn security_capabilities(
         &self,
         network: NetworkPolicy,
@@ -63,7 +67,12 @@ pub(crate) fn get(config: &SandboxConfig) -> Result<Arc<CachedAppContainer>> {
 fn create_entry(namespace: String, config: &SandboxConfig) -> Result<CachedAppContainer> {
     let profile_name = profile_name(&namespace);
     let profile = AppContainerProfile::create(&profile_name)?;
-    let acl = AclGuard::apply(&config.fs, profile.sid(), profile.restricting_sid())?;
+    let acl = AclGuard::apply(
+        &config.fs,
+        profile.sid(),
+        profile.restricting_sid(),
+        profile.reallow_sid(),
+    )?;
     Ok(CachedAppContainer {
         fs: config.fs.clone(),
         _acl: acl,

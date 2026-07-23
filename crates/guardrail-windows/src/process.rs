@@ -131,8 +131,9 @@ pub(crate) fn launch(
         .update_parent_process(&mut parent_process)
         .map_err(|err| Error::confinement("handle broker", err))?;
     startup.lpAttributeList = attributes.as_mut_ptr();
-    let restricted_token = restricted_token(appcontainer.restricting_sid())
-        .map_err(|err| Error::confinement("restricted-token", err))?;
+    let restricted_token =
+        restricted_token(appcontainer.restricting_sid(), appcontainer.reallow_sid())
+            .map_err(|err| Error::confinement("restricted-token", err))?;
 
     let mut process_info = PROCESS_INFORMATION::default();
 
@@ -727,7 +728,10 @@ fn anon_pipe(ours_readable: bool) -> io::Result<(OwnedHandle, OwnedHandle)> {
     }
 }
 
-fn restricted_token(filesystem_sid: windows_sys::Win32::Security::PSID) -> io::Result<OwnedHandle> {
+fn restricted_token(
+    filesystem_sid: windows_sys::Win32::Security::PSID,
+    reallow_sid: windows_sys::Win32::Security::PSID,
+) -> io::Result<OwnedHandle> {
     let mut current_token = ptr::null_mut();
     let opened = unsafe {
         OpenProcessToken(
@@ -795,9 +799,10 @@ fn restricted_token(filesystem_sid: windows_sys::Win32::Security::PSID) -> io::R
 
     // Mirroring Chromium's USER_RESTRICTED_SAME_ACCESS level, copying the
     // source token's user and non-integrity group SIDs lets normal runtime
-    // resources pass the second check. The extra filesystem SID adds only a
-    // deny-ACE veto and cannot broaden access because both checks must pass.
-    let mut restricting_sids = Vec::with_capacity(groups.len() + 2);
+    // resources pass the second check. The extra guardrail SIDs add only a
+    // deny-ACE veto and its explicit re-allow exception; neither can broaden
+    // access because both checks must pass.
+    let mut restricting_sids = Vec::with_capacity(groups.len() + 3);
     restricting_sids.push(SID_AND_ATTRIBUTES {
         Sid: user_sid,
         Attributes: 0,
@@ -813,6 +818,10 @@ fn restricted_token(filesystem_sid: windows_sys::Win32::Security::PSID) -> io::R
     );
     restricting_sids.push(SID_AND_ATTRIBUTES {
         Sid: filesystem_sid,
+        Attributes: 0,
+    });
+    restricting_sids.push(SID_AND_ATTRIBUTES {
+        Sid: reallow_sid,
         Attributes: 0,
     });
     let mut token = ptr::null_mut();

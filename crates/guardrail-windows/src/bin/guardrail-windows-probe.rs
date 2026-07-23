@@ -93,7 +93,59 @@ fn main() {
         }
         "write-file" => {
             let path = required_arg(&args, 2);
-            if fs::write(path, b"guardrail").is_err() {
+            if let Err(err) = fs::write(path, b"guardrail") {
+                eprintln!("write-file failed: {err}");
+                exit(3);
+            }
+        }
+        "write-nul" => {
+            // Open the null device for writing, exactly as `> nul` and tools
+            // like git and go do. Fails under the restricted token unless the
+            // host has granted Authenticated Users write on \Device\Null.
+            match fs::OpenOptions::new().write(true).open("\\\\.\\NUL") {
+                Ok(mut file) => {
+                    if let Err(err) = file.write_all(b"guardrail") {
+                        eprintln!("write-nul write failed: {err}");
+                        exit(3);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("write-nul open failed: {err}");
+                    exit(3);
+                }
+            }
+        }
+        "read-nul" => match fs::OpenOptions::new().read(true).open("\\\\.\\NUL") {
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("read-nul open failed: {err}");
+                exit(3);
+            }
+        },
+        "overwrite-file" => {
+            let path = required_arg(&args, 2);
+            let result = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(b"guardrail"));
+            if let Err(err) = result {
+                eprintln!("overwrite-file failed: {err}");
+                exit(3);
+            }
+        }
+        "delete-file" => {
+            let path = required_arg(&args, 2);
+            if let Err(err) = fs::remove_file(path) {
+                eprintln!("delete-file failed: {err}");
+                exit(3);
+            }
+        }
+        "rename-file" => {
+            let from = required_arg(&args, 2);
+            let to = required_arg(&args, 3);
+            if let Err(err) = fs::rename(from, to) {
+                eprintln!("rename-file failed: {err}");
                 exit(3);
             }
         }
@@ -112,7 +164,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: guardrail-windows-probe <echo-env|check-env|echo-stdio|stdin-echo|read-handle|alloc|spin|read-file|delayed-read-file|write-file|tcp-connect|tcp-bind [host]> ..."
+                "usage: guardrail-windows-probe <echo-env|check-env|echo-stdio|stdin-echo|read-handle|alloc|spin|read-file|delayed-read-file|write-file|write-nul|overwrite-file|delete-file|rename-file|tcp-connect|tcp-bind [host]> ..."
             );
             exit(2);
         }

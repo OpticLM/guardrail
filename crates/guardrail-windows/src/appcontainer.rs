@@ -29,6 +29,7 @@ pub(crate) struct AppContainerProfile {
     name: Vec<u16>,
     sid: Sid,
     restricting_sid: Sid,
+    reallow_sid: Sid,
 }
 
 unsafe impl Send for AppContainerProfile {}
@@ -36,8 +37,13 @@ unsafe impl Sync for AppContainerProfile {}
 
 impl AppContainerProfile {
     pub(crate) fn create(name: &str) -> Result<Self> {
+        // Two guardrail-owned restricted-token principals: the 4-sub-authority
+        // filesystem SID carries deny ACEs, the 5-sub-authority re-allow SID
+        // carries the explicit grants that shadow inherited denies.
         let restricting_sid =
-            Sid::random_restricting().map_err(|err| Error::confinement("appcontainer", err))?;
+            Sid::random_restricting(4).map_err(|err| Error::confinement("appcontainer", err))?;
+        let reallow_sid =
+            Sid::random_restricting(5).map_err(|err| Error::confinement("appcontainer", err))?;
         let nonce = random_u64().map_err(|err| Error::confinement("appcontainer", err))?;
         let name = format!("{name}-{nonce:016x}");
         let name_wide = wide_null(OsStr::new(&name));
@@ -73,6 +79,7 @@ impl AppContainerProfile {
             name: name_wide,
             sid,
             restricting_sid,
+            reallow_sid,
         })
     }
 
@@ -82,6 +89,10 @@ impl AppContainerProfile {
 
     pub(crate) fn restricting_sid(&self) -> PSID {
         self.restricting_sid.as_psid()
+    }
+
+    pub(crate) fn reallow_sid(&self) -> PSID {
+        self.reallow_sid.as_psid()
     }
 
     pub(crate) fn security_capabilities(
@@ -116,24 +127,31 @@ enum SidStorage {
 }
 
 impl Sid {
-    fn random_restricting() -> io::Result<Self> {
-        let mut sub_authorities = [0u32; 4];
-        random_bytes(&mut sub_authorities)?;
+    /// A random SID under the null authority. Distinct sub-authority counts
+    /// keep the guardrail-owned principals distinguishable from each other.
+    fn random_restricting(sub_authority_count: u8) -> io::Result<Self> {
+        let mut sub_authorities = [0u32; 8];
+        let filled = sub_authorities
+            .get_mut(..usize::from(sub_authority_count))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "SID sub-authority count")
+            })?;
+        random_bytes(filled)?;
 
         let authority = SID_IDENTIFIER_AUTHORITY { Value: [0; 6] };
         let mut raw = ptr::null_mut();
         let allocated = unsafe {
             AllocateAndInitializeSid(
                 &authority,
-                sub_authorities.len() as u8,
+                sub_authority_count,
                 sub_authorities[0],
                 sub_authorities[1],
                 sub_authorities[2],
                 sub_authorities[3],
-                0,
-                0,
-                0,
-                0,
+                sub_authorities[4],
+                sub_authorities[5],
+                sub_authorities[6],
+                sub_authorities[7],
                 &mut raw,
             )
         };
@@ -300,14 +318,27 @@ impl CapabilitySet {
             attributes: Vec::new(),
         };
 
+        // registryRead is unconditional: without it Winsock cannot load its
+        // protocol catalog (WSAStartup fails), which breaks ordinary programs
+        // far beyond networking — Go binaries, libcurl users, and msys tools
+        // fail at startup even for pure file work. Network-enabled policies
+        // additionally need the LPAC crypto and identity capabilities so
+        // schannel TLS can enumerate security packages (Chromium's network
+        // sandbox grants the same pair).
         match network {
-            NetworkPolicy::Deny => {}
+            NetworkPolicy::Deny => {
+                set.push_named("registryRead")?;
+            }
             NetworkPolicy::OutboundOnly => {
                 set.push_named("registryRead")?;
+                set.push_named("lpacCryptoServices")?;
+                set.push_named("lpacIdentityServices")?;
                 set.push(WinCapabilityInternetClientSid)?;
             }
             NetworkPolicy::Full => {
                 set.push_named("registryRead")?;
+                set.push_named("lpacCryptoServices")?;
+                set.push_named("lpacIdentityServices")?;
                 set.push(WinCapabilityInternetClientSid)?;
                 set.push(WinCapabilityInternetClientServerSid)?;
             }
@@ -397,16 +428,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deny_network_has_no_capabilities() {
+    fn deny_network_keeps_only_registry_read() {
         let set = CapabilitySet::for_network(NetworkPolicy::Deny).expect("capabilities");
-        assert_eq!(set.len(), 0);
-        assert!(set.as_ptr().is_null());
+        assert_eq!(set.len(), 1);
+        assert!(!set.as_ptr().is_null());
     }
 
     #[test]
     fn outbound_network_has_client_capability() {
         let set = CapabilitySet::for_network(NetworkPolicy::OutboundOnly).expect("capabilities");
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 4);
         assert_eq!(set.attributes[0].Attributes, SE_GROUP_ENABLED);
         assert!(!set.attributes[0].Sid.is_null());
     }
@@ -414,7 +445,7 @@ mod tests {
     #[test]
     fn full_network_is_distinct_from_outbound() {
         let set = CapabilitySet::for_network(NetworkPolicy::Full).expect("capabilities");
-        assert_eq!(set.len(), 3);
+        assert_eq!(set.len(), 5);
     }
 
     #[test]

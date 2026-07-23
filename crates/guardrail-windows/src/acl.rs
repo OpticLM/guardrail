@@ -25,7 +25,7 @@ use windows_sys::Win32::Security::{
     INHERITED_ACE, InitializeAcl, OBJECT_INHERIT_ACE, PSID, SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE, FILE_GENERIC_EXECUTE,
+    DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE, FILE_GENERIC_EXECUTE,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA,
     FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
 };
@@ -39,6 +39,7 @@ const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 pub(crate) struct AclGuard {
     package_sid: Vec<u8>,
     filesystem_sid: Vec<u8>,
+    reallow_sid: Vec<u8>,
     applied: Vec<AppliedAcl>,
 }
 
@@ -46,6 +47,7 @@ pub(crate) struct AclGuard {
 enum Principal {
     Package,
     Filesystem,
+    Reallow,
 }
 
 #[derive(Debug)]
@@ -55,7 +57,12 @@ struct AppliedAcl {
 }
 
 impl AclGuard {
-    pub(crate) fn apply(fs: &[FsAccess], package_sid: PSID, filesystem_sid: PSID) -> Result<Self> {
+    pub(crate) fn apply(
+        fs: &[FsAccess],
+        package_sid: PSID,
+        filesystem_sid: PSID,
+        reallow_sid: PSID,
+    ) -> Result<Self> {
         let entries = compile_entries(fs).map_err(|err| Error::confinement("acl", err))?;
         for entry in &entries {
             if entry.effect == RuleEffect::Deny {
@@ -66,27 +73,33 @@ impl AclGuard {
             package_sid: copy_sid(package_sid).map_err(|err| Error::confinement("acl", err))?,
             filesystem_sid: copy_sid(filesystem_sid)
                 .map_err(|err| Error::confinement("acl", err))?,
+            reallow_sid: copy_sid(reallow_sid).map_err(|err| Error::confinement("acl", err))?,
             applied: Vec::new(),
         };
 
-        for entry in entries {
-            let (principal, sid, mode, rights) = match entry.effect {
-                RuleEffect::Allow => (
-                    Principal::Package,
-                    guard.package_sid.as_mut_ptr().cast(),
-                    GRANT_ACCESS,
-                    allow_mask(entry.right),
-                ),
-                RuleEffect::Deny => (
-                    Principal::Filesystem,
-                    guard.filesystem_sid.as_mut_ptr().cast(),
-                    DENY_ACCESS,
-                    deny_mask(entry.right),
-                ),
-            };
-            add_acl_entry(&entry.path, sid, mode, rights)
-                .map_err(|err| Error::confinement("acl", err))?;
-            guard.record(entry.path, principal);
+        for entry in &entries {
+            let mut ops = Vec::with_capacity(2);
+            match entry.effect {
+                RuleEffect::Allow => {
+                    ops.push((Principal::Package, GRANT_ACCESS, allow_mask(entry.right)));
+                    // An allow beneath a denied ancestor needs an explicit
+                    // grant of exactly the denied bits: explicit ACEs precede
+                    // inherited ACEs in canonical DACL order, so the grant is
+                    // consumed before the ancestor's inherited deny can veto.
+                    if shadowed_by_deny(&entries, entry) {
+                        ops.push((Principal::Reallow, GRANT_ACCESS, deny_mask(entry.right)));
+                    }
+                }
+                RuleEffect::Deny => {
+                    ops.push((Principal::Filesystem, DENY_ACCESS, deny_mask(entry.right)));
+                }
+            }
+            for (principal, mode, rights) in ops {
+                let sid = guard.sid(principal);
+                add_acl_entry(&entry.path, sid, mode, rights)
+                    .map_err(|err| Error::confinement("acl", err))?;
+                guard.record(entry.path.clone(), principal);
+            }
         }
 
         Ok(guard)
@@ -106,6 +119,7 @@ impl AclGuard {
         match principal {
             Principal::Package => self.package_sid.as_mut_ptr().cast(),
             Principal::Filesystem => self.filesystem_sid.as_mut_ptr().cast(),
+            Principal::Reallow => self.reallow_sid.as_mut_ptr().cast(),
         }
     }
 }
@@ -361,8 +375,19 @@ fn compile_entries(fs: &[FsAccess]) -> io::Result<Vec<Rule>> {
         }
     }
 
-    reject_nested_reallow(&entries)?;
     Ok(entries)
+}
+
+/// Whether an inherited guardrail deny for the same right reaches this allow
+/// root from a strict ancestor. Such an allow needs an explicit re-allow grant
+/// so the inherited deny never fires for the granted bits.
+fn shadowed_by_deny(entries: &[Rule], allow: &Rule) -> bool {
+    entries.iter().any(|entry| {
+        entry.effect == RuleEffect::Deny
+            && entry.right == allow.right
+            && allow.path != entry.path
+            && allow.path.starts_with(&entry.path)
+    })
 }
 
 fn normalize_rules(fs: &[FsAccess]) -> io::Result<Vec<Rule>> {
@@ -402,39 +427,6 @@ fn validate_no_reparse_components(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn reject_nested_reallow(entries: &[Rule]) -> io::Result<()> {
-    for allow in entries
-        .iter()
-        .filter(|entry| entry.effect == RuleEffect::Allow)
-    {
-        if let Some(deny) = entries.iter().find(|entry| {
-            entry.effect == RuleEffect::Deny
-                && entry.right == allow.right
-                && allow.path != entry.path
-                && allow.path.starts_with(&entry.path)
-        }) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Windows ACL inheritance cannot re-allow {} access to {} below denied ancestor {}",
-                    right_name(allow.right),
-                    allow.path.display(),
-                    deny.path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn right_name(right: FsRight) -> &'static str {
-    match right {
-        FsRight::Read => "read",
-        FsRight::Write => "write",
-        FsRight::Execute => "execute",
-    }
-}
-
 fn final_effect(rules: &[Rule], right: FsRight, path: &Path) -> RuleEffect {
     let mut effect = RuleEffect::Deny;
     for rule in rules {
@@ -459,7 +451,14 @@ fn split_rule(rule: &FsAccess) -> (&Path, FsRight, RuleEffect) {
 fn allow_mask(right: FsRight) -> u32 {
     match right {
         FsRight::Read => FILE_GENERIC_READ,
-        FsRight::Write => FILE_GENERIC_WRITE,
+        // DELETE makes write grants cover deletion and renaming.
+        // FILE_DELETE_CHILD is never granted: it would let the child remove
+        // write-denied entries through their parent directory.
+        // FILE_READ_ATTRIBUTES rides along because kernel32 file opens
+        // (CreateFileW, MoveFileExW) implicitly request it, so a write grant
+        // without it cannot open existing files at all. It exposes metadata
+        // only, exactly as FILE_GENERIC_EXECUTE already does.
+        FsRight::Write => FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
         FsRight::Execute => FILE_GENERIC_EXECUTE,
     }
 }
@@ -468,7 +467,7 @@ fn deny_mask(right: FsRight) -> u32 {
     match right {
         FsRight::Read => FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES,
         FsRight::Write => {
-            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE
         }
         FsRight::Execute => FILE_EXECUTE,
     }
@@ -535,10 +534,22 @@ mod tests {
             file_specific_rights(allow_mask(FsRight::Read)),
             FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES
         );
-        assert_eq!(allow_mask(FsRight::Write), FILE_GENERIC_WRITE);
+        assert_eq!(
+            allow_mask(FsRight::Write),
+            FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES
+        );
         assert_eq!(
             file_specific_rights(allow_mask(FsRight::Write)),
-            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
+            FILE_WRITE_DATA
+                | FILE_APPEND_DATA
+                | FILE_WRITE_EA
+                | FILE_WRITE_ATTRIBUTES
+                | DELETE
+                | FILE_READ_ATTRIBUTES
+        );
+        assert_eq!(
+            deny_mask(FsRight::Write),
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE
         );
         assert_eq!(allow_mask(FsRight::Execute), FILE_GENERIC_EXECUTE);
         assert_eq!(
@@ -595,16 +606,34 @@ mod tests {
     }
 
     #[test]
-    fn compiler_rejects_nested_reallow() {
+    fn compiler_keeps_nested_reallow_and_marks_the_shadow() {
         let root = temp_dir("nested-reallow");
         let child = root.join("child");
         std::fs::create_dir(&child).unwrap();
+        let root_canonical = std::fs::canonicalize(&root).unwrap();
+        let child_canonical = std::fs::canonicalize(&child).unwrap();
 
-        let err = compile_entries(&[FsAccess::ReadDeny(root.clone()), FsAccess::ReadAllow(child)])
-            .unwrap_err();
+        let entries =
+            compile_entries(&[FsAccess::ReadDeny(root.clone()), FsAccess::ReadAllow(child)])
+                .unwrap();
 
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("cannot re-allow"));
+        assert_eq!(
+            entries,
+            vec![
+                Rule {
+                    path: root_canonical,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Deny,
+                },
+                Rule {
+                    path: child_canonical,
+                    right: FsRight::Read,
+                    effect: RuleEffect::Allow,
+                },
+            ]
+        );
+        assert!(shadowed_by_deny(&entries, &entries[1]));
+        assert!(!shadowed_by_deny(&entries, &entries[0]));
         let _ = std::fs::remove_dir_all(root);
     }
 

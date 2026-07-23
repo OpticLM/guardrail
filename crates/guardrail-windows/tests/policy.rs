@@ -67,6 +67,31 @@ fn default_network_deny_still_launches_process_in_appcontainer() {
 }
 
 #[test]
+fn sandboxed_process_can_write_nul_when_host_configured() {
+    // The null-device write grant is host-wide state applied by an elevated
+    // `guardrail-nul-setup` run and reset on reboot. When it is absent this
+    // test cannot exercise the path (and cannot install it without elevation),
+    // so it reports that instead of failing.
+    if !guardrail_windows::null_device_write_configured().expect("query null-device DACL") {
+        eprintln!(
+            "skipping: null-device write grant absent; run `guardrail-nul-setup` elevated first"
+        );
+        return;
+    }
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([FsAccess::ReadAllow(probe_dir())]);
+    let mut command = probe();
+    command.args = vec!["write-nul".into()];
+
+    let mut child = spawn_child(&config, command);
+    assert!(
+        child.wait().expect("wait").success(),
+        "a sandboxed child must be able to write the null device once the host grant is present"
+    );
+}
+
+#[test]
 fn filesystem_read_is_denied_without_grant() {
     let temp = TempPath::new();
     fs::create_dir_all(temp.path()).expect("create temp dir");
@@ -319,27 +344,208 @@ fn future_child_of_denied_directory_inherits_deny() {
 }
 
 #[test]
-fn nested_reallow_is_rejected() {
+fn read_reallow_beneath_denied_directory() {
     let temp = TempPath::new();
-    fs::create_dir_all(temp.path()).expect("create temp dir");
-    let public = temp.path().join("public.txt");
-    fs::write(&public, "public").expect("write public");
+    let secrets = temp.path().join("secrets");
+    fs::create_dir_all(&secrets).expect("create secrets dir");
+    let key = secrets.join("key.example");
+    let secret = secrets.join("secret.txt");
+    fs::write(&key, "public example").expect("write key");
+    fs::write(&secret, "secret").expect("write secret");
 
     let mut config = builder_with_system_root();
     config.fs.extend([
-        FsAccess::ReadDeny(temp.path().into()),
-        FsAccess::ReadAllow(public),
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(secrets.clone()),
+        FsAccess::ReadAllow(key.clone()),
     ]);
 
-    let err = match WindowsBackend::new(config) {
-        Ok(_) => panic!("nested re-allow must be rejected"),
-        Err(err) => err,
-    };
-    assert!(err.to_string().contains("cannot re-allow read access"));
-    assert!(matches!(
-        err,
-        guardrail_core::Error::Confinement { stage: "acl", .. }
-    ));
+    assert!(
+        probe_file_allowed(&config, "read-file", &key),
+        "a re-allowed child beneath a denied directory must be readable"
+    );
+    assert!(
+        !probe_file_allowed(&config, "read-file", &secret),
+        "siblings of the re-allowed child stay denied"
+    );
+}
+
+#[test]
+fn reallowed_directory_covers_existing_and_future_files() {
+    let temp = TempPath::new();
+    let denied = temp.path().join("denied");
+    let open = denied.join("open");
+    fs::create_dir_all(&open).expect("create re-allowed dir");
+    let existing = open.join("existing.txt");
+    let secret = denied.join("secret.txt");
+    let future = open.join("future.txt");
+    fs::write(&existing, "existing").expect("write existing");
+    fs::write(&secret, "secret").expect("write secret");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(denied.clone()),
+        FsAccess::ReadAllow(open.clone()),
+    ]);
+
+    assert!(probe_file_allowed(&config, "read-file", &existing));
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+
+    let mut command = probe();
+    command.args = vec![
+        "delayed-read-file".into(),
+        "750".into(),
+        future.clone().into(),
+    ];
+    let mut child = spawn_child(&config, command);
+    fs::write(&future, "future").expect("write future re-allowed child");
+    assert!(
+        child.wait().expect("wait").success(),
+        "a file created later inside the re-allowed directory inherits the re-allow"
+    );
+}
+
+#[test]
+fn write_reallow_beneath_denied_parent() {
+    let temp = TempPath::new();
+    let frozen = temp.path().join("frozen");
+    fs::create_dir_all(&frozen).expect("create frozen dir");
+    let thawed = frozen.join("thawed.txt");
+    let blocked = frozen.join("blocked.txt");
+    fs::write(&thawed, "old").expect("write thawed");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+        FsAccess::WriteDeny(frozen.clone()),
+        FsAccess::WriteAllow(thawed.clone()),
+    ]);
+
+    assert!(
+        probe_file_allowed(&config, "write-file", &thawed),
+        "the re-allowed file must be writable"
+    );
+    assert!(
+        !probe_file_allowed(&config, "write-file", &blocked),
+        "creating siblings in the denied directory stays blocked"
+    );
+}
+
+#[test]
+fn alternating_rules_resolve_by_last_match() {
+    let temp = TempPath::new();
+    let secrets = temp.path().join("secrets");
+    fs::create_dir_all(&secrets).expect("create secrets dir");
+    let env_file = temp.path().join(".env");
+    let key = secrets.join("key.example");
+    let other = secrets.join("other.secret");
+    fs::write(&env_file, "env").expect("write .env");
+    fs::write(&key, "key example").expect("write key");
+    fs::write(&other, "secret").expect("write other");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+        FsAccess::ReadDeny(env_file.clone()),
+        FsAccess::ReadDeny(secrets.clone()),
+        FsAccess::ReadAllow(key.clone()),
+        FsAccess::ReadDeny(key.clone()),
+        FsAccess::ReadAllow(key.clone()),
+    ]);
+
+    assert!(
+        !probe_file_allowed(&config, "read-file", &env_file),
+        ".env stays denied"
+    );
+    assert!(
+        !probe_file_allowed(&config, "read-file", &other),
+        "other files in secrets stay denied"
+    );
+    assert!(
+        probe_file_allowed(&config, "read-file", &key),
+        "the final allow wins for key.example"
+    );
+}
+
+#[test]
+fn write_grant_allows_delete_and_rename() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let doomed = temp.path().join("doomed.txt");
+    let source = temp.path().join("source.txt");
+    let target = temp.path().join("target.txt");
+    fs::write(&doomed, "doomed").expect("write doomed");
+    fs::write(&source, "source").expect("write source");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+    ]);
+
+    assert!(probe_file_allowed(&config, "delete-file", &doomed));
+    assert!(!doomed.exists(), "write grant should allow deletion");
+
+    let mut command = probe();
+    command.args = vec![
+        "rename-file".into(),
+        source.clone().into(),
+        target.clone().into(),
+    ];
+    let mut child = spawn_child(&config, command);
+    assert!(
+        child.wait().expect("wait").success(),
+        "write grant should allow rename"
+    );
+    assert!(
+        !source.exists() && target.exists(),
+        "rename should move the file"
+    );
+}
+
+#[test]
+fn read_grant_does_not_allow_delete() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let file = temp.path().join("kept.txt");
+    fs::write(&file, "kept").expect("write kept");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().into()),
+    ]);
+
+    assert!(!probe_file_allowed(&config, "delete-file", &file));
+    assert!(file.exists(), "read grant must not allow deletion");
+}
+
+#[test]
+fn write_deny_blocks_delete_beneath_write_allow() {
+    let temp = TempPath::new();
+    let protected = temp.path().join("protected");
+    fs::create_dir_all(&protected).expect("create protected dir");
+    let kept = protected.join("kept.txt");
+    let doomed = temp.path().join("doomed.txt");
+    fs::write(&kept, "kept").expect("write kept");
+    fs::write(&doomed, "doomed").expect("write doomed");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+        FsAccess::WriteDeny(protected.clone()),
+    ]);
+
+    assert!(!probe_file_allowed(&config, "delete-file", &kept));
+    assert!(kept.exists(), "write deny must veto deletion");
+    assert!(probe_file_allowed(&config, "delete-file", &doomed));
+    assert!(!doomed.exists(), "siblings outside the deny stay deletable");
 }
 
 #[test]
@@ -602,6 +808,31 @@ fn probe_file_allowed(config: &SandboxConfig, operation: &str, path: &Path) -> b
     command.args = vec![operation.into(), path.as_os_str().into()];
     let mut child = spawn_child(config, command);
     child.wait().expect("wait").success()
+}
+
+#[test]
+fn write_grant_allows_overwriting_existing_files() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let replaced = temp.path().join("replaced.txt");
+    let truncated = temp.path().join("truncated.txt");
+    fs::write(&replaced, "old").expect("write replaced");
+    fs::write(&truncated, "old").expect("write truncated");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::WriteAllow(temp.path().into()),
+    ]);
+
+    assert!(
+        probe_file_allowed(&config, "write-file", &replaced),
+        "fs::write must replace an existing file under a write grant"
+    );
+    assert!(
+        probe_file_allowed(&config, "overwrite-file", &truncated),
+        "truncating an existing file must work under a write grant"
+    );
 }
 
 struct OwnedSid {
