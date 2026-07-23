@@ -33,11 +33,25 @@ const sandbox = await Sandbox.build({
 
 const child = sandbox.spawn('/usr/bin/true')
 const result = await child.wait()
-// result: { code, signal, success }
+// result: { code, signal, success, stdout?, stderr? }
 ```
 
 `spawn(command, args, options)` is also available as a one-shot wrapper, but
 `await Sandbox.build(options)` is preferred when running more than one command.
+
+Standard streams are inherited by default. To capture output instead, pass
+per-spawn `stdout`/`stderr` dispositions (`'inherit'` | `'pipe'` | `'ignore'`)
+and read the Buffers from the `wait()` result:
+
+```js
+const child = sandbox.spawn('/usr/bin/uname', ['-a'], {
+  stdout: 'pipe',
+  stderr: 'pipe',
+  maxOutputBytes: 1024 * 1024, // optional per-stream cap
+})
+const result = await child.wait()
+console.log(result.stdout.toString())
+```
 
 ## Linux Setup Guide
 
@@ -115,8 +129,11 @@ Notes:
 - Avoid overlapping writable grants unless you need a later deny/allow
   exception. A single writable parent such as `workRoot` is easier to reason
   about than separate writable grants for every child directory.
-- For commands that print a lot of output, redirect logs into `workRoot`.
-  `guardrail-napi` currently inherits stdio and does not provide output capture.
+- To consume a command's output from the host, spawn it with
+  `stdout: 'pipe'` / `stderr: 'pipe'` and read the Buffers from the `wait()`
+  result, setting `maxOutputBytes` when the child is not fully trusted. For
+  very large logs, redirecting into a file under `workRoot` remains cheaper
+  than buffering.
 
 ### Coreutils
 
@@ -929,8 +946,14 @@ package SID and are not isolated from each other.
   `Sandbox.build()` or one-shot `spawn()`, not `probeSupport()`.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.
-- `stdio` is inherited from the parent process. Output capture is not yet
-  supported.
+- Each standard stream follows its per-spawn disposition. `stdin` is always
+  inherited from the parent process. `stdout` and `stderr` default to
+  `'inherit'`; `'pipe'` buffers the stream and returns it as a Buffer on the
+  `wait()` result (`result.stdout` / `result.stderr`), and `'ignore'` connects
+  the platform null device. A `'pipe'` stream is only drained while `wait()`
+  runs, so always await it — an unread child can otherwise block on a full
+  pipe. `maxOutputBytes` caps each piped stream; when a stream exceeds it, the
+  child is killed and `wait()` rejects with an error naming the limit.
 - No other parent file descriptor or handle reaches the child: on Linux and
   macOS every descriptor above stderr is closed at exec, and on Windows an
   explicit handle list restricts inheritance to the three standard streams.

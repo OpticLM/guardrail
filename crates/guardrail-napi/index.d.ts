@@ -8,9 +8,10 @@ export declare class Sandbox {
    */
   static build(options?: SandboxOptions | undefined | null): Promise<Sandbox>
   /**
-   * Spawn `command` (with `args`) inside this sandbox. stdio is inherited
-   * from the parent process; every other parent file descriptor or handle
-   * is kept out of the child.
+   * Spawn `command` (with `args`) inside this sandbox. Each standard stream
+   * follows its configured disposition — inherited from the parent process
+   * by default; every other parent file descriptor or handle is kept out of
+   * the child.
    */
   spawn(command: string, args?: Array<string> | undefined | null, options?: SandboxSpawnOptions | undefined | null): SandboxChild
 }
@@ -20,9 +21,12 @@ export declare class SandboxChild {
   /** OS process id of the child. */
   get pid(): number
   /**
-   * Wait for the child to exit. Resolves with its [`ExitResult`]. Calling
-   * `wait()` while another wait is active, or after one succeeds, rejects. A
-   * failed wait may be retried.
+   * Wait for the child to exit. Resolves with its [`ExitResult`], including
+   * buffered `stdout`/`stderr` for streams spawned with `"pipe"`. A piped
+   * stream is only drained while `wait()` runs, so always await it. Calling
+   * `wait()` while another wait is active, or after one succeeds, rejects.
+   * A failed wait may be retried, but a retry cannot return output already
+   * consumed by the failed attempt.
    */
   wait(): Promise<ExitResult>
   /**
@@ -41,6 +45,10 @@ export interface ExitResult {
   signal?: number
   /** `true` iff the process exited cleanly with code 0. */
   success: boolean
+  /** Buffered stdout; present only when the stream was spawned with `"pipe"`. */
+  stdout?: Buffer
+  /** Buffered stderr; present only when the stream was spawned with `"pipe"`. */
+  stderr?: Buffer
 }
 
 export interface FsAccess {
@@ -152,12 +160,27 @@ export interface SandboxOptions {
 export interface SandboxSpawnOptions {
   /** Working directory for the child. Defaults to the parent's cwd. */
   cwd?: string
+  /**
+   * stdout disposition; `"inherit"` (default) shares the parent's stream,
+   * `"pipe"` buffers output returned by `wait()`, `"ignore"` uses the null
+   * device.
+   */
+  stdout?: StdioMode
+  /** stderr disposition; same values as `stdout`. */
+  stderr?: StdioMode
+  /**
+   * Per-stream cap in bytes for `"pipe"` output. When a piped stream
+   * exceeds it, the child is killed and `wait()` rejects. No cap when
+   * omitted.
+   */
+  maxOutputBytes?: number
 }
 
 /**
- * Spawn `command` (with `args`) confined by `options`. stdio is inherited from
- * the parent process; every other parent file descriptor or handle is kept
- * out of the child. Returns a handle to await or kill the child.
+ * Spawn `command` (with `args`) confined by `options`. Each standard stream
+ * follows its configured disposition — inherited from the parent process by
+ * default; every other parent file descriptor or handle is kept out of the
+ * child. Returns a handle to await or kill the child.
  */
 export declare function spawn(command: string, args?: Array<string> | undefined | null, options?: SpawnOptions | undefined | null): SandboxChild
 
@@ -226,7 +249,30 @@ export interface SpawnOptions {
   windowsCacheNamespace?: string
   /** Working directory for the child. Defaults to the parent's cwd. */
   cwd?: string
+  /**
+   * stdout disposition; `"inherit"` (default) shares the parent's stream,
+   * `"pipe"` buffers output returned by `wait()`, `"ignore"` uses the null
+   * device.
+   */
+  stdout?: StdioMode
+  /** stderr disposition; same values as `stdout`. */
+  stderr?: StdioMode
+  /**
+   * Per-stream cap in bytes for `"pipe"` output. When a piped stream
+   * exceeds it, the child is killed and `wait()` rejects. No cap when
+   * omitted.
+   */
+  maxOutputBytes?: number
 }
+
+/**
+ * Disposition of a child output stream: `"inherit"` | `"pipe"` | `"ignore"`.
+ * `"inherit"` shares the parent's stream, `"pipe"` buffers the stream and
+ * returns it from `wait()`, `"ignore"` connects the platform null device.
+ */
+export type StdioMode =  'inherit'|
+'pipe'|
+'ignore';
 
 /**
  * Linux-only user-namespace policy for the child: `"deny"` | `"allow"`.

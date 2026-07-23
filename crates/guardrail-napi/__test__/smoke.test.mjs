@@ -232,3 +232,114 @@ test('inherits Node standard output and error on Windows', { skip: process.platf
   assert.match(stdout, /^guardrail-stdout-marker\r?$/m)
   assert.match(stderr, /^guardrail-stderr-marker\r?$/m)
 })
+
+// ---- output capture (stdout/stderr: 'pipe' | 'ignore', maxOutputBytes) ----
+
+const isWindows = process.platform === 'win32'
+const darwinRuntimeProfile = fileURLToPath(
+  new URL('../../guardrail-macos/tests/fixtures/runtime.sb', import.meta.url),
+)
+
+// Sandbox options able to run the platform shell: cmd on Windows (System32 is
+// reachable through the built-in ALL APPLICATION PACKAGES grants), /bin/sh
+// with broad read/execute grants elsewhere. The darwin runtime profile
+// supplies the dyld/sysctl grants Seatbelt's (deny default) otherwise blocks.
+function shellSandboxOptions(namespace) {
+  if (isWindows) {
+    const env = {}
+    for (const key of ['SystemRoot', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP']) {
+      if (process.env[key] !== undefined) env[key] = process.env[key]
+    }
+    if (process.env.SystemRoot !== undefined) {
+      env.PATH = process.env.SystemRoot + '\\System32'
+    }
+    return { network: 'deny', env, windowsCacheNamespace: namespace }
+  }
+  return {
+    fs: [
+      { kind: 'read-allow', path: '/' },
+      { kind: 'execute-allow', path: '/' },
+    ],
+    network: 'full',
+    darwinSandboxProfiles: process.platform === 'darwin' ? [darwinRuntimeProfile] : undefined,
+  }
+}
+
+function spawnShell(sandbox, script, options) {
+  if (isWindows) return sandbox.spawn('cmd', ['/D', '/C', script.windows], options)
+  return sandbox.spawn('/bin/sh', ['-c', script.unix], options)
+}
+
+const echoMarkers = {
+  windows: 'echo guardrail-out-marker&echo guardrail-err-marker>&2',
+  unix: 'printf guardrail-out-marker; printf guardrail-err-marker >&2',
+}
+
+test('captures piped stdout and stderr as Buffers', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-capture'))
+  const child = spawnShell(sandbox, echoMarkers, { stdout: 'pipe', stderr: 'pipe' })
+  const result = await child.wait()
+  assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
+  assert.ok(Buffer.isBuffer(result.stdout))
+  assert.ok(Buffer.isBuffer(result.stderr))
+  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
+  assert.equal(result.stderr.toString().trim(), 'guardrail-err-marker')
+})
+
+test("'ignore' output leaves no buffers on the result", async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-ignore'))
+  const child = spawnShell(sandbox, echoMarkers, { stdout: 'ignore', stderr: 'ignore' })
+  const result = await child.wait()
+  assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
+  assert.ok(result.stdout == null)
+  assert.ok(result.stderr == null)
+})
+
+test('captures only the piped stream', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-asym'))
+  const child = spawnShell(
+    sandbox,
+    { windows: 'echo guardrail-out-marker', unix: 'printf guardrail-out-marker' },
+    { stdout: 'pipe', stderr: 'ignore' },
+  )
+  const result = await child.wait()
+  assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
+  assert.ok(Buffer.isBuffer(result.stdout))
+  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
+  assert.ok(result.stderr == null)
+})
+
+test('one-shot spawn() captures piped output', async () => {
+  const options = { ...shellSandboxOptions('smoke-oneshot'), stdout: 'pipe' }
+  const child = isWindows
+    ? guardrail.spawn('cmd', ['/D', '/C', 'echo guardrail-out-marker'], options)
+    : guardrail.spawn('/bin/sh', ['-c', 'printf guardrail-out-marker'], options)
+  const result = await child.wait()
+  assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
+  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
+})
+
+test('maxOutputBytes kills the child and rejects wait()', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-cap'))
+  // ~66 KiB of output against a 1 KiB cap, comfortably past any pipe buffer.
+  const child = spawnShell(
+    sandbox,
+    {
+      windows: 'for /L %i in (1,1,2000) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      unix: 'i=0; while [ "$i" -lt 2000 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done',
+    },
+    { stdout: 'pipe', maxOutputBytes: 1024 },
+  )
+  await assert.rejects(child.wait(), /maxOutputBytes/)
+  // The overrun path still reaped the child, so a retried wait finds nothing.
+  await assert.rejects(child.wait())
+})
+
+test('maxOutputBytes is validated at spawn time', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-validate'))
+  assert.throws(() => spawnShell(sandbox, echoMarkers, { maxOutputBytes: 1024 }), /maxOutputBytes/)
+  assert.throws(
+    () => spawnShell(sandbox, echoMarkers, { stdout: 'pipe', maxOutputBytes: -1 }),
+    /maxOutputBytes/,
+  )
+})
