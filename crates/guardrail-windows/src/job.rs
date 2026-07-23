@@ -100,7 +100,7 @@ fn set_extended_limits(
         SetInformationJobObject(
             job.as_raw_handle(),
             JobObjectExtendedLimitInformation,
-            &info as *const _ as *const _,
+            ptr::from_ref(info).cast(),
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         )
     };
