@@ -21,7 +21,7 @@
 //! approximating.
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -35,10 +35,10 @@ use guardrail_core::{Error, FsAccess, Result};
 
 use crate::ns;
 
-// Stable Landlock UAPI values through ABI v2. The private `/dev/shm` rule
-// allows every V2 read/write/create/remove/refer right, but not Execute.
+// Stable Landlock UAPI values through ABI v2. The private IPC-mount rules
+// allow every V2 read/write/create/remove/refer right, but not Execute.
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_uint = 1;
-const PRIVATE_SHM_ACCESS_FS: u64 = 0x3ffe;
+const PRIVATE_IPC_ACCESS_FS: u64 = 0x3ffe;
 
 #[repr(C, packed)]
 struct LandlockPathBeneathAttr {
@@ -75,7 +75,7 @@ pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
 }
 
 /// A Landlock ruleset built in the parent with all host-path rules. The child
-/// adds only its newly mounted private `/dev/shm` before enforcement.
+/// adds only its newly mounted private IPC filesystems before enforcement.
 #[derive(Debug)]
 pub(crate) struct PreparedRuleset {
     fd: OwnedFd,
@@ -96,15 +96,23 @@ impl PreparedRuleset {
         Ok(Self { fd })
     }
 
-    /// Add the child-private `/dev/shm` hierarchy to this spawn's ruleset.
-    /// Called after the tmpfs is mounted but before the ruleset is enforced,
-    /// so this rule identifies the private mount rather than the hidden host
-    /// `/dev/shm`. Only raw syscalls are used in the post-fork child.
-    pub(crate) fn allow_private_shm(&self) -> std::io::Result<()> {
-        // SAFETY: path is a NUL-terminated literal and flags are scalar.
+    /// Add the child-private `/dev/mqueue` and `/dev/shm` hierarchies to this
+    /// spawn's ruleset. Called after both filesystems are mounted but before
+    /// the ruleset is enforced, so these rules identify the private mounts
+    /// rather than their hidden host counterparts. Only raw syscalls are used
+    /// in the post-fork child.
+    pub(crate) fn allow_private_ipc(&self) -> std::io::Result<()> {
+        for path in [c"/dev/mqueue", c"/dev/shm"] {
+            self.allow_private_ipc_path(path)?;
+        }
+        Ok(())
+    }
+
+    fn allow_private_ipc_path(&self, path: &CStr) -> std::io::Result<()> {
+        // SAFETY: path is NUL-terminated and flags are scalar.
         let path_fd = unsafe {
             libc::open(
-                c"/dev/shm".as_ptr(),
+                path.as_ptr(),
                 libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
@@ -112,7 +120,7 @@ impl PreparedRuleset {
             return Err(std::io::Error::last_os_error());
         }
         let attr = LandlockPathBeneathAttr {
-            allowed_access: PRIVATE_SHM_ACCESS_FS,
+            allowed_access: PRIVATE_IPC_ACCESS_FS,
             parent_fd: path_fd,
         };
         // SAFETY: the ruleset fd and path fd are live, attr has the packed
@@ -164,7 +172,7 @@ impl PreparedRuleset {
 }
 
 /// Build a Landlock ruleset for compiled host paths in the parent before
-/// `fork()`. The child adds its private `/dev/shm` with raw syscalls, then
+/// `fork()`. The child adds its private IPC filesystems with raw syscalls, then
 /// enforces the result with [`PreparedRuleset::restrict_self`]. Building
 /// everything else here keeps allocation, host-path opening, and error
 /// formatting out of the `pre_exec` closure, which the [`pre_exec` contract]

@@ -1,8 +1,9 @@
 //! Per-spawn IPC isolation and mount-namespace masking.
 //!
 //! Every child gets a fresh IPC namespace for SysV IPC and POSIX message
-//! queues, plus a private `/dev/shm` tmpfs for POSIX shared memory and named
-//! semaphores. The tmpfs is capped at 64 MiB and mounted `nosuid,nodev,noexec`.
+//! queues, a corresponding private `/dev/mqueue` mount, and a private
+//! `/dev/shm` tmpfs for POSIX shared memory and named semaphores. The tmpfs is
+//! capped at 64 MiB; both private mounts use `nosuid,nodev,noexec`.
 //!
 //! Landlock rules are purely additive grants, so an ordered policy such as
 //! `allow(root)` then `deny(root/secret)` cannot be expressed as Landlock
@@ -142,13 +143,14 @@ impl PreparedNamespace {
         }
     }
 
-    /// Enter the fresh namespaces, mount private `/dev/shm`, and install every
-    /// mask. Called inside `pre_exec` in the freshly forked child: raw syscalls
-    /// over parent-built data only. Descriptors opened here are `O_CLOEXEC`
-    /// and closed as soon as they are consumed; on error the failed spawn
-    /// tears the child down, so no cleanup path is needed.
+    /// Enter the fresh namespaces, mount private `/dev/mqueue` and `/dev/shm`,
+    /// and install every mask. Called inside `pre_exec` in the freshly forked
+    /// child: raw syscalls over parent-built data only. Descriptors opened here
+    /// are `O_CLOEXEC` and closed as soon as they are consumed; on error the
+    /// failed spawn tears the child down, so no cleanup path is needed.
     pub(crate) fn enter(&mut self) -> io::Result<()> {
         enter_user_mount_ipc_ns(&self.uid_map, &self.gid_map)?;
+        mount_private_mqueue()?;
         mount_private_shm()?;
 
         // Clone every re-exposed subtree before any mask shadows its path. The
@@ -183,6 +185,24 @@ impl PreparedNamespace {
         enter_user_mount_ns(&self.uid_map, &self.gid_map)?;
         Ok(())
     }
+}
+
+/// Mount the fresh IPC namespace's POSIX message-queue filesystem over the
+/// inherited host mount. An mqueue mount remains associated with the IPC
+/// namespace in which it was created, so `CLONE_NEWIPC` alone does not replace
+/// the inherited `/dev/mqueue` view.
+fn mount_private_mqueue() -> io::Result<()> {
+    // SAFETY: all pointers are NUL-terminated literals, data is unused, and
+    // the flags are scalars.
+    check_rc(unsafe {
+        libc::mount(
+            c"guardrail-mqueue".as_ptr(),
+            c"/dev/mqueue".as_ptr(),
+            c"mqueue".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    })
 }
 
 /// Hide the host's `/dev/shm` behind a per-spawn tmpfs. The fixed 64 MiB cap
@@ -378,9 +398,9 @@ fn enter_namespaces(flags: libc::c_int, uid_map: &[u8], gid_map: &[u8]) -> io::R
     })
 }
 
-/// Verify the mandatory per-spawn IPC/user/mount namespaces and private
-/// `/dev/shm` mount. Runs the exact empty-plan setup in a disposable forked
-/// child so the caller's process state is untouched.
+/// Verify the mandatory per-spawn IPC/user/mount namespaces and private IPC
+/// mounts. Runs the exact empty-plan setup in a disposable forked child so the
+/// caller's process state is untouched.
 pub(crate) fn probe_namespace_support() -> Result<()> {
     let mut namespace = PreparedNamespace::new(&MountPlan::default());
 
@@ -427,9 +447,10 @@ pub(crate) fn probe_namespace_support() -> Result<()> {
         "probe child terminated abnormally".into()
     };
     Err(Error::Unsupported(format!(
-        "the Linux backend requires a fresh IPC namespace and a private \
-         /dev/shm inside unprivileged user and mount namespaces for every \
-         sandbox; creating them failed: {detail}. Enable unprivileged user \
+        "the Linux backend requires a fresh IPC namespace with private \
+         /dev/mqueue and /dev/shm mounts inside unprivileged user and mount \
+         namespaces for every sandbox; creating them failed: {detail}. Enable \
+         unprivileged user \
          namespaces (Debian: sysctl kernel.unprivileged_userns_clone=1; \
          Ubuntu 24.04+: sysctl kernel.apparmor_restrict_unprivileged_userns=0; \
          also check user.max_user_namespaces)"

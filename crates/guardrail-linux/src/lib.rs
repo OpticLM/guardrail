@@ -30,14 +30,17 @@
 //!
 //! # Per-spawn IPC isolation
 //!
-//! Every spawn enters a fresh IPC namespace, isolating its SysV shared
-//! memory, semaphore, and message-queue identifiers and its POSIX message
-//! queues from the host and from other spawns. POSIX shared memory and named
-//! semaphores are filesystem-backed instead, so `/dev/shm` is overmounted
-//! with a private 64 MiB tmpfs using `nosuid,nodev,noexec`. The child receives
-//! an internal Landlock read/write/create/remove grant for that private mount;
-//! granting the host `/dev/shm` in [`guardrail_core::FsAccess`] still cannot
-//! reveal host objects because the host mount has already been hidden.
+//! Every spawn enters a fresh IPC namespace, isolating its SysV shared-memory,
+//! semaphore, and message-queue identifiers and its POSIX message queues from
+//! the host and from other spawns. Because an inherited `mqueue` filesystem
+//! remains associated with the IPC namespace in which it was mounted,
+//! `/dev/mqueue` is overmounted again after namespace entry. POSIX shared
+//! memory and named semaphores are filesystem-backed instead, so `/dev/shm` is
+//! overmounted with a private 64 MiB tmpfs. Both mounts use
+//! `nosuid,nodev,noexec`. The child receives internal Landlock
+//! read/write/create/remove grants for these private IPC filesystems; granting
+//! their host paths in [`guardrail_core::FsAccess`] still cannot reveal host
+//! objects because the host mounts have already been hidden.
 //!
 //! This isolation applies on every Landlock ABI supported by this backend; it
 //! is not a best-effort ABI-dependent feature. It needs unprivileged user

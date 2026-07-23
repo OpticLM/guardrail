@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
@@ -41,6 +42,46 @@ fn wait_output(child: SandboxChild) -> String {
     let output = child.wait_with_output().expect("wait with output");
     assert!(output.status.success(), "probe must succeed");
     String::from_utf8(output.stdout).expect("probe output must be UTF-8")
+}
+
+struct HostMessageQueue {
+    name: CString,
+    path: String,
+}
+
+impl HostMessageQueue {
+    fn new() -> Self {
+        let name =
+            CString::new(format!("/guardrail-host-mq-{}", std::process::id())).expect("queue name");
+        // SAFETY: name is NUL-terminated, the scalar flags request a new
+        // queue, and a null attribute pointer selects the system defaults.
+        let descriptor = unsafe {
+            libc::mq_open(
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+                std::ptr::null::<libc::mq_attr>(),
+            )
+        };
+        assert!(descriptor >= 0, "create host POSIX message queue");
+        // SAFETY: descriptor is owned above and no longer needed.
+        assert_eq!(unsafe { libc::mq_close(descriptor) }, 0, "close host queue");
+        let path = format!(
+            "/dev/mqueue/{}",
+            name.to_str()
+                .expect("UTF-8 queue name")
+                .trim_start_matches('/')
+        );
+        Self { name, path }
+    }
+}
+
+impl Drop for HostMessageQueue {
+    fn drop(&mut self) {
+        // SAFETY: name remains NUL-terminated and identifies the queue this
+        // helper created. Cleanup is best effort during unwinding.
+        unsafe { libc::mq_unlink(self.name.as_ptr()) };
+    }
 }
 
 #[test]
@@ -102,6 +143,26 @@ fn private_shm_hides_host_objects_even_when_host_path_is_allowed() {
             &["read-file", marker.to_str().expect("UTF-8 path")]
         ),
         "the private mount must hide host /dev/shm even when its host path was granted"
+    );
+}
+
+#[test]
+fn private_mqueue_is_mounted_for_the_fresh_ipc_namespace() {
+    let config = common::base();
+    assert!(
+        allowed(&config, &["posix-mq"]),
+        "POSIX message queues must work through the private /dev/mqueue mount"
+    );
+}
+
+#[test]
+fn private_mqueue_hides_host_queues_even_when_host_path_is_allowed() {
+    let host = HostMessageQueue::new();
+    let mut config = common::base();
+    config.fs.push(FsAccess::ReadAllow("/dev/mqueue".into()));
+    assert!(
+        !allowed(&config, &["read-file", &host.path]),
+        "the private mqueue mount must hide the host queue"
     );
 }
 

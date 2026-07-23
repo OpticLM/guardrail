@@ -60,7 +60,7 @@ impl Backend for LinuxBackend {
         // rules (rule compilation, PathFd opens, add_rule) are built before
         // fork(), the BPF programs were compiled in `new`, and the namespace
         // plan is CStrings and fixed buffers compiled in `new`. The child
-        // adds only the freshly mounted private /dev/shm to Landlock.
+        // adds only its freshly mounted private IPC filesystems to Landlock.
         let limits = self.config.limits;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let ipc_ruleset = self.ipc_policy.prepare()?;
@@ -85,21 +85,22 @@ impl Backend for LinuxBackend {
                 //     async-signal-safe.
                 set_no_new_privs()?;
 
-                // (2) Enter fresh IPC/user/mount namespaces, mount the private
-                //     /dev/shm, and install any deny-under-allow mount masks.
-                //     This must precede Landlock, which denies mount-topology
-                //     changes once enforced. The forked child is
-                //     single-threaded, as unshare(CLONE_NEWUSER) requires.
+                // (2) Enter fresh IPC/user/mount namespaces, mount private
+                //     /dev/mqueue and /dev/shm filesystems, and install any
+                //     deny-under-allow mount masks. This must precede
+                //     Landlock, which denies mount-topology changes once
+                //     enforced. The forked child is single-threaded, as
+                //     unshare(CLONE_NEWUSER) requires.
                 namespace.enter()?;
 
                 // (3) Resource limits.
                 rlimit::apply(&limits)?;
 
-                // (4) Grant the newly mounted private /dev/shm in this
+                // (4) Grant the newly mounted private IPC filesystems in this
                 //     spawn's parent-built Landlock ruleset, then enforce it.
-                //     The host /dev/shm is already hidden and is never
-                //     referenced by this rule.
-                landlock_ruleset.allow_private_shm()?;
+                //     Their host counterparts are already hidden and are
+                //     never referenced by these rules.
+                landlock_ruleset.allow_private_ipc()?;
                 landlock_ruleset.restrict_self()?;
 
                 // (4b) Network confinement for OutboundOnly: a second

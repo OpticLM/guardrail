@@ -79,6 +79,8 @@
 //!                     2000 milliseconds; exit 0 on success
 //!   posix-shm         create, map, use, and unlink a POSIX shared-memory
 //!                     object; exit 0 on success, 3 if unavailable
+//!   posix-mq          create a POSIX message queue and verify that it appears
+//!                     through `/dev/mqueue`; exit 0 on success, 3 otherwise
 //!   private-shm-mount verify `/dev/shm` is a tmpfs no larger than 64 MiB
 //!                     mounted nosuid,nodev,noexec; exit 0 if so, 3 otherwise
 //!   ptrace-self       call ptrace(PTRACE_TRACEME); exit 0 if allowed, 3 if denied
@@ -622,6 +624,28 @@ fn main() {
             unsafe { libc::shm_unlink(name.as_ptr()) };
             if usable { exit(0) } else { exit(3) }
         }
+        "posix-mq" => {
+            let name = c"/guardrail-probe-posix-mq";
+            // SAFETY: name is NUL-terminated, the scalar flags request a new
+            // queue, and a null attribute pointer selects system defaults.
+            let descriptor = unsafe {
+                libc::mq_open(
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                    0o600,
+                    std::ptr::null::<libc::mq_attr>(),
+                )
+            };
+            if descriptor < 0 {
+                exit(3);
+            }
+            let visible = std::fs::metadata("/dev/mqueue/guardrail-probe-posix-mq").is_ok();
+            // SAFETY: descriptor identifies the queue created above.
+            unsafe { libc::mq_close(descriptor) };
+            // SAFETY: name identifies the queue created above.
+            unsafe { libc::mq_unlink(name.as_ptr()) };
+            if visible { exit(0) } else { exit(3) }
+        }
         "private-shm-mount" => {
             let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
             let mut vfs = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -950,7 +974,7 @@ fn main() {
                  unix-bind-listen|unix-connect|unix-path-roundtrip|unix-abstract-roundtrip|\
                  signal-zero|signal-child-zero|\
                  io-uring-setup|io-uring-enter|io-uring-register|shm|\
-                 ipc-namespace|posix-shm|private-shm-mount|\
+                 ipc-namespace|posix-shm|posix-mq|private-shm-mount|\
                  ptrace-self|ptrace-child|process-vm-child|process-vm-host|process-vm-target|\
                  unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
             );
