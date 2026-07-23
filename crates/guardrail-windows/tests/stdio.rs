@@ -16,7 +16,9 @@ use guardrail_core::{
     UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
-use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+use windows_sys::Win32::Foundation::{
+    HANDLE_FLAG_INHERIT, STATUS_INVALID_HANDLE, SetHandleInformation,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -181,10 +183,15 @@ fn unrelated_inheritable_handle_does_not_leak() {
     command.args = vec!["read-handle".into(), raw.to_string().into()];
     let mut child = spawn_child(&config, command);
 
-    assert_eq!(
-        child.wait().expect("wait").code(),
-        Some(3),
-        "an unrelated inheritable parent handle must not reach the sandboxed child"
+    // The uninherited raw value names no handle in the child, and hosts differ
+    // in how that surfaces: ReadFile fails gracefully (probe exit 3), or the
+    // child dies from a STATUS_INVALID_HANDLE exception where the sandbox runs
+    // under strict handle checking. Both prove the handle never crossed; the
+    // control spawn above rules out a vacuous pass.
+    let code = child.wait().expect("wait").code();
+    assert!(
+        matches!(code, Some(3) | Some(STATUS_INVALID_HANDLE)),
+        "an unrelated inheritable parent handle must not reach the sandboxed child: {code:?}"
     );
 }
 
