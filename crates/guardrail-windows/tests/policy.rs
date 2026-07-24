@@ -549,7 +549,7 @@ fn write_deny_blocks_delete_beneath_write_allow() {
 }
 
 #[test]
-fn dropping_backend_and_child_removes_filesystem_deny_ace() {
+fn aces_persist_after_drop_until_namespace_cleanup() {
     let temp = TempPath::new();
     fs::create_dir_all(temp.path()).expect("create temp dir");
     let secret = temp.path().join("secret.txt");
@@ -579,6 +579,17 @@ fn dropping_backend_and_child_removes_filesystem_deny_ace() {
     assert!(!child.wait().expect("wait").success());
     drop(child);
     drop(backend);
+    // ACEs are persistent host state now: dropping the sandbox must NOT strip
+    // them (an app restart with unchanged rules reuses them without a
+    // tree-wide re-propagation).
+    assert!(dacl_has_explicit_sid(&public, package_sid.as_psid()));
+    assert!(dacl_has_explicit_sid(&secret, filesystem_sid.as_psid()));
+    // Explicit retirement removes everything.
+    guardrail_windows::cleanup_namespace(
+        config.windows_cache_namespace.as_deref(),
+        config.windows_manifest_dir.as_deref(),
+    )
+    .expect("cleanup namespace");
     assert!(!dacl_has_explicit_sid(&public, package_sid.as_psid()));
     assert!(!dacl_has_explicit_sid(&secret, filesystem_sid.as_psid()));
 }
@@ -800,6 +811,8 @@ fn builder_with_system_root() -> SandboxConfig {
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: Some(unique_namespace("policy")),
+        windows_manifest_dir: Some(std::env::temp_dir().join("guardrail-test-manifests")),
+        windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
     }
 }
 
@@ -1185,4 +1198,95 @@ impl Drop for TempPath {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+#[test]
+fn unchanged_policy_reuses_persistent_aces_across_backend_rebuilds() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let secret = temp.path().join("secret.txt");
+    let public = temp.path().join("public.txt");
+    fs::write(&secret, "secret").expect("write secret");
+    fs::write(&public, "public").expect("write public");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().to_path_buf()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
+
+    // Every probe_file_allowed call builds a fresh backend; from the second
+    // call on, the namespace manifest exists and the unchanged policy takes
+    // the verify-only path over the persisted ACEs.
+    for _ in 0..2 {
+        assert!(probe_file_allowed(&config, "read-file", &public));
+        assert!(!probe_file_allowed(&config, "read-file", &secret));
+    }
+
+    guardrail_windows::cleanup_namespace(
+        config.windows_cache_namespace.as_deref(),
+        config.windows_manifest_dir.as_deref(),
+    )
+    .expect("cleanup namespace");
+}
+
+#[test]
+fn policy_change_applies_as_diff_between_runs() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let secret = temp.path().join("secret.txt");
+    fs::write(&secret, "secret").expect("write secret");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().to_path_buf()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+
+    // Same namespace, deny removed: the next build must diff the manifest,
+    // strip the stale deny ACE, and leave the file readable.
+    let mut relaxed = config.clone();
+    relaxed.fs.pop();
+    assert!(probe_file_allowed(&relaxed, "read-file", &secret));
+
+    // And tightening again re-adds only the deny.
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+
+    guardrail_windows::cleanup_namespace(
+        config.windows_cache_namespace.as_deref(),
+        config.windows_manifest_dir.as_deref(),
+    )
+    .expect("cleanup namespace");
+}
+
+#[test]
+fn replaced_deny_root_self_heals_on_next_run() {
+    let temp = TempPath::new();
+    fs::create_dir_all(temp.path()).expect("create temp dir");
+    let secret = temp.path().join("secret.txt");
+    fs::write(&secret, "secret").expect("write secret");
+
+    let mut config = builder_with_system_root();
+    config.fs.extend([
+        FsAccess::ReadAllow(probe_dir()),
+        FsAccess::ReadAllow(temp.path().to_path_buf()),
+        FsAccess::ReadDeny(secret.clone()),
+    ]);
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+
+    // An atomic-save-style replacement sheds the file's explicit deny ACE
+    // (the inherited parent allow still covers it). Default deny-roots
+    // verification must notice and rebuild before the next child runs.
+    fs::remove_file(&secret).expect("remove secret");
+    fs::write(&secret, "recreated secret").expect("recreate secret");
+    assert!(!probe_file_allowed(&config, "read-file", &secret));
+
+    guardrail_windows::cleanup_namespace(
+        config.windows_cache_namespace.as_deref(),
+        config.windows_manifest_dir.as_deref(),
+    )
+    .expect("cleanup namespace");
 }

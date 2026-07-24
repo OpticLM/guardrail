@@ -1,7 +1,18 @@
-//! Temporary filesystem ACL rules for the sandbox principals.
+//! Persistent filesystem ACL application for the sandbox principals.
+//!
+//! ACEs are durable host state, deliberately **not** removed when a sandbox is
+//! dropped: an app restart with an unchanged policy must not re-propagate
+//! inheritable ACEs over a large tree. The per-namespace manifest
+//! ([`crate::manifest`]) records what was last applied; on the next run the
+//! policy is either verified in place (unchanged), applied as a set-diff of
+//! canonical ACE operations (changed), or rebuilt from scratch (manifest
+//! missing/corrupt, or on-disk state at a touched root no longer matching —
+//! "self-heal"). [`crate::cache::cleanup_namespace`] removes everything when a
+//! namespace is retired.
 
 #![cfg(windows)]
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io;
 use std::mem::size_of;
@@ -12,7 +23,7 @@ use std::ptr;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
 
-use guardrail_core::{Error, FsAccess, Result};
+use guardrail_core::{Error, FsAccess, Result, WindowsAclVerification};
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ACCESS_MODE, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -35,72 +46,123 @@ static ACL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 
-#[derive(Debug)]
-pub(crate) struct AclGuard {
-    package_sid: Vec<u8>,
-    filesystem_sid: Vec<u8>,
-    reallow_sid: Vec<u8>,
-    applied: Vec<AppliedAcl>,
+/// The sandbox principals' SIDs, in application order.
+pub(crate) struct Principals {
+    pub(crate) package_sid: Vec<u8>,
+    pub(crate) filesystem_sid: Vec<u8>,
+    pub(crate) reallow_sid: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Principal {
     Package,
     Filesystem,
     Reallow,
 }
 
-#[derive(Debug)]
-struct AppliedAcl {
-    path: PathBuf,
-    principal: Principal,
-}
-
-impl AclGuard {
-    pub(crate) fn apply(
-        fs: &[FsAccess],
+impl Principals {
+    pub(crate) fn new(
         package_sid: PSID,
         filesystem_sid: PSID,
         reallow_sid: PSID,
-    ) -> Result<Self> {
-        let entries = compile_entries(fs).map_err(|err| Error::confinement("acl", err))?;
-        for entry in &entries {
-            if entry.effect == RuleEffect::Deny {
-                validate_deny_tree(&entry.path).map_err(|err| Error::confinement("acl", err))?;
-            }
-        }
-        let mut guard = Self {
-            package_sid: copy_sid(package_sid).map_err(|err| Error::confinement("acl", err))?,
-            filesystem_sid: copy_sid(filesystem_sid)
-                .map_err(|err| Error::confinement("acl", err))?,
-            reallow_sid: copy_sid(reallow_sid).map_err(|err| Error::confinement("acl", err))?,
-            applied: Vec::new(),
-        };
+    ) -> io::Result<Self> {
+        Ok(Self {
+            package_sid: copy_sid(package_sid)?,
+            filesystem_sid: copy_sid(filesystem_sid)?,
+            reallow_sid: copy_sid(reallow_sid)?,
+        })
+    }
 
-        for entry in &entries {
-            let mut ops = Vec::with_capacity(2);
-            match entry.effect {
-                RuleEffect::Allow => {
-                    ops.push((Principal::Package, GRANT_ACCESS, allow_mask(entry.right)));
-                    // An allow beneath a denied ancestor needs an explicit
-                    // grant of exactly the denied bits: explicit ACEs precede
-                    // inherited ACEs in canonical DACL order, so the grant is
-                    // consumed before the ancestor's inherited deny can veto.
-                    if shadowed_by_deny(&entries, entry) {
-                        ops.push((Principal::Reallow, GRANT_ACCESS, deny_mask(entry.right)));
-                    }
-                }
-                RuleEffect::Deny => {
-                    ops.push((Principal::Filesystem, DENY_ACCESS, deny_mask(entry.right)));
-                }
-            }
-            for (principal, mode, rights) in ops {
-                let sid = guard.sid(principal);
-                add_acl_entry(&entry.path, sid, mode, rights)
-                    .map_err(|err| Error::confinement("acl", err))?;
-                guard.record(entry.path.clone(), principal);
+    fn sid(&self, principal: Principal) -> PSID {
+        match principal {
+            Principal::Package => self.package_sid.as_ptr().cast_mut().cast(),
+            Principal::Filesystem => self.filesystem_sid.as_ptr().cast_mut().cast(),
+            Principal::Reallow => self.reallow_sid.as_ptr().cast_mut().cast(),
+        }
+    }
+
+    fn principal_of(&self, sid: PSID) -> Option<Principal> {
+        for principal in [Principal::Package, Principal::Filesystem, Principal::Reallow] {
+            if unsafe { EqualSid(self.sid(principal), sid) } != 0 {
+                return Some(principal);
             }
         }
+        None
+    }
+}
+
+/// One explicit guardrail ACE on one root: the unit of diffing.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Op {
+    path: PathBuf,
+    principal: Principal,
+    deny: bool,
+    mask: u32,
+}
+
+/// Compile the canonical operation set for a rule list. Allow rules grant the
+/// package SID; deny rules deny the filesystem SID; an allow beneath a
+/// same-right deny ancestor additionally grants the denied bits to the
+/// re-allow SID — explicit ACEs precede inherited ACEs in canonical DACL
+/// order, so that grant is consumed before the ancestor's inherited deny can
+/// veto.
+fn ops(entries: &[Rule]) -> BTreeSet<Op> {
+    let mut set = BTreeSet::new();
+    for entry in entries {
+        match entry.effect {
+            RuleEffect::Allow => {
+                set.insert(Op {
+                    path: entry.path.clone(),
+                    principal: Principal::Package,
+                    deny: false,
+                    mask: allow_mask(entry.right),
+                });
+                if shadowed_by_deny(entries, entry) {
+                    set.insert(Op {
+                        path: entry.path.clone(),
+                        principal: Principal::Reallow,
+                        deny: false,
+                        mask: deny_mask(entry.right),
+                    });
+                }
+            }
+            RuleEffect::Deny => {
+                set.insert(Op {
+                    path: entry.path.clone(),
+                    principal: Principal::Filesystem,
+                    deny: true,
+                    mask: deny_mask(entry.right),
+                });
+            }
+        }
+    }
+    set
+}
+
+/// Canonicalize a rule list into its ordered final-effect entries. Public to
+/// the crate so the cache can compare a new policy against the manifest before
+/// acquiring the namespace.
+pub(crate) fn canonical_rules(fs: &[FsAccess]) -> Result<Vec<Rule>> {
+    compile_entries(fs).map_err(|err| Error::confinement("acl", err))
+}
+
+/// Marker owned by the cache proving the namespace's ACEs are applied. ACEs
+/// are persistent host state — nothing is stripped on drop.
+#[derive(Debug)]
+pub(crate) struct AclGuard(());
+
+impl AclGuard {
+    /// Bring on-disk ACL state in line with `entries`, using `previous` (the
+    /// loaded manifest) to decide between verify, set-diff, and full rebuild.
+    /// Returns the guard; the caller persists the manifest afterwards.
+    pub(crate) fn apply(
+        entries: &[Rule],
+        previous: Option<&[Rule]>,
+        principals: &Principals,
+        verification: WindowsAclVerification,
+    ) -> Result<Self> {
+        Self::apply_inner(entries, previous, principals, verification)
+            .map_err(|err| Error::confinement("acl", err))?;
 
         // Tools stat or traverse every ancestor of their working directory
         // (git repo discovery, cmd's dir/del), and directories outside the
@@ -109,8 +171,8 @@ impl AclGuard {
         // user-owned chain succeeds; system roots (drive roots, C:\Users)
         // need the elevated `guardrail-host-setup` run and are skipped here.
         // The grants target a Windows-defined group SID, are idempotent, and
-        // are deliberately never removed on drop.
-        for entry in &entries {
+        // are deliberately never removed.
+        for entry in entries {
             if entry.effect != RuleEffect::Allow {
                 continue;
             }
@@ -119,40 +181,175 @@ impl AclGuard {
             }
         }
 
-        Ok(guard)
+        Ok(Self(()))
     }
 
-    fn record(&mut self, path: PathBuf, principal: Principal) {
-        if !self
-            .applied
+    fn apply_inner(
+        entries: &[Rule],
+        previous: Option<&[Rule]>,
+        principals: &Principals,
+        verification: WindowsAclVerification,
+    ) -> io::Result<()> {
+        let new_ops = ops(entries);
+        let Some(previous) = previous else {
+            return rebuild(&[], entries, &new_ops, principals);
+        };
+
+        if previous == entries {
+            return if verified(entries, &new_ops, principals, verification)? {
+                Ok(())
+            } else {
+                // Self-heal: a rule root was replaced (checkout, atomic save)
+                // and shed its ACEs. Rebuild the namespace from scratch.
+                rebuild(previous, entries, &new_ops, principals)
+            };
+        }
+
+        let old_ops = ops(previous);
+        let removed: Vec<&Op> = old_ops.difference(&new_ops).collect();
+        let added: Vec<&Op> = new_ops.difference(&old_ops).collect();
+
+        // Consistency gate: every touched root must still carry exactly the
+        // guardrail ACEs the manifest says it does; otherwise the recorded
+        // state is stale and the whole namespace is rebuilt.
+        let touched: BTreeSet<&Path> = removed
             .iter()
-            .any(|entry| entry.path == path && entry.principal == principal)
-        {
-            self.applied.push(AppliedAcl { path, principal });
+            .chain(added.iter())
+            .map(|op| op.path.as_path())
+            .collect();
+        for path in touched {
+            let expected: BTreeSet<Op> = old_ops
+                .iter()
+                .filter(|op| op.path == path)
+                .cloned()
+                .collect();
+            if read_guardrail_ops(path, principals)? != Some(expected) {
+                return rebuild(previous, entries, &new_ops, principals);
+            }
         }
-    }
 
-    fn sid(&mut self, principal: Principal) -> PSID {
-        match principal {
-            Principal::Package => self.package_sid.as_mut_ptr().cast(),
-            Principal::Filesystem => self.filesystem_sid.as_mut_ptr().cast(),
-            Principal::Reallow => self.reallow_sid.as_mut_ptr().cast(),
+        for entry in entries {
+            if entry.effect == RuleEffect::Deny
+                && added.iter().any(|op| op.path == entry.path && op.deny)
+            {
+                validate_deny_tree(&entry.path)?;
+            }
         }
+        for op in removed {
+            remove_acl_entry(&op.path, principals.sid(op.principal), op.deny, op.mask)?;
+        }
+        for op in added {
+            apply_op(op, principals)?;
+        }
+        Ok(())
     }
 }
 
-impl Drop for AclGuard {
-    fn drop(&mut self) {
-        while let Some(applied) = self.applied.pop() {
-            let sid = self.sid(applied.principal);
-            if let Err(err) = remove_acl_entries(&applied.path, sid) {
-                eprintln!(
-                    "guardrail warning: failed to remove ACL entries from {}: {err}",
-                    applied.path.display()
-                );
+/// Full application: strip every guardrail ACE at the old roots, then apply
+/// every new operation.
+fn rebuild(
+    previous: &[Rule],
+    entries: &[Rule],
+    new_ops: &BTreeSet<Op>,
+    principals: &Principals,
+) -> io::Result<()> {
+    let old_roots: BTreeSet<&Path> = previous.iter().map(|rule| rule.path.as_path()).collect();
+    for path in old_roots {
+        for principal in [Principal::Package, Principal::Filesystem, Principal::Reallow] {
+            match remove_acl_entries(path, principals.sid(principal)) {
+                Ok(()) => {}
+                // The root may have been deleted since; nothing to strip.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
             }
         }
     }
+    for entry in entries {
+        if entry.effect == RuleEffect::Deny {
+            validate_deny_tree(&entry.path)?;
+        }
+    }
+    for op in new_ops {
+        apply_op(op, principals)?;
+    }
+    Ok(())
+}
+
+fn apply_op(op: &Op, principals: &Principals) -> io::Result<()> {
+    let mode = if op.deny { DENY_ACCESS } else { GRANT_ACCESS };
+    add_acl_entry(&op.path, principals.sid(op.principal), mode, op.mask)
+}
+
+/// Whether the roots selected by `verification` still carry exactly the
+/// expected guardrail ACEs.
+fn verified(
+    entries: &[Rule],
+    expected_ops: &BTreeSet<Op>,
+    principals: &Principals,
+    verification: WindowsAclVerification,
+) -> io::Result<bool> {
+    let roots: BTreeSet<&Path> = entries
+        .iter()
+        .filter(|entry| match verification {
+            WindowsAclVerification::None => false,
+            WindowsAclVerification::DenyRoots => entry.effect == RuleEffect::Deny,
+            WindowsAclVerification::AllRoots => true,
+        })
+        .map(|entry| entry.path.as_path())
+        .collect();
+    for path in roots {
+        let expected: BTreeSet<Op> = expected_ops
+            .iter()
+            .filter(|op| op.path == path)
+            .cloned()
+            .collect();
+        if read_guardrail_ops(path, principals)? != Some(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The explicit guardrail-principal ACEs currently present on `path`, or
+/// `None` when the path no longer exists.
+fn read_guardrail_ops(path: &Path, principals: &Principals) -> io::Result<Option<BTreeSet<Op>>> {
+    let dacl = match Dacl::read(path) {
+        Ok(dacl) => dacl,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if dacl.acl.is_null() {
+        return Ok(Some(BTreeSet::new()));
+    }
+    let acl = unsafe { &*dacl.acl };
+    let mut set = BTreeSet::new();
+    for index in 0..u32::from(acl.AceCount) {
+        let mut ace = ptr::null_mut();
+        win32_bool(unsafe { GetAce(dacl.acl, index, &mut ace) })?;
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if u32::from(header.AceFlags) & INHERITED_ACE != 0
+            || (header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                && header.AceType != ACCESS_DENIED_ACE_TYPE)
+        {
+            continue;
+        }
+        // ACCESS_DENIED_ACE has the same layout as ACCESS_ALLOWED_ACE.
+        let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        let ace_sid: PSID = unsafe {
+            ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
+                .cast_mut()
+                .cast()
+        };
+        if let Some(principal) = principals.principal_of(ace_sid) {
+            set.insert(Op {
+                path: path.to_path_buf(),
+                principal,
+                deny: header.AceType == ACCESS_DENIED_ACE_TYPE,
+                mask: allowed.Mask,
+            });
+        }
+    }
+    Ok(Some(set))
 }
 
 fn add_acl_entry(path: &Path, sid: PSID, mode: ACCESS_MODE, rights: u32) -> io::Result<()> {
@@ -178,7 +375,31 @@ fn add_acl_entry_locked(path: &Path, sid: PSID, mode: ACCESS_MODE, rights: u32) 
     set_dacl(path, new_acl.0)
 }
 
-fn remove_acl_entries(path: &Path, sid: PSID) -> io::Result<()> {
+/// Remove the single explicit ACE matching `(sid, deny, mask)` from `path`.
+fn remove_acl_entry(path: &Path, sid: PSID, deny: bool, mask: u32) -> io::Result<()> {
+    let expected_type = if deny {
+        ACCESS_DENIED_ACE_TYPE
+    } else {
+        ACCESS_ALLOWED_ACE_TYPE
+    };
+    remove_matching_aces(path, |ace| {
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        header.AceType == expected_type
+            && unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() }.Mask == mask
+            && explicit_standard_ace_matches_sid(ace, sid)
+    })
+}
+
+/// Remove every explicit ACE for `sid` from `path` (namespace cleanup and
+/// rebuild).
+pub(crate) fn remove_acl_entries(path: &Path, sid: PSID) -> io::Result<()> {
+    remove_matching_aces(path, |ace| explicit_standard_ace_matches_sid(ace, sid))
+}
+
+fn remove_matching_aces(
+    path: &Path,
+    matches: impl Fn(*mut core::ffi::c_void) -> bool,
+) -> io::Result<()> {
     let lock = ACL_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
     let current = Dacl::read(path)?;
@@ -188,7 +409,7 @@ fn remove_acl_entries(path: &Path, sid: PSID) -> io::Result<()> {
             path.display()
         )));
     }
-    let acl = acl_without_explicit_sid(current.acl, sid)?;
+    let acl = acl_without_matching(current.acl, &matches)?;
     set_dacl(path, acl.as_ptr().cast_mut().cast())
 }
 
@@ -210,9 +431,12 @@ fn set_dacl(path: &Path, dacl: *mut ACL) -> io::Result<()> {
     win32_status(status)
 }
 
-fn acl_without_explicit_sid(dacl: *mut ACL, sid: PSID) -> io::Result<Vec<u32>> {
-    // Cleanup only: the per-run SIDs are Guardrail-owned, so removing their
-    // explicit ACEs leaves every unrelated ACE byte-for-byte unchanged.
+fn acl_without_matching(
+    dacl: *mut ACL,
+    matches: &impl Fn(*mut core::ffi::c_void) -> bool,
+) -> io::Result<Vec<u32>> {
+    // Removal only touches guardrail-owned explicit ACEs, so every unrelated
+    // ACE is carried over byte-for-byte unchanged.
     let dacl = unsafe { &*dacl };
     let revision = u32::from(dacl.AclRevision);
     let words = (dacl.AclSize as usize).div_ceil(size_of::<u32>());
@@ -226,7 +450,7 @@ fn acl_without_explicit_sid(dacl: *mut ACL, sid: PSID) -> io::Result<Vec<u32>> {
         let mut ace = ptr::null_mut();
         let got = unsafe { GetAce(ptr::from_ref(dacl).cast_mut(), index, &mut ace) };
         win32_bool(got)?;
-        if explicit_standard_ace_matches_sid(ace, sid) {
+        if matches(ace) {
             continue;
         }
 
@@ -361,23 +585,24 @@ impl Drop for LocalAcl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FsRight {
+pub(crate) enum FsRight {
     Read,
     Write,
     Execute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuleEffect {
+pub(crate) enum RuleEffect {
     Allow,
     Deny,
 }
 
+/// One canonical final-effect rule: the manifest and diff unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Rule {
-    path: PathBuf,
-    right: FsRight,
-    effect: RuleEffect,
+pub(crate) struct Rule {
+    pub(crate) path: PathBuf,
+    pub(crate) right: FsRight,
+    pub(crate) effect: RuleEffect,
 }
 
 fn compile_entries(fs: &[FsAccess]) -> io::Result<Vec<Rule>> {

@@ -63,12 +63,22 @@
 //!   grants also carry `FILE_READ_ATTRIBUTES` (file metadata, not content):
 //!   kernel32 file opens implicitly request it, so a write grant without it
 //!   could not open existing files at all.
-//! * Children sharing a cached profile (same host process,
-//!   `windows_cache_namespace`, and filesystem policy) share one package SID
-//!   and profile directory, so they are not isolated from each other. A file
-//!   created under one namespace's policy carries that namespace's package
-//!   grants only, so a *different* namespace's children cannot read it until
-//!   its own policy root ACEs re-propagate over it.
+//! * Children sharing a cache namespace (`windows_cache_namespace`, same
+//!   filesystem policy) share one package SID and profile directory — across
+//!   processes, since profiles and restricting SIDs are derived
+//!   deterministically from the namespace — so they are not isolated from
+//!   each other. A file created under one namespace's policy carries that
+//!   namespace's package grants only, so a *different* namespace's children
+//!   cannot read it until its own policy root ACEs re-propagate over it.
+//! * Policy ACEs, the AppContainer profile, and the per-namespace manifest
+//!   (default `%LOCALAPPDATA%\guardrail\<namespace>`, override with
+//!   `windows_manifest_dir`) are persistent host state: nothing is removed
+//!   when a sandbox drops. The next run verifies an unchanged policy
+//!   (`windows_acl_verification`: none / deny roots [default] / all roots,
+//!   with a full rebuild as self-heal on mismatch), applies a changed policy
+//!   as a set-diff of canonical ACEs, and [`cleanup_namespace`] retires a
+//!   namespace explicitly. A namespace active in another process only admits
+//!   an identical filesystem policy.
 //!
 //! # Host setup (`guardrail-host-setup`)
 //!
@@ -114,11 +124,11 @@
 //!   ACEs over the subtree), which fails on protected system trees — and is
 //!   unnecessary, since AppContainers already reach `C:\Windows` etc. through
 //!   built-in `ALL [RESTRICTED] APPLICATION PACKAGES` ACEs.
-//! * Rule application rewrites DACLs across the whole granted tree (and
-//!   removes them again on drop). Granting a large shared tree (a package
-//!   store, another application's install root) is slow and briefly perturbs
-//!   concurrent access-checks on it; grant the narrowest directory that
-//!   works.
+//! * Rule application rewrites DACLs across the whole granted tree the first
+//!   time a policy is applied (and when it changes). Granting a large shared
+//!   tree (a package store, another application's install root) is slow and
+//!   briefly perturbs concurrent access-checks on it; grant the narrowest
+//!   directory that works.
 //! * The spawn environment starts empty. AppContainer process creation itself
 //!   needs `SystemRoot`, `LOCALAPPDATA`, and `USERPROFILE` (missing them
 //!   fails with `ERROR_ENVVAR_NOT_FOUND`); tools typically also want `PATH`,
@@ -157,11 +167,14 @@ mod cache;
 mod handle;
 mod host;
 mod job;
+mod manifest;
 mod process;
 
 pub use backend::WindowsBackend;
+pub use cache::cleanup_namespace;
 pub use host::{
     configure_mount_point_manager_access, configure_null_device_write,
     configure_system_traverse_grants, mount_point_manager_access_configured,
-    null_device_write_configured, system_traverse_grants_configured,
+    null_device_write_configured, revert_mount_point_manager_access, revert_null_device_write,
+    revert_system_traverse_grants, system_traverse_grants_configured,
 };

@@ -590,9 +590,10 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Sandbox, SandboxChild, FsAccessKind, JsFsAccessKind, NetworkPolicy, JsNetworkPolicy, probeSupport, spawn, StdioMode, JsStdioMode, UserNamespacePolicy, JsUserNamespacePolicy } = nativeBinding
+const { Sandbox, SandboxChild, cleanupWindowsNamespace, FsAccessKind, JsFsAccessKind, NetworkPolicy, JsNetworkPolicy, probeSupport, spawn, StdioMode, JsStdioMode, UserNamespacePolicy, JsUserNamespacePolicy, windowsHostSetupConfigured } = nativeBinding
 export { Sandbox }
 export { SandboxChild }
+export { cleanupWindowsNamespace }
 export { FsAccessKind }
 export { JsFsAccessKind }
 export { NetworkPolicy }
@@ -603,3 +604,4 @@ export { StdioMode }
 export { JsStdioMode }
 export { UserNamespacePolicy }
 export { JsUserNamespacePolicy }
+export { windowsHostSetupConfigured }

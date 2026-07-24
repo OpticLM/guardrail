@@ -47,6 +47,7 @@
 #![cfg(windows)]
 
 use std::io;
+use std::mem::size_of;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -401,6 +402,171 @@ fn device_configured(path: &str, grants: &[Grant]) -> io::Result<bool> {
 struct Grant {
     sid: OwnedSid,
     mask: u32,
+}
+
+/// Subtract each grant's bits from its trustee's explicit allow ACE, dropping
+/// ACEs whose mask reaches zero — the inverse of `SetEntriesInAclW`'s merge,
+/// so a pre-existing ACE (e.g. Authenticated Users' default read on `NUL`)
+/// keeps its original bits.
+fn acl_with_grants_subtracted(dacl: *mut ACL, grants: &[Grant]) -> io::Result<Vec<u32>> {
+    use windows_sys::Win32::Security::{AddAce, InitializeAcl};
+
+    let dacl_ref = unsafe { &*dacl };
+    let revision = u32::from(dacl_ref.AclRevision);
+    let words = (dacl_ref.AclSize as usize).div_ceil(size_of::<u32>());
+    let mut storage = vec![0u32; words];
+    let initialized = unsafe {
+        InitializeAcl(
+            storage.as_mut_ptr().cast(),
+            (storage.len() * size_of::<u32>()) as u32,
+            revision,
+        )
+    };
+    bool_result(initialized)?;
+
+    for index in 0..u32::from(dacl_ref.AceCount) {
+        let mut ace = ptr::null_mut();
+        bool_result(unsafe { GetAce(dacl, index, &mut ace) })?;
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        let mut bytes = unsafe {
+            core::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize))
+        }
+        .to_vec();
+
+        if u32::from(header.AceFlags) & INHERITED_ACE == 0
+            && header.AceType == ACCESS_ALLOWED_ACE_TYPE
+        {
+            let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+            let ace_sid: PSID = unsafe {
+                ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
+                    .cast_mut()
+                    .cast()
+            };
+            let mut mask = allowed.Mask;
+            for grant in grants {
+                if unsafe { EqualSid(ace_sid, grant.sid.as_psid()) } != 0 {
+                    mask &= !grant.mask;
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+            // ACCESS_ALLOWED_ACE.Mask sits right after the 4-byte header.
+            bytes[4..8].copy_from_slice(&mask.to_le_bytes());
+        }
+
+        let added = unsafe {
+            AddAce(
+                storage.as_mut_ptr().cast(),
+                revision,
+                u32::MAX,
+                bytes.as_ptr().cast(),
+                bytes.len() as u32,
+            )
+        };
+        bool_result(added)?;
+    }
+    Ok(storage)
+}
+
+/// Remove the bits [`configure_null_device_write`] added. Requires elevation.
+pub fn revert_null_device_write() -> io::Result<()> {
+    revert_device(r"\\.\NUL", &nul_grants()?)
+}
+
+/// Remove the bits [`configure_mount_point_manager_access`] added. Requires
+/// elevation.
+pub fn revert_mount_point_manager_access() -> io::Result<()> {
+    revert_device(r"\\.\MountPointManager", &mountmgr_grants()?)
+}
+
+/// Remove the traverse grants [`configure_system_traverse_grants`] added on
+/// the system targets. Workspace-ancestor grants stamped during policy
+/// application are untouched; remove those per-namespace via
+/// `cleanup_namespace` policy retirement or manually. Requires elevation.
+pub fn revert_system_traverse_grants() -> io::Result<()> {
+    let sid = sid_from_string(ALL_RESTRICTED_APPLICATION_PACKAGES)?;
+    for path in system_traverse_targets() {
+        let grants = [Grant {
+            sid: OwnedSid(sid.0.clone()),
+            mask: TRAVERSE_MASK,
+        }];
+        let path_wide = wide_path(&path);
+        let mut current_dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: nul-terminated path; valid out-pointers; `descriptor` freed
+        // by the guard below.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut current_dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let _descriptor = LocalGuard(descriptor);
+        win32_status(status)?;
+        if current_dacl.is_null() {
+            continue;
+        }
+        let acl = acl_with_grants_subtracted(current_dacl, &grants)?;
+        // SAFETY: `acl` holds a valid rebuilt ACL for the duration of the call.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                path_wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl.as_ptr().cast_mut().cast(),
+                ptr::null_mut(),
+            )
+        };
+        win32_status(status)?;
+    }
+    Ok(())
+}
+
+fn revert_device(path: &str, grants: &[Grant]) -> io::Result<()> {
+    let device = open_device(path, READ_CONTROL | WRITE_DAC)?;
+    let mut current_dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: live handle; valid out-pointers; `descriptor` freed by the guard.
+    let status = unsafe {
+        GetSecurityInfo(
+            device.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut current_dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let _descriptor = LocalGuard(descriptor);
+    win32_status(status)?;
+    if current_dacl.is_null() {
+        return Ok(());
+    }
+    let acl = acl_with_grants_subtracted(current_dacl, grants)?;
+    // SAFETY: handle opened with WRITE_DAC; `acl` valid for the call.
+    let status = unsafe {
+        SetSecurityInfo(
+            device.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            acl.as_ptr().cast_mut().cast(),
+            ptr::null_mut(),
+        )
+    };
+    win32_status(status)
 }
 
 fn nul_grants() -> io::Result<Vec<Grant>> {

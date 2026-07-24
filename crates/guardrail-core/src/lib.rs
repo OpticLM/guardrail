@@ -16,7 +16,7 @@ mod process;
 
 pub use backend::Backend;
 pub use command::{SandboxCommand, StdioMode};
-pub use config::{ResourceLimits, SandboxConfig};
+pub use config::{ResourceLimits, SandboxConfig, WindowsAclVerification};
 pub use error::{Error, Result};
 pub use policy::{FsAccess, NetworkPolicy, UserNamespacePolicy};
 #[cfg(windows)]

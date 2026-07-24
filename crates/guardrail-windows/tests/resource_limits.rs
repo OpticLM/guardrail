@@ -187,6 +187,8 @@ fn builder_with_windows_runtime_env() -> SandboxConfig {
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: Some(unique_namespace("resource-limits")),
+        windows_manifest_dir: Some(std::env::temp_dir().join("guardrail-test-manifests")),
+        windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
     }
 }
 

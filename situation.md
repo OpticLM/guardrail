@@ -253,26 +253,41 @@ NtOpenFile+IOCTL) and `open-bits <path> <hex>`.
 - Documented in `guardrail-windows` crate docs (host setup + known
   limitations) and the napi README Windows Setup Guide (task #4 DONE).
 
-### B. Device-grant boot scheduled task + revert path
-- Extend the setup bin with `--register` (SYSTEM boot task via Task
-  Scheduler / `schtasks` that re-applies the device grants), `--unregister`,
-  and `--revert` (remove the added ACEs). Provide napi helpers
-  (`nullDeviceWriteConfigured()` etc.) and document that skipping registration
-  degrades NUL writes and path canonicalization after each reboot.
+### B. Device-grant boot scheduled task + revert path — DONE (2026-07-24)
+- `guardrail-host-setup` gained `--register` (applies grants + registers a
+  SYSTEM ONSTART schtasks task), `--unregister`, and `--revert`
+  (mask-subtracting revert that restores pre-existing ACEs bit-for-bit).
+- napi: `windowsHostSetupConfigured()` and
+  `cleanupWindowsNamespace(namespace?, manifestDir?)` exported; facade
+  re-exports the underlying fns on Windows.
 
-### C. Persistent ACL cache + canonical-set diff (task #3, not started)
-- See section 1.2 for the full agreed design.
+### C. Persistent ACL cache + canonical-set diff (task #3) — DONE (2026-07-24)
+- `guardrail-core`: new `SandboxConfig::windows_manifest_dir` +
+  `windows_acl_verification` (`WindowsAclVerification`: None | DenyRoots
+  [default] | AllRoots).
+- `appcontainer.rs`: profile name and restricting SIDs (4/5 sub-authority,
+  FNV-1a-derived) are deterministic per namespace; profiles are no longer
+  deleted on drop.
+- `manifest.rs` (new): per-namespace dir (default
+  `%LOCALAPPDATA%\guardrail\<ns>-<hash>`), line-format manifest of applied
+  canonical rules (write-then-rename), `ActiveMarker` (open handle without
+  FILE_SHARE_DELETE; delete-probe detects liveness) rejecting a *different*
+  policy while active elsewhere, admitting an identical one.
+- `acl.rs`: ACE application rebuilt around a canonical `Op` set
+  (path × principal × allow/deny × mask). Unchanged policy → verify per
+  config (mismatch → full rebuild self-heal); changed policy → set-diff with
+  a consistency gate (touched roots must match the manifest's expected ACEs,
+  else rebuild); no manifest → fresh apply. Nothing is stripped on drop.
+- `cache.rs`: orchestrates manifest+marker+profile; `cleanup_namespace`
+  (exported, also via facade+napi) strips recorded ACEs, deletes the profile
+  and manifest dir; refuses while active.
+- Verified: unit+integration suites green (42 unit, 31 policy incl. new
+  reuse/diff/self-heal/persist-after-drop tests); live two-process run:
+  first build 5.6s (full propagation), second process 42ms (verify-only),
+  enforcement identical, cleanup clean.
 
-### D. napi README Windows section (task #4)
-- Unblocked: the tool matrix is green (§4). Write it modeled on the
-  Linux/macOS sections: correct Windows baseline (do NOT list system dirs;
-  only owned paths), Windows-specific semantics (ACL-mutating allows,
-  write=delete, nested re-allow, per-namespace package SID), setup guide
-  (elevated `guardrail-nul-setup` per boot, one-time ancestor icacls grants,
-  required env vars incl. `SystemRoot`/`LOCALAPPDATA`/`USERPROFILE`/`HOME`),
-  real caveats (cert store for TLS, true-msys binaries broken → git shell
-  hooks), and per-tool recipes with **honest** "Tested result" lines — cmd,
-  git, jj, go verified green 2026-07-24.
+### D. napi README (task #4) — DONE, extended with Persistent ACL Cache
+  section, host-setup --register guide, and the new option/function docs.
 
 ---
 

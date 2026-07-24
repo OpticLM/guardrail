@@ -239,6 +239,8 @@ mod tests {
             darwin_sandbox_profiles: vec![first.clone(), second.clone()],
             linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
         };
         let profile = resolve(&config).unwrap();
 
@@ -270,6 +272,8 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
         };
 
         let err = resolve(&config).unwrap_err();
@@ -301,6 +305,8 @@ mod tests {
             darwin_sandbox_profiles: vec![path.clone()],
             linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
         };
         let err = resolve(&config).unwrap_err();
 

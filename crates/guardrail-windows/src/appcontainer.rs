@@ -4,15 +4,12 @@
 
 use std::ffi::OsStr;
 use std::io;
-use std::mem;
+
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
 use guardrail_core::{Error, NetworkPolicy, Result};
-use windows_sys::Win32::Foundation::{HLOCAL, LocalFree, RtlNtStatusToDosError};
-use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
-};
+use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -26,7 +23,7 @@ const SE_GROUP_ENABLED: u32 = 4;
 const ERROR_ALREADY_EXISTS: i32 = 183;
 
 pub(crate) struct AppContainerProfile {
-    name: Vec<u16>,
+
     sid: Sid,
     restricting_sid: Sid,
     reallow_sid: Sid,
@@ -36,17 +33,20 @@ unsafe impl Send for AppContainerProfile {}
 unsafe impl Sync for AppContainerProfile {}
 
 impl AppContainerProfile {
-    pub(crate) fn create(name: &str) -> Result<Self> {
+    /// Create (or attach to) the persistent profile for `name`, with
+    /// restricting SIDs derived deterministically from `namespace` so every
+    /// process using the namespace produces the same principals — the
+    /// precondition for cross-process ACE reuse. The profile is never deleted
+    /// on drop; `cleanup_namespace` retires it explicitly.
+    pub(crate) fn create(name: &str, namespace: &str) -> Result<Self> {
         // Two guardrail-owned restricted-token principals: the 4-sub-authority
         // filesystem SID carries deny ACEs, the 5-sub-authority re-allow SID
         // carries the explicit grants that shadow inherited denies.
-        let restricting_sid =
-            Sid::random_restricting(4).map_err(|err| Error::confinement("appcontainer", err))?;
-        let reallow_sid =
-            Sid::random_restricting(5).map_err(|err| Error::confinement("appcontainer", err))?;
-        let nonce = random_u64().map_err(|err| Error::confinement("appcontainer", err))?;
-        let name = format!("{name}-{nonce:016x}");
-        let name_wide = wide_null(OsStr::new(&name));
+        let restricting_sid = Sid::deterministic_restricting(4, namespace)
+            .map_err(|err| Error::confinement("appcontainer", err))?;
+        let reallow_sid = Sid::deterministic_restricting(5, namespace)
+            .map_err(|err| Error::confinement("appcontainer", err))?;
+        let name_wide = wide_null(OsStr::new(name));
         let display = wide_null(OsStr::new("guardrail sandbox"));
         let description = wide_null(OsStr::new("guardrail sandbox"));
         let capabilities = CapabilitySet::for_network(NetworkPolicy::Full)
@@ -76,7 +76,7 @@ impl AppContainerProfile {
             .map_err(|err| Error::confinement("appcontainer", err))?;
 
         Ok(Self {
-            name: name_wide,
+
             sid,
             restricting_sid,
             reallow_sid,
@@ -104,17 +104,30 @@ impl AppContainerProfile {
     }
 }
 
-impl Drop for AppContainerProfile {
-    fn drop(&mut self) {
-        let hr = unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
-        if hr < 0 {
-            eprintln!(
-                "guardrail warning: failed to delete AppContainer profile {}: {}",
-                String::from_utf16_lossy(&self.name[..self.name.len().saturating_sub(1)]),
-                hresult_error(hr)
-            );
-        }
+// Deliberately no Drop deleting the profile: the profile (and its SID) is
+// persistent per-namespace state, reused across processes so the on-disk
+// package-SID ACEs stay valid. `cleanup_namespace` deletes it explicitly.
+
+/// Delete the persistent AppContainer profile for `name` (namespace cleanup).
+pub(crate) fn delete_profile(name: &str) -> io::Result<()> {
+    let name_wide = wide_null(OsStr::new(name));
+    let hr = unsafe { DeleteAppContainerProfile(name_wide.as_ptr()) };
+    if hr < 0 {
+        return Err(hresult_error(hr));
     }
+    Ok(())
+}
+
+/// Re-derive a namespace's three principals without creating the profile —
+/// for cleanup, which must not resurrect registry state.
+pub(crate) fn namespace_principals(
+    profile_name: &str,
+    namespace: &str,
+) -> io::Result<(Sid, Sid, Sid)> {
+    let package = Sid::derive_appcontainer(&wide_null(OsStr::new(profile_name)))?;
+    let filesystem = Sid::deterministic_restricting(4, namespace)?;
+    let reallow = Sid::deterministic_restricting(5, namespace)?;
+    Ok((package, filesystem, reallow))
 }
 
 pub(crate) struct Sid {
@@ -127,16 +140,32 @@ enum SidStorage {
 }
 
 impl Sid {
-    /// A random SID under the null authority. Distinct sub-authority counts
-    /// keep the guardrail-owned principals distinguishable from each other.
-    fn random_restricting(sub_authority_count: u8) -> io::Result<Self> {
+    /// A SID under the null authority whose sub-authorities are derived
+    /// deterministically from the namespace, so every process using a
+    /// namespace mints identical principals — required for cross-process ACE
+    /// reuse. Distinct sub-authority counts keep the guardrail-owned
+    /// principals distinguishable from each other. Determinism is safe
+    /// same-user: these SIDs only ever *restrict* the child, and any same-user
+    /// process could mint them anyway.
+    pub(crate) fn deterministic_restricting(
+        sub_authority_count: u8,
+        namespace: &str,
+    ) -> io::Result<Self> {
         let mut sub_authorities = [0u32; 8];
-        let filled = sub_authorities
-            .get_mut(..usize::from(sub_authority_count))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "SID sub-authority count")
-            })?;
-        random_bytes(filled)?;
+        if usize::from(sub_authority_count) > sub_authorities.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SID sub-authority count",
+            ));
+        }
+        for (index, sub_authority) in sub_authorities
+            .iter_mut()
+            .take(usize::from(sub_authority_count))
+            .enumerate()
+        {
+            let seed = format!("guardrail:{sub_authority_count}:{index}:{namespace}");
+            *sub_authority = crate::manifest::fnv1a64(seed.as_bytes()) as u32;
+        }
 
         let authority = SID_IDENTIFIER_AUTHORITY { Value: [0; 6] };
         let mut raw = ptr::null_mut();
@@ -251,29 +280,6 @@ impl Sid {
             SidStorage::FreeSid(raw) => *raw,
             SidStorage::Bytes(storage) => storage.as_ptr().cast::<core::ffi::c_void>() as PSID,
         }
-    }
-}
-
-fn random_u64() -> io::Result<u64> {
-    let mut value = 0u64;
-    random_bytes(std::slice::from_mut(&mut value))?;
-    Ok(value)
-}
-
-fn random_bytes<T>(values: &mut [T]) -> io::Result<()> {
-    let status = unsafe {
-        BCryptGenRandom(
-            ptr::null_mut(),
-            values.as_mut_ptr().cast(),
-            mem::size_of_val(values) as u32,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    };
-    if status < 0 {
-        let error = unsafe { RtlNtStatusToDosError(status) };
-        Err(io::Error::from_raw_os_error(error as i32))
-    } else {
-        Ok(())
     }
 }
 

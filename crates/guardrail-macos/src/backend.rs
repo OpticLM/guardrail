@@ -196,6 +196,8 @@ mod tests {
             darwin_sandbox_profiles: vec![],
             linux_user_namespaces: UserNamespacePolicy::Deny,
             windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
         };
         assert!(config.fs.is_empty());
     }

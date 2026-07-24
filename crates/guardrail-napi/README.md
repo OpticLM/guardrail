@@ -904,9 +904,18 @@ guardrail-host-setup           # run elevated; applies all grants
   (`C:\Users`), because tools like git stat every ancestor of the working
   directory. These are ordinary NTFS ACEs and persist; this part is one-time.
 
-Because the two device grants reset on reboot, run `guardrail-host-setup`
-elevated at every boot (for example from a scheduled task). If it has not run,
-sandboxes still spawn — the affected features degrade as described above.
+Because the two device grants reset on reboot, register the helper as a boot
+task (elevated, one-time):
+
+```
+guardrail-host-setup --register    # applies all grants + registers a SYSTEM boot task
+guardrail-host-setup --unregister  # removes the boot task
+guardrail-host-setup --revert      # subtracts every grant this helper added
+```
+
+If it has not run, sandboxes still spawn — the affected features degrade as
+described above. `windowsHostSetupConfigured()` reports the combined state
+from Node.
 
 Guardrail itself stamps the same traverse grant on the *user-owned* ancestors
 of every allow root when a sandbox is built (unprivileged, idempotent, sticky),
@@ -915,6 +924,31 @@ so only the system-owned ancestors need the helper.
 All three grants widen what any AppContainer on the host can reach (NUL
 read/write, mount-point DOS-name queries, traverse/stat of the granted
 ancestors). None of them weakens guardrail's own policy checks.
+
+### Persistent ACL Cache
+
+Windows policy application is persistent, cross-process state keyed by
+`windowsCacheNamespace` (default namespace when omitted):
+
+- The AppContainer profile and guardrail's restricting SIDs are derived
+  deterministically from the namespace, and applied ACEs are **not** removed
+  when a sandbox or process exits.
+- A per-namespace manifest (default `%LOCALAPPDATA%\guardrail\<namespace>`,
+  overridable with `windowsManifestDir`) records the applied policy. The next
+  build with an unchanged policy verifies instead of re-propagating ACEs over
+  the tree (typically milliseconds instead of seconds); a changed policy
+  applies only the difference; damaged state rebuilds from scratch.
+- `windowsAclVerification` controls the unchanged-policy check: `"none"`,
+  `"deny-roots"` (default — re-checks the confidentiality-critical deny
+  roots, healing e.g. an atomic-save replacement of a denied file), or
+  `"all-roots"`.
+- Two processes may use the same namespace concurrently only with the same
+  filesystem policy; a conflicting policy fails while the namespace is active
+  elsewhere.
+- Retire a namespace you no longer use with
+  `cleanupWindowsNamespace(namespace?, manifestDir?)`: it removes the recorded
+  ACEs, the AppContainer profile, and the manifest. Nothing else removes
+  them.
 
 ### Baseline Policy
 
@@ -1192,7 +1226,13 @@ package SID and are not isolated from each other.
 - `linuxUnixSockets` is Linux-only and ignored on macOS and Windows. On Linux
   it is enforced only on Landlock ABI v9+ and ignored without path validation
   on older ABIs.
-- `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS.
+- `windowsCacheNamespace` is Windows-only and ignored on Linux and macOS. On
+  Windows it keys persistent, cross-process ACL/profile state; see the
+  Persistent ACL Cache section. `windowsManifestDir` and
+  `windowsAclVerification` tune that mechanism and are equally Windows-only.
+- `windowsHostSetupConfigured()` and
+  `cleanupWindowsNamespace(namespace?, manifestDir?)` are Windows-only and
+  throw on other platforms.
 - `darwinSandboxProfiles` is macOS-only and ignored on Linux and Windows. On
   macOS, imports are trusted policy that can grant access absent from `fs` and
   `network`.

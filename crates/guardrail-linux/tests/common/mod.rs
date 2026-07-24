@@ -48,6 +48,8 @@ pub fn base() -> SandboxConfig {
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
     }
 }
 
@@ -65,6 +67,8 @@ pub fn read_only_base() -> SandboxConfig {
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
         windows_cache_namespace: None,
+            windows_manifest_dir: None,
+            windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
     }
 }
 

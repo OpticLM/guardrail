@@ -35,5 +35,14 @@ pub use guardrail_macos::MacosBackend as PlatformBackend;
 #[cfg(windows)]
 pub use guardrail_windows::WindowsBackend as PlatformBackend;
 
+/// Windows host-grant and namespace helpers (`guardrail-windows` re-exports):
+/// device/ancestor grant checks for `guardrail-host-setup` state and explicit
+/// retirement of a persistent cache namespace.
+#[cfg(windows)]
+pub use guardrail_windows::{
+    cleanup_namespace as cleanup_windows_namespace, mount_point_manager_access_configured,
+    null_device_write_configured, system_traverse_grants_configured,
+};
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("guardrail supports Linux, macOS, and Windows targets");

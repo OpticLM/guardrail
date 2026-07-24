@@ -37,6 +37,15 @@ export declare class SandboxChild {
   kill(): void
 }
 
+/**
+ * Windows only: retire a persistent cache namespace — remove every guardrail
+ * ACE its manifest records, delete its AppContainer profile, and delete its
+ * manifest directory. `namespace`/`manifestDir` mirror the
+ * `windowsCacheNamespace`/`windowsManifestDir` options. Fails while the
+ * namespace is active in any process. Throws on non-Windows platforms.
+ */
+export declare function cleanupWindowsNamespace(namespace?: string | undefined | null, manifestDir?: string | undefined | null): void
+
 /** The result of awaiting a child's exit. */
 export interface ExitResult {
   /** Exit code, or `null` if the process was terminated by a signal (Unix). */
@@ -154,6 +163,18 @@ export interface SandboxOptions {
   darwinSandboxProfiles?: Array<string>
   /** Windows-only AppContainer cache namespace; ignored on other platforms. */
   windowsCacheNamespace?: string
+  /**
+   * Windows-only override for the directory holding per-namespace ACL
+   * manifests (defaults to `%LOCALAPPDATA%\guardrail`); ignored on other
+   * platforms.
+   */
+  windowsManifestDir?: string
+  /**
+   * Windows-only startup ACL verification for an unchanged policy:
+   * `"none"` | `"deny-roots"` (default) | `"all-roots"`; ignored on other
+   * platforms.
+   */
+  windowsAclVerification?: string
 }
 
 /** Per-spawn launch options for a reusable [`Sandbox`]. */
@@ -247,6 +268,18 @@ export interface SpawnOptions {
   darwinSandboxProfiles?: Array<string>
   /** Windows-only AppContainer cache namespace; ignored on other platforms. */
   windowsCacheNamespace?: string
+  /**
+   * Windows-only override for the directory holding per-namespace ACL
+   * manifests (defaults to `%LOCALAPPDATA%\guardrail`); ignored on other
+   * platforms.
+   */
+  windowsManifestDir?: string
+  /**
+   * Windows-only startup ACL verification for an unchanged policy:
+   * `"none"` | `"deny-roots"` (default) | `"all-roots"`; ignored on other
+   * platforms.
+   */
+  windowsAclVerification?: string
   /** Working directory for the child. Defaults to the parent's cwd. */
   cwd?: string
   /**
@@ -281,3 +314,13 @@ export type StdioMode =  'inherit'|
  */
 export type UserNamespacePolicy =  'deny'|
 'allow';
+
+/**
+ * Windows only: whether every `guardrail-host-setup` grant is present — the
+ * null-device write grant, the mount-point-manager access grant (both reset
+ * on reboot), and the system ancestor traverse grants (persistent). When
+ * `false`, sandboxes still spawn but `> nul` redirection, path
+ * canonicalization (git/jj cwd resolution), or ancestor stats degrade; run
+ * `guardrail-host-setup` elevated to apply. Throws on non-Windows platforms.
+ */
+export declare function windowsHostSetupConfigured(): boolean

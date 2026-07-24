@@ -51,6 +51,8 @@ pub struct ResourceLimits {
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
+///     windows_manifest_dir: None,
+///     windows_acl_verification: WindowsAclVerification::default(),
 /// };
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -117,4 +119,28 @@ pub struct SandboxConfig {
     /// Use distinct namespaces for sandboxes whose filesystem policies may be
     /// active at the same time. Non-Windows backends ignore this field.
     pub windows_cache_namespace: Option<String>,
+    /// Windows-only override for the directory holding per-namespace ACL
+    /// manifests (defaults to `%LOCALAPPDATA%\guardrail`). Non-Windows
+    /// backends ignore this field.
+    pub windows_manifest_dir: Option<PathBuf>,
+    /// Windows-only startup verification level for a namespace whose policy is
+    /// unchanged since the last run. Non-Windows backends ignore this field.
+    pub windows_acl_verification: WindowsAclVerification,
+}
+
+/// How thoroughly the Windows backend re-checks on-disk ACL state when a
+/// namespace's filesystem policy is unchanged since the previous run.
+///
+/// Ordinary host tooling (checkouts, atomic saves) can replace a rule root and
+/// shed its ACEs without any malice; verification detects that and triggers a
+/// rebuild ("self-heal"). More verification costs more DACL reads at startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WindowsAclVerification {
+    /// Trust the manifest; read no DACLs.
+    None,
+    /// Verify deny rule roots only (the confidentiality-critical ones).
+    #[default]
+    DenyRoots,
+    /// Verify every rule root.
+    AllRoots,
 }

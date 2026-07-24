@@ -152,6 +152,14 @@ pub struct SandboxOptions {
     pub darwin_sandbox_profiles: Option<Vec<String>>,
     /// Windows-only AppContainer cache namespace; ignored on other platforms.
     pub windows_cache_namespace: Option<String>,
+    /// Windows-only override for the directory holding per-namespace ACL
+    /// manifests (defaults to `%LOCALAPPDATA%\guardrail`); ignored on other
+    /// platforms.
+    pub windows_manifest_dir: Option<String>,
+    /// Windows-only startup ACL verification for an unchanged policy:
+    /// `"none"` | `"deny-roots"` (default) | `"all-roots"`; ignored on other
+    /// platforms.
+    pub windows_acl_verification: Option<String>,
 }
 
 /// One-shot sandbox policy + launch options. All fields optional; omitting
@@ -201,6 +209,14 @@ pub struct SpawnOptions {
     pub darwin_sandbox_profiles: Option<Vec<String>>,
     /// Windows-only AppContainer cache namespace; ignored on other platforms.
     pub windows_cache_namespace: Option<String>,
+    /// Windows-only override for the directory holding per-namespace ACL
+    /// manifests (defaults to `%LOCALAPPDATA%\guardrail`); ignored on other
+    /// platforms.
+    pub windows_manifest_dir: Option<String>,
+    /// Windows-only startup ACL verification for an unchanged policy:
+    /// `"none"` | `"deny-roots"` (default) | `"all-roots"`; ignored on other
+    /// platforms.
+    pub windows_acl_verification: Option<String>,
     /// Working directory for the child. Defaults to the parent's cwd.
     pub cwd: Option<String>,
     /// stdout disposition; `"inherit"` (default) shares the parent's stream,
@@ -324,6 +340,20 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .unwrap_or(UserNamespacePolicy::Deny),
         darwin_sandbox_profiles,
         windows_cache_namespace: opts.windows_cache_namespace,
+        windows_manifest_dir: opts.windows_manifest_dir.map(PathBuf::from),
+        windows_acl_verification: match opts.windows_acl_verification.as_deref() {
+            None | Some("deny-roots") => guardrail::WindowsAclVerification::DenyRoots,
+            Some("none") => guardrail::WindowsAclVerification::None,
+            Some("all-roots") => guardrail::WindowsAclVerification::AllRoots,
+            Some(other) => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!(
+                        "invalid windowsAclVerification {other:?}: expected \"none\", \"deny-roots\", or \"all-roots\""
+                    ),
+                ));
+            }
+        },
     })
 }
 
@@ -341,6 +371,8 @@ impl From<SpawnOptions> for (SandboxOptions, SandboxSpawnOptions) {
                 env: options.env,
                 darwin_sandbox_profiles: options.darwin_sandbox_profiles,
                 windows_cache_namespace: options.windows_cache_namespace,
+                windows_manifest_dir: options.windows_manifest_dir,
+                windows_acl_verification: options.windows_acl_verification,
             },
             SandboxSpawnOptions {
                 cwd: options.cwd,
@@ -430,6 +462,59 @@ impl Task for BuildSandboxTask {
 #[napi]
 pub fn probe_support() -> Result<()> {
     PlatformBackend::probe_support().map_err(to_napi_err)
+}
+
+/// Windows only: whether every `guardrail-host-setup` grant is present — the
+/// null-device write grant, the mount-point-manager access grant (both reset
+/// on reboot), and the system ancestor traverse grants (persistent). When
+/// `false`, sandboxes still spawn but `> nul` redirection, path
+/// canonicalization (git/jj cwd resolution), or ancestor stats degrade; run
+/// `guardrail-host-setup` elevated to apply. Throws on non-Windows platforms.
+#[napi]
+pub fn windows_host_setup_configured() -> Result<bool> {
+    #[cfg(windows)]
+    {
+        let nul = guardrail::null_device_write_configured()
+            .map_err(|err| Error::new(Status::GenericFailure, err.to_string()))?;
+        let mountmgr = guardrail::mount_point_manager_access_configured()
+            .map_err(|err| Error::new(Status::GenericFailure, err.to_string()))?;
+        let traverse = guardrail::system_traverse_grants_configured()
+            .map_err(|err| Error::new(Status::GenericFailure, err.to_string()))?;
+        Ok(nul && mountmgr && traverse)
+    }
+    #[cfg(not(windows))]
+    Err(Error::new(
+        Status::GenericFailure,
+        "windowsHostSetupConfigured is Windows-only",
+    ))
+}
+
+/// Windows only: retire a persistent cache namespace — remove every guardrail
+/// ACE its manifest records, delete its AppContainer profile, and delete its
+/// manifest directory. `namespace`/`manifestDir` mirror the
+/// `windowsCacheNamespace`/`windowsManifestDir` options. Fails while the
+/// namespace is active in any process. Throws on non-Windows platforms.
+#[napi]
+pub fn cleanup_windows_namespace(
+    namespace: Option<String>,
+    manifest_dir: Option<String>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        guardrail::cleanup_windows_namespace(
+            namespace.as_deref(),
+            manifest_dir.as_deref().map(std::path::Path::new),
+        )
+        .map_err(|err| Error::new(Status::GenericFailure, err.to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (namespace, manifest_dir);
+        Err(Error::new(
+            Status::GenericFailure,
+            "cleanupWindowsNamespace is Windows-only",
+        ))
+    }
 }
 
 /// Spawn `command` (with `args`) confined by `options`. Each standard stream
