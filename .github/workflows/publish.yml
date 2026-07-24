@@ -76,15 +76,29 @@ jobs:
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
       - name: Install dependencies
-        # --no-optional keeps previously published @opticlm/guardrail-* binaries
-        # out of node_modules, so the test step can only load the binding built
-        # by this job.
-        run: pnpm install --frozen-lockfile --no-optional
+        # Optional dependencies must stay installed: --use-napi-cross unpacks
+        # its Linux cross toolchain with @napi-rs/tar and @napi-rs/lzma, whose
+        # native bindings are optional dependencies. With --no-optional the
+        # toolchain setup fails and cargo silently links with the host
+        # toolchain, breaking the aarch64 build and the x64 glibc floor.
+        run: pnpm install --frozen-lockfile
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
+      - name: Enable unprivileged user namespaces
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+        # AppArmor; the Linux backend needs them for its per-spawn
+        # user + mount + IPC namespaces.
+        if: matrix.settings.test && runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test binding
         if: matrix.settings.test
+        # The loader prefers the binding built by this job (guardrail.*.node
+        # next to index.js). The version check makes a fallback to a previously
+        # published @opticlm/guardrail-* binary fail loudly instead of passing
+        # the test against a stale binding.
+        env:
+          NAPI_RS_ENFORCE_VERSION_CHECK: '1'
         run: pnpm test
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -142,6 +156,11 @@ jobs:
             main="$(node -p "require('./${package_dir}package.json').main")"
             test -s "${package_dir}${main}"
           done
+      - name: Enable unprivileged user namespaces
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+        # AppArmor; the Linux backend needs them for its per-spawn
+        # user + mount + IPC namespaces.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Smoke test the packaged host binding
         # Remove the downloaded copies next to index.js so the committed loader
         # can only resolve the artifact staged into its final npm package layout.

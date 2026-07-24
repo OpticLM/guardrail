@@ -52,6 +52,12 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Enable unprivileged user namespaces
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+        # AppArmor; the Linux backend needs them for its per-spawn
+        # user + mount + IPC namespaces.
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test default packages
         run: cargo test --all-targets
       - name: Test documentation examples
