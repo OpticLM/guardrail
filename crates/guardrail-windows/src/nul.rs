@@ -1,4 +1,5 @@
-//! One-time host configuration for the null device (`\Device\Null`).
+//! One-time host configuration for device objects a sandboxed child needs
+//! (`\Device\Null`, `\Device\MountPointManager`).
 //!
 //! A guardrail child is **both** a restricted-token process and an AppContainer,
 //! so an access check on any object must pass three gates: the normal enabled
@@ -22,6 +23,14 @@
 //! driver recreates the security descriptor on every boot, so this must be
 //! re-applied at each startup (a boot-start service is the intended host).
 //! [`null_device_write_configured`] reports whether the grant is present.
+//!
+//! The mount-point manager (`\Device\MountPointManager`) has the same shape of
+//! problem: `GetFinalPathNameByHandleW` with `VOLUME_NAME_DOS` (the flavor
+//! behind `std::fs::canonicalize`, git's and jj's cwd resolution) queries it,
+//! and its default DACL (`FILE_EXECUTE` to `Everyone` and even to
+//! `RESTRICTED`, but no package SID) fails the AppContainer gate. Granting
+//! `FILE_EXECUTE` to the two package trustees mirrors the OS's own
+//! restricted-token accommodation.
 
 #![cfg(windows)]
 
@@ -67,6 +76,17 @@ const APP_PACKAGE_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
 /// `Authenticated Users` generic read, which covers the read path's restricted
 /// gate.
 const AUTH_USERS_MASK: u32 = FILE_GENERIC_WRITE;
+/// Mount-point-manager mask. The DACL check needs `FILE_EXECUTE` (the default
+/// DACL grants `Everyone` exactly that bit), but the API's internal device
+/// open also requests `SYNCHRONIZE` (and `CreateFileW`-style opens add
+/// `FILE_READ_ATTRIBUTES` + `READ_CONTROL`); a normal token gets those
+/// implicitly, while each sandbox gate accumulates access only from its own
+/// ACEs, so the package grant must carry them explicitly. None of these bits
+/// permits mutating mount points.
+const MOUNTMGR_MASK: u32 = FILE_EXECUTE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+const FILE_EXECUTE: u32 = 0x20;
+const FILE_READ_ATTRIBUTES: u32 = 0x80;
+const SYNCHRONIZE: u32 = 0x0010_0000;
 
 /// Grant the null device the access a sandboxed child needs.
 ///
@@ -80,8 +100,25 @@ const AUTH_USERS_MASK: u32 = FILE_GENERIC_WRITE;
 /// Requires `WRITE_DAC` on `\Device\Null`, i.e. an elevated process; without it
 /// the call fails with an access-denied error.
 pub fn configure_null_device_write() -> io::Result<()> {
-    let grants = required_grants()?;
-    let device = open_null(READ_CONTROL | WRITE_DAC)?;
+    configure_device(r"\\.\NUL", &nul_grants()?)
+}
+
+/// Grant AppContainer package trustees `FILE_EXECUTE` on the mount-point
+/// manager so `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` — and with it
+/// `std::fs::canonicalize`, git's and jj's cwd resolution — works inside the
+/// sandbox. Requires elevation; the DACL resets on reboot like `NUL`'s.
+pub fn configure_mount_point_manager_access() -> io::Result<()> {
+    configure_device(r"\\.\MountPointManager", &mountmgr_grants()?)
+}
+
+/// Whether the mount-point manager already carries every grant
+/// [`configure_mount_point_manager_access`] applies. Runs unprivileged.
+pub fn mount_point_manager_access_configured() -> io::Result<bool> {
+    device_configured(r"\\.\MountPointManager", &mountmgr_grants()?)
+}
+
+fn configure_device(path: &str, grants: &[Grant]) -> io::Result<()> {
+    let device = open_device(path, READ_CONTROL | WRITE_DAC)?;
 
     let mut current_dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = ptr::null_mut();
@@ -145,8 +182,11 @@ pub fn configure_null_device_write() -> io::Result<()> {
 /// [`configure_null_device_write`] applies. Needs only `READ_CONTROL`, so it
 /// runs unprivileged.
 pub fn null_device_write_configured() -> io::Result<bool> {
-    let grants = required_grants()?;
-    let device = open_null(READ_CONTROL)?;
+    device_configured(r"\\.\NUL", &nul_grants()?)
+}
+
+fn device_configured(path: &str, grants: &[Grant]) -> io::Result<bool> {
+    let device = open_device(path, READ_CONTROL)?;
 
     let mut dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = ptr::null_mut();
@@ -169,7 +209,7 @@ pub fn null_device_write_configured() -> io::Result<bool> {
         return Ok(false);
     }
 
-    for grant in &grants {
+    for grant in grants {
         if !dacl_grants(dacl, grant.sid.as_psid(), grant.mask)? {
             return Ok(false);
         }
@@ -182,7 +222,7 @@ struct Grant {
     mask: u32,
 }
 
-fn required_grants() -> io::Result<Vec<Grant>> {
+fn nul_grants() -> io::Result<Vec<Grant>> {
     Ok(vec![
         Grant {
             sid: sid_from_string(ALL_RESTRICTED_APPLICATION_PACKAGES)?,
@@ -195,6 +235,19 @@ fn required_grants() -> io::Result<Vec<Grant>> {
         Grant {
             sid: authenticated_users_sid()?,
             mask: AUTH_USERS_MASK,
+        },
+    ])
+}
+
+fn mountmgr_grants() -> io::Result<Vec<Grant>> {
+    Ok(vec![
+        Grant {
+            sid: sid_from_string(ALL_RESTRICTED_APPLICATION_PACKAGES)?,
+            mask: MOUNTMGR_MASK,
+        },
+        Grant {
+            sid: sid_from_string(ALL_APPLICATION_PACKAGES)?,
+            mask: MOUNTMGR_MASK,
         },
     ])
 }
@@ -226,8 +279,8 @@ fn dacl_grants(dacl: *mut ACL, sid: PSID, mask: u32) -> io::Result<bool> {
     Ok(false)
 }
 
-fn open_null(access: u32) -> io::Result<std::os::windows::io::OwnedHandle> {
-    let path = wide_null(r"\\.\NUL");
+fn open_device(path: &str, access: u32) -> io::Result<std::os::windows::io::OwnedHandle> {
+    let path = wide_null(path);
     // SAFETY: nul-terminated UTF-16 path; null security attributes. The device
     // exists, so OPEN_EXISTING returns its handle or INVALID_HANDLE_VALUE.
     let handle = unsafe {

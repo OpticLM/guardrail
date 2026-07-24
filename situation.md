@@ -1,6 +1,6 @@
 # Guardrail Windows backend — work-in-progress situation
 
-_Last updated: 2026-07-24._
+_Last updated: 2026-07-24 (second update: dev-tool matrix fully green)._
 
 This document captures the full state of an in-flight effort to improve the
 `guardrail-windows` backend, so the task can be handed off or the conversation
@@ -162,81 +162,119 @@ sandbox where they were fully blocked before.
 
 ---
 
-## 4. Current blockers / open findings (live dev-tool verification)
+## 4. RESOLVED: the "msys getcwd" mystery (was the top blocker)
 
-Testing real tools via a rebuilt napi debug binding
-(`crates/guardrail-napi`, `pnpm build:debug`) with a workspace-only `fs` policy:
+The old hypothesis (LPAC blocks msys ancestor stats) was **wrong** on both
+counts, proven by experiment:
 
-| Tool | Result | Cause |
-|---|---|---|
-| `cmd` findstr, `>nul` | PASS | — |
-| `go build` | PASS | (was NUL-blocked) |
-| `cmd` write / rename (standalone) | PASS | — |
-| `cmd` write&&rename&&del one-liner | FAIL | Unisolated cmd/inheritance quirk; standalone delete passes in the integration suite. |
-| `git` (git-for-windows / msys) | FAIL | `unable to get current working directory: Permission denied`. msys POSIX `getcwd` stats the ancestor path chain; LPAC gate blocks ancestor dirs that only grant `Everyone`/`ALL APPLICATION PACKAGES`. Not fixed by workspace location (also fails under `C:\Users\Public`). |
-| `jj` | FAIL | Same "Could not determine current directory" — same msys/ancestor-access class. |
-| `curl`/TLS | FAIL | schannel needs the user cert store read-allowed (`%APPDATA%\Microsoft\SystemCertificates`); crypto capabilities alone insufficient. |
+- Classic AppContainer (omitting the `ALL_APPLICATION_PACKAGES_POLICY`
+  attribute entirely — passing the attribute with value `0` fails CreateProcess
+  with `ERROR_ENVVAR_NOT_FOUND`!) was verified active via the LPAC
+  discriminator test — and git/jj failed **identically**. LPAC was never the
+  cause; the LPAC opt-out idea is dead and LPAC stays unconditional.
+- git.exe (mingw, not msys-linked) and jj (pure Rust) fail on
+  `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` = `std::fs::canonicalize`, and
+  on ancestor stats during repo discovery — not on msys path emulation.
 
-Key insight: **msys-based tools fail under LPAC** due to ancestor-path access
-during `getcwd`; **native-Windows tools (go) work**. System dirs can't be
-granted (ACL mutation fails on protected subtrees) but are already reachable.
+Three independent root causes were found and fixed:
+
+1. **`\Device\MountPointManager`** — DOS/GUID final-name resolution queries
+   this device; its DACL (`FX` to Everyone and `RESTRICTED`, no package SID)
+   fails the AppContainer gate. Probe experiments confirmed `NtOpenFile(FX)` +
+   `IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH` work once granted; there is **no
+   driver-level sandbox check**. Fixed by extending the elevated helper: grant
+   `FX|RA|RC|SYNCHRONIZE` (`MOUNTMGR_MASK`) to S-1-15-2-2 + S-1-15-2-1 —
+   implicit-bits lesson again: `CreateFileW`-style opens silently add
+   `SYNCHRONIZE`/`FILE_READ_ATTRIBUTES`, and each sandbox gate accumulates only
+   from its own ACEs. Wired as
+   `configure_mount_point_manager_access`/`mount_point_manager_access_configured`
+   in `nul.rs`, applied+checked by `guardrail-nul-setup` alongside the NUL
+   grant. Resets on reboot (device object), like NUL.
+2. **Ancestor traverse/stat** — git's repo discovery and cmd's `dir`/`del`
+   stat every ancestor of the cwd up to the root. User-profile ancestors carry
+   no package ACEs under either AC flavor. Fixed with **non-inheritable**
+   `(X,RA,S,RC)` grants to `S-1-15-2-2` on each ancestor: unprivileged icacls
+   works for the user-owned chain (`C:\Users\EFL` and below); `C:\` and
+   `C:\Users` needed one elevated icacls each. NTFS ACEs **persist across
+   reboots** (unlike the device grants). Not yet productized — see next steps.
+3. **Env hygiene** — napi spawns clear the environment; AppContainer
+   `CreateProcessAsUserW` needs `SystemRoot`/`LOCALAPPDATA`/`USERPROFILE` or it
+   fails with error 203 (`ERROR_ENVVAR_NOT_FOUND`). For git/jj set `HOME` (jj
+   reads `~/.gitconfig`) and optionally `GIT_CEILING_DIRECTORIES`.
+
+### Current live tool matrix (LPAC, all grants present, verified 2026-07-24)
+
+| Tool | Result |
+|---|---|
+| `cmd` findstr / `>nul` / `dir` / write&&ren&&del one-liner | PASS |
+| `git` version / init / status (mingw git.exe) | PASS |
+| `jj` version / `jj git init` | PASS |
+| `go` version / build | PASS |
+| true msys binaries (`sh.exe`, `pwd.exe`, `ls.exe` from git `usr\bin`) | FAIL `0xC0000142` (msys-2.0.dll runtime init; separate deep AppContainer incompatibility — document as limitation; affects git shell hooks only) |
+| `curl`/TLS | untested since cert-store finding (needs `%APPDATA%\Microsoft\SystemCertificates` read grant) |
+
+Probe additions used for the bisection (kept): `cwd-report` (current_dir /
+canonicalize / read_dir / GetFinalPathNameByHandleW flavors / mountmgr
+NtOpenFile+IOCTL) and `open-bits <path> <hex>`.
 
 ---
 
-## 5. Decisions taken (via AskUserQuestion)
+## 5. Decisions taken (via AskUserQuestion / discussion)
 
 - Diff-state store: **guardrail-managed manifest** with an optional override
   path.
 - Startup verification: **configurable** (none | deny roots | all roots).
 - Unrestricted-FS mode: **out of scope**, document it.
-- LPAC: originally "keep unconditional"; **now superseded** — user chose
-  **"Investigate LPAC opt-out"** so git/jj can work (see next steps).
+- LPAC: **stays unconditional.** The opt-out investigation concluded: classic
+  AC (attribute omitted — note passing the attribute with value `0` fails
+  CreateProcess with error 203) changed nothing for the failing tools, and the
+  full dev-tool matrix is green under LPAC. The classic-AC-option idea is moot
+  unless a new AAP-only blocker appears.
+- Ancestor grants: initially dropped, but turned out to be the only fix for
+  ancestor stats (git discovery, cmd dir/del) — revived as sticky
+  non-inheritable `S-1-15-2-2` grants (§4.2). **How to productize is an open
+  question for the user.**
 - NUL persistence: **boot scheduled task** (registered by `guardrail-nul-setup`),
-  not a Windows service.
+  not a Windows service. The mountmgr grant rides the same task; the NTFS
+  ancestor grants don't need it (persistent).
 
 ---
 
 ## 6. NEXT STEPS (in priority order)
 
-### A. Investigate LPAC opt-out (IN PROGRESS — highest leverage for the README)
-- Hypothesis: opting out of LPAC (regular AppContainer that honors
-  `ALL APPLICATION PACKAGES`) lets msys `getcwd` traverse ancestor dirs
-  (`C:\`, `C:\Users`, …) that grant `ALL APPLICATION PACKAGES`, unblocking
-  git/jj. An earlier `all_application_packages_policy = 0` experiment failed,
-  but that was BEFORE the NUL + registryRead fixes — must re-test now.
-- The exact spot: `crates/guardrail-windows/src/process.rs` ~line 108:
-  ```rust
-  let mut all_application_packages_policy =
-      Box::new(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT);
-  ```
-  Set to `0` (opt-in / regular AppContainer) to test. Applied via
-  `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY`.
-- Plan: (1) temporarily hardcode `0`, rebuild napi debug, re-test git/jj/go/cmd.
-  (2) If it unblocks msys tools, wire it as a real config option through
-  `guardrail-core::SandboxConfig` → facade → `guardrail-napi` `SpawnOptions`
-  (LPAC on by default, opt-out flag). Note LPAC widens ambient reach to
-  `ALL APPLICATION PACKAGES`-granting objects — document the trade-off. Keep the
-  `lpac_removes_all_packages_but_keeps_package_and_capability_allows` test
-  meaningful (gate it on the LPAC setting).
+### A. Productize the ancestor + device grants (decision needed from user)
+Proposed shape (not yet confirmed):
+- Sandbox construction (unprivileged, best-effort): for each allow-root, stamp
+  non-inheritable `(X,RA,S,RC)` → `S-1-15-2-2` on each user-owned ancestor;
+  skip access-denied failures (system roots) silently.
+- Elevated helper (`guardrail-nul-setup`, likely rename to
+  `guardrail-host-setup`): NUL + mountmgr device grants (per boot) + one-time
+  drive-root/`C:\Users` ancestor grants.
+- Document the trade-off: any AppContainer on the host can then traverse/stat
+  (not list, not read) the granted ancestors.
+- The `nul.rs` module now hosts three grant families; naming/API shape needs a
+  decision too.
 
-### B. NUL boot scheduled task + revert path
-- Extend `guardrail-nul-setup` (or a sibling) with `--register` (create a
-  SYSTEM boot task via Task Scheduler / `schtasks` or the COM API that runs the
-  configure step), `--unregister`, and `--revert` (remove the added ACEs from
-  `\Device\Null`). Provide a napi helper `nullDeviceWriteConfigured()` and
-  document that skipping registration degrades any tool writing to NUL.
+### B. Device-grant boot scheduled task + revert path
+- Extend the setup bin with `--register` (SYSTEM boot task via Task
+  Scheduler / `schtasks` that re-applies the device grants), `--unregister`,
+  and `--revert` (remove the added ACEs). Provide napi helpers
+  (`nullDeviceWriteConfigured()` etc.) and document that skipping registration
+  degrades NUL writes and path canonicalization after each reboot.
 
 ### C. Persistent ACL cache + canonical-set diff (task #3, not started)
 - See section 1.2 for the full agreed design.
 
 ### D. napi README Windows section (task #4)
-- Blocked on A + the tool matrix. Write it modeled on the Linux/macOS sections:
-  correct Windows baseline (do NOT list system dirs; only owned paths),
-  Windows-specific semantics (ACL-mutating allows, write=delete, nested
-  re-allow, per-namespace package SID), real caveats (NUL setup requirement,
-  cert store for TLS, LPAC vs msys tools), and per-tool recipes with **honest**
-  "Tested result" lines — only claim what's actually been verified green.
-  `go` works today; git/jj pending the LPAC investigation.
+- Unblocked: the tool matrix is green (§4). Write it modeled on the
+  Linux/macOS sections: correct Windows baseline (do NOT list system dirs;
+  only owned paths), Windows-specific semantics (ACL-mutating allows,
+  write=delete, nested re-allow, per-namespace package SID), setup guide
+  (elevated `guardrail-nul-setup` per boot, one-time ancestor icacls grants,
+  required env vars incl. `SystemRoot`/`LOCALAPPDATA`/`USERPROFILE`/`HOME`),
+  real caveats (cert store for TLS, true-msys binaries broken → git shell
+  hooks), and per-tool recipes with **honest** "Tested result" lines — cmd,
+  git, jj, go verified green 2026-07-24.
 
 ---
 
@@ -244,20 +282,30 @@ granted (ACL mutation fails on protected subtrees) but are already reachable.
 
 - Full backend suite: `cargo test -p guardrail-windows --all-targets`
   (native-only; ~90s; one ignored network test needs host AppContainer loopback,
-  one ignored process-count test).
-- NUL helper: build `cargo build -p guardrail-windows --bin guardrail-nul-setup`;
-  check `target/debug/guardrail-nul-setup.exe --check`; apply (elevated)
-  `guardrail-nul-setup.exe`. **The grant is currently PRESENT on this dev
-  machine** (applied during verification; resets on reboot).
+  one ignored process-count test). Verified green after all §4 changes.
+- Setup helper: build `cargo build -p guardrail-windows --bin guardrail-nul-setup`;
+  check `target/debug/guardrail-nul-setup.exe --check` (reports NUL + mountmgr);
+  apply (elevated) `guardrail-nul-setup.exe`. **Both device grants are
+  currently PRESENT on this dev machine; they reset on reboot.** The NTFS
+  ancestor grants (`C:\`, `C:\Users` elevated; `C:\Users\EFL` chain
+  unprivileged; all `(X,RA,S,RC)` → `*S-1-15-2-2`, non-inheritable) are
+  applied and persist.
 - napi debug binding: `cd crates/guardrail-napi && pnpm build:debug`
   (use pnpm, not npm). Smoke test: `pnpm test`.
 - Live tool probing was done via throwaway `.mjs` scripts driving
-  `Sandbox.build({...}).spawn(...)`; all such scratch files have been cleaned up.
+  `Sandbox.build({...}).spawn(...)`; all such scratch files have been cleaned
+  up. Spawn env must include `SystemRoot`/`LOCALAPPDATA`/`USERPROFILE` (else
+  CreateProcess error 203) plus tool-specific vars (`GOROOT`/`GOCACHE`,
+  `HOME`, PATH incl. the tool's own bin dir).
 - Tool locations on this machine (scoop): git
   `D:\scoop\apps\git\2.55.0.3\mingw64\bin\git.exe`, jj
   `D:\scoop\apps\jj\current\jj.exe`, go `D:\scoop\apps\go\1.26.5`, rust sysroot
   `D:\scoop\persist\rustup\.rustup\toolchains\stable-x86_64-pc-windows-msvc`,
   pnpm real exe under `%LOCALAPPDATA%\pnpm\global\v11\...\@pnpm\exe\pnpm.exe`.
+- **Do not put scratch allow rules on `D:\scoop` (or other big shared trees)**:
+  sandbox build/teardown propagates + strips inheritable ACEs across the whole
+  tree and transiently broke the user's running apps once. Grant per-tool
+  version dirs instead.
 
 ---
 
@@ -269,12 +317,15 @@ granted (ACL mutation fails on protected subtrees) but are already reachable.
   for Deny, lpacCryptoServices/lpacIdentityServices, capability-count tests.
 - `M cache.rs` — thread `reallow_sid` into `AclGuard::apply`.
 - `M process.rs` — pass `reallow_sid` to `restricted_token`; extra restricting
-  SID; (LPAC opt-out flip pending).
-- `M lib.rs` — corrected docs (re-allow, write=delete), export `nul` fns, `mod nul`.
+  SID. LPAC restored unconditional after the classic-AC experiment.
+- `M lib.rs` — corrected docs (re-allow, write=delete), export `nul` fns
+  (now four: NUL + mountmgr configure/check), `mod nul`.
 - `M tests/policy.rs` — new re-allow / delete / rename / overwrite / NUL tests.
-- `A nul.rs` — null-device grant logic.
-- `A bin/guardrail-nul-setup.rs` — elevated helper.
-- `M bin/guardrail-windows-probe.rs` — write-nul/read-nul/overwrite/delete/rename.
+- `A nul.rs` — device grants, generalized: NUL (read/write) + mount-point
+  manager (`MOUNTMGR_MASK`).
+- `A bin/guardrail-nul-setup.rs` — elevated helper, applies/checks both grants.
+- `M bin/guardrail-windows-probe.rs` — write-nul/read-nul/overwrite/delete/
+  rename plus diagnostics `cwd-report` and `open-bits`.
 
 Memory files (agent long-term memory, not in repo):
 `feedback-last-rule-wins-never-reject.md`, `windows-acl-rework-direction.md`

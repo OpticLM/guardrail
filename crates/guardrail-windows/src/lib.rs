@@ -96,4 +96,7 @@ mod nul;
 mod process;
 
 pub use backend::WindowsBackend;
-pub use nul::{configure_null_device_write, null_device_write_configured};
+pub use nul::{
+    configure_mount_point_manager_access, configure_null_device_write,
+    mount_point_manager_access_configured, null_device_write_configured,
+};
