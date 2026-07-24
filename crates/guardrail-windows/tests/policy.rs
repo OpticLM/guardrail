@@ -69,12 +69,12 @@ fn default_network_deny_still_launches_process_in_appcontainer() {
 #[test]
 fn sandboxed_process_can_write_nul_when_host_configured() {
     // The null-device write grant is host-wide state applied by an elevated
-    // `guardrail-nul-setup` run and reset on reboot. When it is absent this
+    // `guardrail-host-setup` run and reset on reboot. When it is absent this
     // test cannot exercise the path (and cannot install it without elevation),
     // so it reports that instead of failing.
     if !guardrail_windows::null_device_write_configured().expect("query null-device DACL") {
         eprintln!(
-            "skipping: null-device write grant absent; run `guardrail-nul-setup` elevated first"
+            "skipping: null-device write grant absent; run `guardrail-host-setup` elevated first"
         );
         return;
     }

@@ -242,18 +242,16 @@ NtOpenFile+IOCTL) and `open-bits <path> <hex>`.
 
 ## 6. NEXT STEPS (in priority order)
 
-### A. Productize the ancestor + device grants (decision needed from user)
-Proposed shape (not yet confirmed):
-- Sandbox construction (unprivileged, best-effort): for each allow-root, stamp
-  non-inheritable `(X,RA,S,RC)` → `S-1-15-2-2` on each user-owned ancestor;
-  skip access-denied failures (system roots) silently.
-- Elevated helper (`guardrail-nul-setup`, likely rename to
-  `guardrail-host-setup`): NUL + mountmgr device grants (per boot) + one-time
-  drive-root/`C:\Users` ancestor grants.
-- Document the trade-off: any AppContainer on the host can then traverse/stat
-  (not list, not read) the granted ancestors.
-- The `nul.rs` module now hosts three grant families; naming/API shape needs a
-  decision too.
+### A. Productize the ancestor + device grants — DONE (2026-07-24)
+- `nul.rs` renamed to `host.rs`; bin renamed `guardrail-host-setup` (applies
+  and checks NUL + mountmgr device grants and the system ancestor traverse
+  grants: fixed-drive roots + user-profile parent).
+- `AclGuard::apply` stamps sticky non-inheritable `TRAVERSE_MASK` grants for
+  `S-1-15-2-2` on every allow root's ancestors, best-effort (user-owned chain
+  succeeds; system roots skipped, covered by the helper). Verified end-to-end:
+  git init/status green in a fresh deep chain with no manual icacls.
+- Documented in `guardrail-windows` crate docs (host setup + known
+  limitations) and the napi README Windows Setup Guide (task #4 DONE).
 
 ### B. Device-grant boot scheduled task + revert path
 - Extend the setup bin with `--register` (SYSTEM boot task via Task

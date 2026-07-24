@@ -65,7 +65,71 @@
 //!   could not open existing files at all.
 //! * Children sharing a cached profile (same host process,
 //!   `windows_cache_namespace`, and filesystem policy) share one package SID
-//!   and profile directory, so they are not isolated from each other.
+//!   and profile directory, so they are not isolated from each other. A file
+//!   created under one namespace's policy carries that namespace's package
+//!   grants only, so a *different* namespace's children cannot read it until
+//!   its own policy root ACEs re-propagate over it.
+//!
+//! # Host setup (`guardrail-host-setup`)
+//!
+//! Some objects a real workload touches sit outside anything a policy can
+//! grant, because their security descriptors are system-owned. The
+//! `guardrail-host-setup` binary (also exposed as library functions) applies
+//! three grant families; without them the corresponding features degrade as
+//! described. `--check` reports their presence unprivileged; applying needs
+//! elevation.
+//!
+//! * **Null device** (`\Device\Null`): its default DACL grants no package SID
+//!   and no restricting-SID write, so a sandboxed child cannot even open
+//!   `NUL`. Symptoms without the grant: `cmd ... > nul` fails, `go` and `git`
+//!   abort on startup. Resets on every boot — re-run the helper per boot (a
+//!   scheduled boot task is the intended host).
+//! * **Mount-point manager** (`\Device\MountPointManager`):
+//!   `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` — behind
+//!   `std::fs::canonicalize` and git's/jj's cwd resolution — queries it, and
+//!   its DACL grants no package SID. Symptom without the grant: "could not
+//!   determine current directory" from git/jj and `fs::canonicalize`
+//!   access-denied everywhere. Resets on every boot.
+//! * **System ancestor traverse grants**: sticky, non-inheritable
+//!   traverse+stat ACEs (`FILE_EXECUTE | FILE_READ_ATTRIBUTES | READ_CONTROL
+//!   | SYNCHRONIZE`, never `FILE_LIST_DIRECTORY`) for
+//!   `ALL RESTRICTED APPLICATION PACKAGES` on fixed-drive roots and the
+//!   user-profile parent. Tools stat every ancestor of their working
+//!   directory (git repo discovery, `cmd`'s `dir`/`del`); user-profile
+//!   ancestors carry no package ACEs at all. NTFS ACEs persist across
+//!   reboots, so this part is one-time. The backend itself stamps the same
+//!   grant best-effort on the *user-owned* ancestors of every allow root at
+//!   policy application (unprivileged, idempotent, silently skipping roots it
+//!   cannot write), so only the system-owned ancestors need the helper.
+//!
+//! Trade-off of all three: they widen what *any* AppContainer on the host can
+//! reach — NUL read/write, mount-point DOS-name queries, and traverse/stat
+//! (not list, not read) of the granted ancestor directories. None of them
+//! weakens guardrail's own policy gates.
+//!
+//! # Known limitations for real workloads
+//!
+//! * System directories must not appear in `fs` rules: applying a rule
+//!   mutates the target's DACL (needs `WRITE_DAC`, propagates inheritable
+//!   ACEs over the subtree), which fails on protected system trees — and is
+//!   unnecessary, since AppContainers already reach `C:\Windows` etc. through
+//!   built-in `ALL [RESTRICTED] APPLICATION PACKAGES` ACEs.
+//! * Rule application rewrites DACLs across the whole granted tree (and
+//!   removes them again on drop). Granting a large shared tree (a package
+//!   store, another application's install root) is slow and briefly perturbs
+//!   concurrent access-checks on it; grant the narrowest directory that
+//!   works.
+//! * The spawn environment starts empty. AppContainer process creation itself
+//!   needs `SystemRoot`, `LOCALAPPDATA`, and `USERPROFILE` (missing them
+//!   fails with `ERROR_ENVVAR_NOT_FOUND`); tools typically also want `PATH`,
+//!   `TEMP`/`TMP`, and a `HOME` pointing somewhere readable.
+//! * msys2-runtime binaries (`sh.exe`, msys `pwd.exe`/`ls.exe` — the
+//!   `usr\bin` half of Git for Windows) fail to initialize (`0xC0000142`)
+//!   under AppContainer. `git.exe` itself (mingw) is unaffected; git features
+//!   that shell out to `sh.exe`, such as shell hooks, are not usable.
+//! * TLS via schannel needs the user certificate store readable
+//!   (`%APPDATA%\Microsoft\SystemCertificates`) in addition to the crypto
+//!   capabilities the network policies add.
 //!
 //! # Program resolution
 //!
@@ -91,12 +155,13 @@ mod appcontainer;
 mod backend;
 mod cache;
 mod handle;
+mod host;
 mod job;
-mod nul;
 mod process;
 
 pub use backend::WindowsBackend;
-pub use nul::{
+pub use host::{
     configure_mount_point_manager_access, configure_null_device_write,
-    mount_point_manager_access_configured, null_device_write_configured,
+    configure_system_traverse_grants, mount_point_manager_access_configured,
+    null_device_write_configured, system_traverse_grants_configured,
 };

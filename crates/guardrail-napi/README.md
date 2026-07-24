@@ -869,6 +869,228 @@ CLI's authentication prompt both outside and inside Guardrail. The same macOS
 policy and `network: 'outbound-only'` completed an HTTPS request to
 `https://api.github.com/rate_limit` with `/usr/bin/curl`.
 
+## Windows Setup Guide
+
+This section is Windows-specific. It was tested on Windows 11 Pro 10.0.26200
+x64 with Node 26.1.0, Git for Windows 2.55.0.3, jj 0.43.0, and Go 1.26.5.
+
+On Windows the child runs in a Less-Privileged AppContainer with a restricted
+token inside a Job Object. `fs` allow rules append additive, inheritable ACL
+grants for the sandbox's package SID to the paths you list; deny rules append
+deny ACEs checked by the restricted token. Everything else is denied by the
+AppContainer itself.
+
+### One-Time Host Setup
+
+Some objects every real workload touches have system-owned security
+descriptors that no policy option can grant. The `guardrail-host-setup`
+binary (shipped with the `guardrail-windows` crate) applies three grant
+families. Check without elevation, apply with elevation:
+
+```
+guardrail-host-setup --check   # exit 0 = all present, 3 = something absent
+guardrail-host-setup           # run elevated; applies all grants
+```
+
+- **Null device write** (`\Device\Null`): without it, `anything > nul` fails
+  and `git`/`go` abort at startup. Resets on every boot.
+- **Mount-point-manager access** (`\Device\MountPointManager`): without it,
+  path canonicalization (`std::fs::canonicalize`,
+  `GetFinalPathNameByHandleW`) fails access-denied everywhere in the sandbox,
+  and git/jj exit with "could not determine current directory". Resets on
+  every boot.
+- **System ancestor traverse grants**: non-inheritable traverse+stat ACEs
+  (never list/read) on fixed-drive roots and the user-profile parent
+  (`C:\Users`), because tools like git stat every ancestor of the working
+  directory. These are ordinary NTFS ACEs and persist; this part is one-time.
+
+Because the two device grants reset on reboot, run `guardrail-host-setup`
+elevated at every boot (for example from a scheduled task). If it has not run,
+sandboxes still spawn — the affected features degrade as described above.
+
+Guardrail itself stamps the same traverse grant on the *user-owned* ancestors
+of every allow root when a sandbox is built (unprivileged, idempotent, sticky),
+so only the system-owned ancestors need the helper.
+
+All three grants widen what any AppContainer on the host can reach (NUL
+read/write, mount-point DOS-name queries, traverse/stat of the granted
+ancestors). None of them weakens guardrail's own policy checks.
+
+### Baseline Policy
+
+Do **not** list system directories (`C:\Windows`, …) in `fs`: applying a rule
+rewrites the target tree's DACLs, which fails on protected system trees — and
+is unnecessary, because AppContainers already reach system binaries through
+built-in ACEs. Grant your workspace and the specific tool installations you
+need:
+
+```js
+import { mkdir } from 'node:fs/promises'
+
+await mkdir(workRoot, { recursive: true })
+await mkdir(`${workRoot}\\home`, { recursive: true })
+await mkdir(`${workRoot}\\tmp`, { recursive: true })
+
+const fs = [
+  { kind: 'read-allow', path: workRoot },
+  { kind: 'write-allow', path: workRoot },
+  { kind: 'execute-allow', path: workRoot },
+]
+
+const env = {
+  // AppContainer process creation itself needs these three; spawning fails
+  // with ERROR_ENVVAR_NOT_FOUND (203) without them.
+  SystemRoot: process.env.SystemRoot,
+  LOCALAPPDATA: process.env.LOCALAPPDATA,
+  USERPROFILE: process.env.USERPROFILE,
+
+  TEMP: `${workRoot}\\tmp`,
+  TMP: `${workRoot}\\tmp`,
+  // Point HOME inside the workspace so tools read/write their config there
+  // instead of failing on the (denied) real profile.
+  HOME: `${workRoot}\\home`,
+  PATH: `${process.env.SystemRoot}\\System32`,
+}
+```
+
+Notes:
+
+- The child's environment is exactly `env` — nothing is inherited. Bare
+  program names resolve against this `env.PATH` only, so `spawn('cmd', ...)`
+  requires `C:\Windows\System32` in it.
+- `write-allow` includes delete and rename (`DELETE` is part of the write
+  masks), and a `write-deny` denies deletion too. A write grant also carries
+  `FILE_READ_ATTRIBUTES` — metadata only — because Windows file opens
+  implicitly request it.
+- Rules follow last-rule-wins in array order, including re-allowing a child
+  beneath a denied directory.
+- Granting a path rewrites DACLs across that whole tree (and removes them
+  when the sandbox is dropped). Grant the narrowest directory that works —
+  never a large shared tree like a package-manager store root; the
+  propagation is slow and briefly perturbs concurrent access to that tree.
+- Files created under one `windowsCacheNamespace` carry that namespace's
+  package grants; a different namespace's children cannot read them until its
+  own root ACEs re-propagate.
+
+### cmd
+
+The baseline policy is enough for `cmd` built-ins and redirections inside
+`workRoot`:
+
+```js
+const sandbox = await Sandbox.build({ fs, env, network: 'deny' })
+
+await sandbox.spawn('cmd', ['/c', 'findstr needle alpha.txt'], {
+  cwd: workRoot,
+}).wait()
+```
+
+Tested result: `findstr`, `dir`, `echo … > nul`, and a
+`echo … > a && ren a b && del b` one-liner completed successfully.
+
+### Git
+
+Use the `git.exe` from Git for Windows' `mingw64\bin` and grant its
+installation read/execute. `HOME` must point somewhere readable (the baseline
+already does). Repository contents live under `workRoot`.
+
+```js
+const gitRoot = 'D:\\scoop\\apps\\git\\2.55.0.3'
+
+const gitSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: gitRoot },
+    { kind: 'execute-allow', path: gitRoot },
+  ],
+  env: {
+    ...env,
+    PATH: `${gitRoot}\\mingw64\\bin;${process.env.SystemRoot}\\System32`,
+  },
+  network: 'deny',
+})
+
+await gitSandbox.spawn(`${gitRoot}\\mingw64\\bin\\git.exe`, ['init'], {
+  cwd: `${workRoot}\\repo`,
+}).wait()
+```
+
+Tested result: `git --version`, `git init`, and `git status` completed
+successfully.
+
+Limitation: binaries linked against the msys2 runtime — the `usr\bin` half of
+Git for Windows (`sh.exe`, msys `pwd.exe`, …) — fail to initialize
+(`0xC0000142`) under AppContainer. `git.exe` itself is a mingw binary and
+unaffected, but git features that shell out to `sh.exe`, such as shell hooks,
+do not work.
+
+### jj
+
+jj (pure Rust) needs its binary readable/executable and `HOME` writable for
+config; everything else is the baseline:
+
+```js
+const jjRoot = 'D:\\scoop\\apps\\jj\\current'
+
+const jjSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: jjRoot },
+    { kind: 'execute-allow', path: jjRoot },
+  ],
+  env,
+  network: 'deny',
+})
+
+await jjSandbox.spawn(`${jjRoot}\\jj.exe`, ['git', 'init', 'repo'], {
+  cwd: workRoot,
+}).wait()
+```
+
+Tested result: `jj --version` and `jj git init` completed successfully.
+
+### Go
+
+Grant `GOROOT` read/execute and keep all writable Go state inside the
+workspace:
+
+```js
+const goRoot = 'D:\\scoop\\apps\\go\\1.26.5'
+
+const goSandbox = await Sandbox.build({
+  fs: [
+    ...fs,
+    { kind: 'read-allow', path: goRoot },
+    { kind: 'execute-allow', path: goRoot },
+  ],
+  env: {
+    ...env,
+    PATH: `${goRoot}\\bin;${process.env.SystemRoot}\\System32`,
+    GOROOT: goRoot,
+    GOPATH: `${workRoot}\\go-path`,
+    GOCACHE: `${workRoot}\\go-cache`,
+    GOTMPDIR: `${workRoot}\\tmp`,
+    GOTOOLCHAIN: 'local',
+  },
+  network: 'deny',
+})
+
+await goSandbox.spawn(`${goRoot}\\bin\\go.exe`, ['build', '-o', 'out.exe', 'main.go'], {
+  cwd: workRoot,
+}).wait()
+```
+
+Tested result: `go version` and `go build` completed successfully.
+
+### Known Limitations
+
+- msys2-runtime binaries fail to start (see the Git section).
+- TLS via schannel (curl, gh, anything using the Windows TLS stack) needs the
+  user certificate store readable —
+  `%APPDATA%\Microsoft\SystemCertificates` — in addition to the network
+  policy; this combination has not been verified green yet.
+- stdio is inherited; output capture is not yet supported.
+
 ## Platform Capability Matrix
 
 Each option is enforced by a different mechanism per platform; an option

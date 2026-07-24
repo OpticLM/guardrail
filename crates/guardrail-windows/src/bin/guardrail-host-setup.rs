@@ -1,16 +1,21 @@
-//! Host setup helper for the guardrail device grants (null device +
-//! mount-point manager).
+//! Host setup helper for the guardrail sandbox grants.
 //!
-//! Run once per boot from an elevated context. With no arguments it applies
-//! both grants; with `--check` it reports whether they are already present
-//! (exit 0 = all present, exit 3 = any absent) without needing elevation.
+//! Run from an elevated context. With no arguments it applies every grant;
+//! with `--check` it reports whether they are already present (exit 0 = all
+//! present, exit 3 = any absent) without needing elevation.
+//!
+//! Two grant families live on device objects whose security descriptors reset
+//! on every boot (null device, mount-point manager) — re-run this helper each
+//! boot (a scheduled boot task is the intended host). The third (traverse
+//! grants on fixed-drive roots and the user-profile parent) is ordinary NTFS
+//! ACEs, applied once and persistent.
 
 #![cfg(windows)]
 
 use std::io;
 use std::process::exit;
 
-const GRANTS: [(&str, fn() -> io::Result<bool>, fn() -> io::Result<()>); 2] = [
+const GRANTS: [(&str, fn() -> io::Result<bool>, fn() -> io::Result<()>); 3] = [
     (
         "null-device write grant",
         guardrail_windows::null_device_write_configured,
@@ -20,6 +25,11 @@ const GRANTS: [(&str, fn() -> io::Result<bool>, fn() -> io::Result<()>); 2] = [
         "mount-point-manager access grant",
         guardrail_windows::mount_point_manager_access_configured,
         guardrail_windows::configure_mount_point_manager_access,
+    ),
+    (
+        "system ancestor traverse grants",
+        guardrail_windows::system_traverse_grants_configured,
+        guardrail_windows::configure_system_traverse_grants,
     ),
 ];
 

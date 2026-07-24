@@ -102,6 +102,23 @@ impl AclGuard {
             }
         }
 
+        // Tools stat or traverse every ancestor of their working directory
+        // (git repo discovery, cmd's dir/del), and directories outside the
+        // granted trees carry no package ACEs. Stamp sticky non-inheritable
+        // traverse grants on each allow root's ancestors, best-effort: the
+        // user-owned chain succeeds; system roots (drive roots, C:\Users)
+        // need the elevated `guardrail-host-setup` run and are skipped here.
+        // The grants target a Windows-defined group SID, are idempotent, and
+        // are deliberately never removed on drop.
+        for entry in &entries {
+            if entry.effect != RuleEffect::Allow {
+                continue;
+            }
+            for ancestor in entry.path.ancestors().skip(1) {
+                let _ = crate::host::grant_traverse(ancestor);
+            }
+        }
+
         Ok(guard)
     }
 

@@ -31,18 +31,31 @@
 //! `RESTRICTED`, but no package SID) fails the AppContainer gate. Granting
 //! `FILE_EXECUTE` to the two package trustees mirrors the OS's own
 //! restricted-token accommodation.
+//!
+//! Finally, many tools stat or traverse every **ancestor** of their working
+//! directory (git repo discovery walks to the root; `cmd`'s `dir`/`del` touch
+//! the volume root), and directories outside guardrail's granted trees carry
+//! no package ACEs. Sticky, **non-inheritable** traverse grants
+//! ([`TRAVERSE_MASK`]: execute/traverse + read-attributes + read-control +
+//! synchronize — no listing, no data access) to
+//! `ALL RESTRICTED APPLICATION PACKAGES` fix this. The backend stamps them
+//! best-effort on the user-owned ancestors of every allow root at policy
+//! application; [`configure_system_traverse_grants`] (elevated, one-time —
+//! NTFS ACEs persist across reboots) covers what unprivileged code cannot:
+//! fixed-drive roots and the user-profile parent (e.g. `C:\Users`).
 
 #![cfg(windows)]
 
 use std::io;
 use std::os::windows::io::AsRawHandle;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ACCESS_MODE, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo,
-    SE_KERNEL_OBJECT, SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
-    TRUSTEE_W,
+    ACCESS_MODE, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    GetSecurityInfo, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+    SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
@@ -87,6 +100,14 @@ const MOUNTMGR_MASK: u32 = FILE_EXECUTE | FILE_READ_ATTRIBUTES | READ_CONTROL | 
 const FILE_EXECUTE: u32 = 0x20;
 const FILE_READ_ATTRIBUTES: u32 = 0x80;
 const SYNCHRONIZE: u32 = 0x0010_0000;
+/// Ancestor-directory mask: traverse + stat, nothing more. `FILE_EXECUTE` is
+/// directory traversal; `FILE_READ_ATTRIBUTES` lets `stat`-style calls see the
+/// directory; `READ_CONTROL` + `SYNCHRONIZE` are the bits `CreateFileW`-style
+/// opens request implicitly. Deliberately excludes `FILE_LIST_DIRECTORY`, so a
+/// grant on e.g. `C:\Users` does not let sandboxed children enumerate other
+/// users' profile names.
+pub(crate) const TRAVERSE_MASK: u32 =
+    FILE_EXECUTE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 
 /// Grant the null device the access a sandboxed child needs.
 ///
@@ -115,6 +136,166 @@ pub fn configure_mount_point_manager_access() -> io::Result<()> {
 /// [`configure_mount_point_manager_access`] applies. Runs unprivileged.
 pub fn mount_point_manager_access_configured() -> io::Result<bool> {
     device_configured(r"\\.\MountPointManager", &mountmgr_grants()?)
+}
+
+/// Stamp the traverse grant on the directories unprivileged code cannot reach:
+/// every fixed-drive root plus the parent of the current user's profile
+/// directory (typically `C:\Users`). One elevated run; NTFS ACEs persist
+/// across reboots, unlike the device grants.
+pub fn configure_system_traverse_grants() -> io::Result<()> {
+    for path in system_traverse_targets() {
+        grant_traverse(&path)?;
+    }
+    Ok(())
+}
+
+/// Whether every [`configure_system_traverse_grants`] target already carries
+/// the traverse grant. Runs unprivileged.
+pub fn system_traverse_grants_configured() -> io::Result<bool> {
+    for path in system_traverse_targets() {
+        if !traverse_granted(&path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn system_traverse_targets() -> Vec<PathBuf> {
+    let mut targets: Vec<PathBuf> = fixed_drive_roots();
+    if let Some(profile_parent) = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .and_then(|profile| profile.parent().map(Path::to_path_buf))
+    {
+        if !targets.contains(&profile_parent) {
+            targets.push(profile_parent);
+        }
+    }
+    targets
+}
+
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetLogicalDriveStringsW(nbufferlength: u32, lpbuffer: *mut u16) -> u32;
+        fn GetDriveTypeW(lprootpathname: *const u16) -> u32;
+    }
+    const DRIVE_FIXED: u32 = 3;
+
+    let mut buffer = [0u16; 512];
+    // SAFETY: `buffer` holds `buffer.len()` u16s; the call writes a
+    // nul-separated, double-nul-terminated list of root paths into it.
+    let len = unsafe { GetLogicalDriveStringsW(buffer.len() as u32, buffer.as_mut_ptr()) };
+    let mut roots = Vec::new();
+    if len == 0 || len as usize > buffer.len() {
+        return roots;
+    }
+    for root in buffer[..len as usize].split(|&unit| unit == 0) {
+        if root.is_empty() {
+            continue;
+        }
+        let mut with_nul = root.to_vec();
+        with_nul.push(0);
+        // SAFETY: `with_nul` is a nul-terminated UTF-16 root path.
+        if unsafe { GetDriveTypeW(with_nul.as_ptr()) } == DRIVE_FIXED {
+            roots.push(PathBuf::from(String::from_utf16_lossy(root)));
+        }
+    }
+    roots
+}
+
+/// Add a sticky, non-inheritable [`TRAVERSE_MASK`] grant for
+/// `ALL RESTRICTED APPLICATION PACKAGES` on `path`. No-op when the grant is
+/// already present, so repeated policy applications don't rewrite DACLs.
+/// Needs `WRITE_DAC` on `path` — i.e. the caller must own it or be elevated.
+pub(crate) fn grant_traverse(path: &Path) -> io::Result<()> {
+    if traverse_granted(path)? {
+        return Ok(());
+    }
+    let sid = sid_from_string(ALL_RESTRICTED_APPLICATION_PACKAGES)?;
+    let path_wide = wide_path(path);
+
+    let mut current_dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: nul-terminated path; valid out-pointers. `descriptor` owns the
+    // returned security descriptor and is freed below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut current_dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let _descriptor = LocalGuard(descriptor);
+    win32_status(status)?;
+    if current_dacl.is_null() {
+        return Err(io::Error::other(format!(
+            "{} has a null DACL; refusing to replace it",
+            path.display()
+        )));
+    }
+
+    let explicit = explicit_grant(sid.as_psid(), GRANT_ACCESS, TRAVERSE_MASK);
+    let mut new_dacl = ptr::null_mut();
+    // SAFETY: `explicit` references `sid`, live for the call; out-pointer valid.
+    let status = unsafe { SetEntriesInAclW(1, &explicit, current_dacl, &mut new_dacl) };
+    win32_status(status)?;
+    let new_dacl = LocalGuard(new_dacl.cast());
+
+    // SAFETY: `new_dacl` is a valid ACL for the duration of the call. The ACE
+    // is non-inheritable, so no subtree propagation happens.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            new_dacl.0.cast(),
+            ptr::null_mut(),
+        )
+    };
+    win32_status(status)
+}
+
+/// Whether `path` carries an explicit allow ACE for
+/// `ALL RESTRICTED APPLICATION PACKAGES` covering [`TRAVERSE_MASK`].
+pub(crate) fn traverse_granted(path: &Path) -> io::Result<bool> {
+    let sid = sid_from_string(ALL_RESTRICTED_APPLICATION_PACKAGES)?;
+    let path_wide = wide_path(path);
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: nul-terminated path; valid out-pointers; `descriptor` freed below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let _descriptor = LocalGuard(descriptor);
+    win32_status(status)?;
+    if dacl.is_null() {
+        return Ok(false);
+    }
+    dacl_grants(dacl, sid.as_psid(), TRAVERSE_MASK)
+}
+
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn configure_device(path: &str, grants: &[Grant]) -> io::Result<()> {
@@ -387,5 +568,32 @@ fn win32_status(status: u32) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::from_raw_os_error(status as i32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traverse_grant_is_idempotent_and_detectable() {
+        let dir = std::env::temp_dir().join(format!(
+            "guardrail-traverse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+
+        assert!(!traverse_granted(&dir).unwrap());
+        grant_traverse(&dir).unwrap();
+        assert!(traverse_granted(&dir).unwrap());
+        // A second application is a no-op, not an error or a duplicate ACE.
+        grant_traverse(&dir).unwrap();
+        assert!(traverse_granted(&dir).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
