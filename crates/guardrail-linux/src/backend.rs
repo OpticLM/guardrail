@@ -135,7 +135,7 @@ impl Backend for LinuxBackend {
         }
 
         let child = command.spawn().map_err(Error::Spawn)?;
-        Ok(SandboxChild::from(child))
+        Ok(SandboxChild::from_child(child))
     }
 }
 

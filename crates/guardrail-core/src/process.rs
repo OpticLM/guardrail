@@ -36,25 +36,27 @@ pub struct SandboxChild {
 }
 
 #[derive(Debug)]
-enum SandboxChildInner {
-    Child(Child),
-    #[cfg(windows)]
-    WindowsRaw {
-        process: OwnedHandle,
-        job: OwnedHandle,
-        pid: u32,
-        stdio: WindowsChildStdio,
-        _guards: Vec<Box<dyn Any + Send>>,
-    },
+#[cfg(windows)]
+struct SandboxChildInner {
+    process: OwnedHandle,
+    job: OwnedHandle,
+    pid: u32,
+    stdio: WindowsChildStdio,
+    _guards: Vec<Box<dyn Any + Send>>,
+}
+
+#[derive(Debug)]
+#[cfg(not(windows))]
+struct SandboxChildInner {
+    child: Child,
 }
 
 impl SandboxChild {
     /// The OS-assigned process id of the child.
     pub fn id(&self) -> u32 {
-        match &self.inner {
-            SandboxChildInner::Child(child) => child.id(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { pid, .. } => *pid,
+        cfg_select! {
+            not(windows) => self.inner.child.id(),
+            windows => self.inner.pid
         }
     }
 
@@ -64,10 +66,10 @@ impl SandboxChild {
     /// if any, is closed first so a child reading stdin to EOF cannot
     /// deadlock against this wait.
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => child.wait(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { process, stdio, .. } => {
+        cfg_select! {
+            not(windows) => self.inner.child.wait(),
+            windows => {
+                let SandboxChildInner { process, stdio, .. } = &mut self.inner;
                 drop(stdio.stdin.take());
                 windows_wait(process)
             }
@@ -76,10 +78,9 @@ impl SandboxChild {
 
     /// Attempt to kill the child immediately.
     pub fn kill(&mut self) -> std::io::Result<()> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => child.kill(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { job, .. } => windows_kill_job(job),
+        cfg_select! {
+            not(windows) => self.inner.child.kill(),
+            windows => windows_kill_job(&self.inner.job),
         }
     }
 
@@ -89,30 +90,27 @@ impl SandboxChild {
     /// Dropping the returned handle closes the pipe, signalling EOF to the
     /// child.
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => child.stdin.take(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stdin.take(),
+        cfg_select! {
+            not(windows) => self.inner.child.stdin.take(),
+            windows => self.inner.stdio.stdin.take(),
         }
     }
 
     /// Take the parent's read end of the child's stdout pipe, if the command
     /// piped stdout and it has not been taken already.
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => child.stdout.take(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stdout.take(),
+        cfg_select! {
+            not(windows) => self.inner.child.stdout.take(),
+            windows => self.inner.stdio.stdout.take(),
         }
     }
 
     /// Take the parent's read end of the child's stderr pipe, if the command
     /// piped stderr and it has not been taken already.
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => child.stderr.take(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { stdio, .. } => stdio.stderr.take(),
+        cfg_select! {
+            not(windows) => self.inner.child.stderr.take(),
+            windows => self.inner.stdio.stderr.take(),
         }
     }
 
@@ -123,16 +121,16 @@ impl SandboxChild {
     /// [`StdioMode::Piped`](crate::StdioMode::Piped) — and not already taken
     /// through the accessors above — contribute output bytes.
     pub fn wait_with_output(self) -> std::io::Result<Output> {
-        match self.inner {
-            SandboxChildInner::Child(child) => child.wait_with_output(),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw {
-                process,
-                job: _job,
-                pid: _,
-                mut stdio,
-                _guards,
-            } => {
+        cfg_select! {
+            not(windows) => self.inner.child.wait_with_output(),
+            windows => {
+                let SandboxChildInner {
+                    process,
+                    job,
+                    pid: _,
+                    mut stdio,
+                    _guards,
+                } = self.inner;
                 drop(stdio.stdin.take());
                 let (stdout, stderr) =
                     windows_read_to_end(stdio.stdout.take(), stdio.stderr.take())?;
@@ -140,7 +138,7 @@ impl SandboxChild {
                 // Mirror the struct's drop order: handles first, then stdio,
                 // cleanup guards last.
                 drop(process);
-                drop(_job);
+                drop(job);
                 drop(stdio);
                 drop(_guards);
                 Ok(Output {
@@ -161,7 +159,37 @@ impl SandboxChild {
     /// only when an API exists solely on [`Child`], such as
     /// [`Child::try_wait`].
     ///
-    /// ```no_run
+    //  This doesn't compile on Windows.
+    /// ```no_run,ignore(windows)
+    /// # fn main() -> std::io::Result<()> {
+    /// use guardrail_core::SandboxChild;
+    ///
+    /// let mut child = SandboxChild::from(std::process::Command::new("tool").spawn()?);
+    /// if let Some(inner) = child.as_child() {
+    ///     let id = inner.id();
+    ///     println!("id: {id}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn as_child(&self) -> Option<&Child> {
+        cfg_select! {
+            not(windows) => Some(&self.inner.child),
+            windows => None,
+        }
+    }
+
+    /// Borrow the underlying [`std::process::Child`] mutably, if this handle wraps
+    /// one.
+    ///
+    /// Children spawned by the Windows backend are backed by raw process and
+    /// Job Object handles rather than a [`Child`], so for them this returns
+    /// `None`. Prefer the portable methods on `SandboxChild`; reach for this
+    /// only when an API exists solely on [`Child`], such as
+    /// [`Child::try_wait`].
+    ///
+    //  This doesn't compile on Windows.
+    /// ```no_run,ignore(windows)
     /// # fn main() -> std::io::Result<()> {
     /// use guardrail_core::SandboxChild;
     ///
@@ -174,10 +202,9 @@ impl SandboxChild {
     /// # }
     /// ```
     pub fn as_child_mut(&mut self) -> Option<&mut Child> {
-        match &mut self.inner {
-            SandboxChildInner::Child(child) => Some(child),
-            #[cfg(windows)]
-            SandboxChildInner::WindowsRaw { .. } => None,
+        cfg_select! {
+            not(windows) => Some(&mut self.inner.child),
+            windows => None,
         }
     }
 
@@ -188,7 +215,8 @@ impl SandboxChild {
     /// Job Object handles rather than a [`Child`]; for them the intact handle
     /// comes back as the error, so a failed unwrap never loses the child.
     ///
-    /// ```no_run
+    //  This doesn't compile on Windows.
+    /// ```no_run,ignore(windows)
     /// # fn main() -> std::io::Result<()> {
     /// use guardrail_core::SandboxChild;
     ///
@@ -204,10 +232,16 @@ impl SandboxChild {
     /// # }
     /// ```
     pub fn try_into_child(self) -> Result<Child, Self> {
-        match self.inner {
-            SandboxChildInner::Child(child) => Ok(child),
-            #[cfg(windows)]
-            inner @ SandboxChildInner::WindowsRaw { .. } => Err(Self { inner }),
+        cfg_select! {
+            not(windows) => Ok(self.inner.child),
+            windows => Err(self),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn from_child(child: Child) -> Self {
+        SandboxChild {
+            inner: SandboxChildInner { child },
         }
     }
 
@@ -246,7 +280,7 @@ impl SandboxChild {
         guards: Vec<Box<dyn Any + Send>>,
     ) -> Self {
         Self {
-            inner: SandboxChildInner::WindowsRaw {
+            inner: SandboxChildInner {
                 process,
                 job,
                 pid,
@@ -259,19 +293,8 @@ impl SandboxChild {
     /// Duplicate the Job Object handle backing a raw Windows child, so a
     /// [`SharedSandboxChild`] can terminate the job without owning the child.
     #[cfg(windows)]
-    fn try_clone_job(&self) -> Option<OwnedHandle> {
-        match &self.inner {
-            SandboxChildInner::Child(_) => None,
-            SandboxChildInner::WindowsRaw { job, .. } => job.try_clone().ok(),
-        }
-    }
-}
-
-impl From<Child> for SandboxChild {
-    fn from(inner: Child) -> Self {
-        SandboxChild {
-            inner: SandboxChildInner::Child(inner),
-        }
+    fn try_clone_job(&self) -> std::io::Result<OwnedHandle> {
+        self.inner.job.try_clone()
     }
 }
 
@@ -324,8 +347,9 @@ impl SharedSandboxChild {
     /// Wrap a single-owner [`SandboxChild`] in a shareable handle.
     pub fn new(child: SandboxChild) -> Self {
         let pid = child.id();
+        // TODO: handle errors properly?
         #[cfg(windows)]
-        let job = child.try_clone_job().map(Arc::new);
+        let job = child.try_clone_job().map(Arc::new).ok();
         Self {
             pid,
             #[cfg(windows)]
@@ -664,12 +688,13 @@ mod tests {
     use std::time::Duration;
 
     fn shared(mut cmd: Command) -> SharedSandboxChild {
-        SharedSandboxChild::new(cmd.spawn().expect("spawn").into())
+        SharedSandboxChild::new(SandboxChild::from_child(cmd.spawn().expect("spawn")))
     }
 
     #[test]
     fn as_child_mut_exposes_the_wrapped_std_child() {
-        let mut child: SandboxChild = Command::new("true").spawn().expect("spawn").into();
+        let mut child: SandboxChild =
+            SandboxChild::from_child(Command::new("true").spawn().expect("spawn"));
         let inner = child
             .as_child_mut()
             .expect("a std-backed child must expose its inner Child");
@@ -679,7 +704,8 @@ mod tests {
 
     #[test]
     fn try_into_child_returns_the_wrapped_std_child() {
-        let child: SandboxChild = Command::new("true").spawn().expect("spawn").into();
+        let child: SandboxChild =
+            SandboxChild::from_child(Command::new("true").spawn().expect("spawn"));
         let mut inner = child
             .try_into_child()
             .expect("a std-backed child must unwrap into its inner Child");
