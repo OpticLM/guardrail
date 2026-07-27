@@ -16,7 +16,9 @@
   },
   "files": [
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "binding.js",
+    "binding.d.ts"
   ],
   "napi": {
     "npmClient": "pnpm",
@@ -42,8 +44,8 @@
   "scripts": {
     "create-npm-dirs": "napi create-npm-dirs",
     "artifacts": "napi artifacts --output-dir .",
-    "build": "napi build --platform --release --esm",
-    "build:debug": "napi build --platform --esm",
+    "build": "napi build --platform --release --esm --js binding.js --dts binding.d.ts",
+    "build:debug": "napi build --platform --esm --js binding.js --dts binding.d.ts",
     "test": "node --test __test__/smoke.test.mjs"
   },
   "devDependencies": {

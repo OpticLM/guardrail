@@ -88,7 +88,7 @@ impl SandboxChild {
     ///
     /// Dropping the returned handle closes the pipe, signalling EOF to the
     /// child.
-    pub fn get_stdin(&mut self) -> Option<ChildStdin> {
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
         match &mut self.inner {
             SandboxChildInner::Child(child) => child.stdin.take(),
             #[cfg(windows)]
@@ -98,7 +98,7 @@ impl SandboxChild {
 
     /// Take the parent's read end of the child's stdout pipe, if the command
     /// piped stdout and it has not been taken already.
-    pub fn get_stdout(&mut self) -> Option<ChildStdout> {
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
         match &mut self.inner {
             SandboxChildInner::Child(child) => child.stdout.take(),
             #[cfg(windows)]
@@ -108,7 +108,7 @@ impl SandboxChild {
 
     /// Take the parent's read end of the child's stderr pipe, if the command
     /// piped stderr and it has not been taken already.
-    pub fn get_stderr(&mut self) -> Option<ChildStderr> {
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
         match &mut self.inner {
             SandboxChildInner::Child(child) => child.stderr.take(),
             #[cfg(windows)]
@@ -255,6 +255,16 @@ impl SandboxChild {
             },
         }
     }
+
+    /// Duplicate the Job Object handle backing a raw Windows child, so a
+    /// [`SharedSandboxChild`] can terminate the job without owning the child.
+    #[cfg(windows)]
+    fn try_clone_job(&self) -> Option<OwnedHandle> {
+        match &self.inner {
+            SandboxChildInner::Child(_) => None,
+            SandboxChildInner::WindowsRaw { job, .. } => job.try_clone().ok(),
+        }
+    }
 }
 
 impl From<Child> for SandboxChild {
@@ -280,6 +290,11 @@ impl From<Child> for SandboxChild {
 /// This type owns all waits for its child; process-wide code must not reap the
 /// same child independently or change the `SIGCHLD` disposition concurrently.
 ///
+/// Raw Windows children additionally carry a duplicated Job Object handle, so
+/// `kill()` can terminate the tree in every state before the reap — including
+/// while `wait()` is in flight. Handle-based termination cannot be redirected
+/// by pid reuse, so it needs none of the Unix waitid coordination.
+///
 /// Built from a single-owner [`SandboxChild`]; async/FFI bindings (e.g. the
 /// napi binding) wrap this so they get the wait/kill coordination once instead
 /// of re-deriving it per binding. The single-owner [`SandboxChild`] stays
@@ -288,6 +303,8 @@ impl From<Child> for SandboxChild {
 #[derive(Debug, Clone)]
 pub struct SharedSandboxChild {
     pid: u32,
+    #[cfg(windows)]
+    job: Option<Arc<OwnedHandle>>,
     state: Arc<Mutex<SharedState>>,
 }
 
@@ -307,8 +324,12 @@ impl SharedSandboxChild {
     /// Wrap a single-owner [`SandboxChild`] in a shareable handle.
     pub fn new(child: SandboxChild) -> Self {
         let pid = child.id();
+        #[cfg(windows)]
+        let job = child.try_clone_job().map(Arc::new);
         Self {
             pid,
+            #[cfg(windows)]
+            job,
             state: Arc::new(Mutex::new(SharedState::Ready(child))),
         }
     }
@@ -421,15 +442,30 @@ impl SharedSandboxChild {
     /// - `wait()` not started → we still own the handle, kill it directly.
     /// - `wait()` in flight → on Linux and macOS the child is unreaped (alive
     ///   or zombie — reaping only happens under the lock held here), so
-    ///   signalling the pid is safe. Other platforms reject this operation.
+    ///   signalling the pid is safe. On Windows, raw children are terminated
+    ///   through the duplicated Job Object handle, which pid reuse cannot
+    ///   redirect; children without one reject this operation.
     /// - `wait()` already returned → the child has been reaped, so this is a
     ///   no-op. It must not signal a pid the OS may have reassigned.
     /// - `wait()` failed → signalling is rejected because pid ownership can no
-    ///   longer be proven. The retained child handle is only available to a
-    ///   retried `wait()`.
+    ///   longer be proven (on Windows the job handle keeps termination
+    ///   available). The retained child handle is only available to a retried
+    ///   `wait()`.
     /// - `SIGCHLD` is configured to discard child status → signalling is
     ///   rejected because the OS may auto-reap and reuse the pid.
     pub fn kill(&self) -> std::io::Result<()> {
+        // Handle-based Job Object termination is immune to pid reuse, so it
+        // stays safe in every state before the reap; after a successful wait
+        // the tree is gone and kill remains a no-op.
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            let state = self.lock();
+            return match &*state {
+                SharedState::Reaped => Ok(()),
+                _ => windows_kill_job(job),
+            };
+        }
+
         let mut state = self.lock();
         match &mut *state {
             // wait() not started → we still own the handle.

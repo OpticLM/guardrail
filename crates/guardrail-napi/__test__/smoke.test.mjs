@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
+import { text } from 'node:stream/consumers'
 import { Worker } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -233,7 +234,7 @@ test('inherits Node standard output and error on Windows', { skip: process.platf
   assert.match(stderr, /^guardrail-stderr-marker\r?$/m)
 })
 
-// ---- output capture (stdout/stderr: 'pipe' | 'ignore', maxOutputBytes) ----
+// ---- streamed stdio (stdin/stdout/stderr: 'pipe' | 'ignore') ----
 
 const isWindows = process.platform === 'win32'
 const darwinRuntimeProfile = fileURLToPath(
@@ -275,71 +276,119 @@ const echoMarkers = {
   unix: 'printf guardrail-out-marker; printf guardrail-err-marker >&2',
 }
 
-test('captures piped stdout and stderr as Buffers', async () => {
-  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-capture'))
+test("piped stdout and stderr are Readable streams; wait() is status-only", async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-streams'))
   const child = spawnShell(sandbox, echoMarkers, { stdout: 'pipe', stderr: 'pipe' })
-  const result = await child.wait()
+  assert.equal(child.stdin, null)
+  const [out, err, result] = await Promise.all([
+    text(child.stdout),
+    text(child.stderr),
+    child.wait(),
+  ])
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
-  assert.ok(Buffer.isBuffer(result.stdout))
-  assert.ok(Buffer.isBuffer(result.stderr))
-  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
-  assert.equal(result.stderr.toString().trim(), 'guardrail-err-marker')
+  assert.equal(out.trim(), 'guardrail-out-marker')
+  assert.equal(err.trim(), 'guardrail-err-marker')
+  assert.equal(result.stdout, undefined, 'ExitResult no longer carries buffered output')
+  assert.equal(result.stderr, undefined)
 })
 
-test("'ignore' output leaves no buffers on the result", async () => {
+test("'ignore' output leaves no streams on the child", async () => {
   const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-ignore'))
   const child = spawnShell(sandbox, echoMarkers, { stdout: 'ignore', stderr: 'ignore' })
+  assert.equal(child.stdout, null)
+  assert.equal(child.stderr, null)
   const result = await child.wait()
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
-  assert.ok(result.stdout == null)
-  assert.ok(result.stderr == null)
 })
 
-test('captures only the piped stream', async () => {
+test('streams only the piped stream', async () => {
   const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-asym'))
   const child = spawnShell(
     sandbox,
     { windows: 'echo guardrail-out-marker', unix: 'printf guardrail-out-marker' },
     { stdout: 'pipe', stderr: 'ignore' },
   )
-  const result = await child.wait()
+  assert.equal(child.stderr, null)
+  const [out, result] = await Promise.all([text(child.stdout), child.wait()])
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
-  assert.ok(Buffer.isBuffer(result.stdout))
-  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
-  assert.ok(result.stderr == null)
+  assert.equal(out.trim(), 'guardrail-out-marker')
 })
 
-test('one-shot spawn() captures piped output', async () => {
+test('one-shot spawn() attaches streams too', async () => {
   const options = { ...shellSandboxOptions('smoke-oneshot'), stdout: 'pipe' }
   const child = isWindows
     ? guardrail.spawn('cmd', ['/D', '/C', 'echo guardrail-out-marker'], options)
     : guardrail.spawn('/bin/sh', ['-c', 'printf guardrail-out-marker'], options)
-  const result = await child.wait()
+  const [out, result] = await Promise.all([text(child.stdout), child.wait()])
   assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
-  assert.equal(result.stdout.toString().trim(), 'guardrail-out-marker')
+  assert.equal(out.trim(), 'guardrail-out-marker')
 })
 
-test('maxOutputBytes kills the child and rejects wait()', async () => {
-  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-cap'))
-  // ~66 KiB of output against a 1 KiB cap, comfortably past any pipe buffer.
+test('wait() is memoized and multi-awaitable', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-memo'))
   const child = spawnShell(
     sandbox,
-    {
-      windows: 'for /L %i in (1,1,2000) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      unix: 'i=0; while [ "$i" -lt 2000 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done',
-    },
-    { stdout: 'pipe', maxOutputBytes: 1024 },
+    { windows: 'exit 0', unix: 'exit 0' },
+    { stdout: 'ignore', stderr: 'ignore' },
   )
-  await assert.rejects(child.wait(), /maxOutputBytes/)
-  // The overrun path still reaped the child, so a retried wait finds nothing.
-  await assert.rejects(child.wait())
+  const first = child.wait()
+  const second = child.wait()
+  assert.equal(first, second, 'wait() must return the same promise')
+  const result = await first
+  assert.equal(result.success, true, `expected success, got ${JSON.stringify(result)}`)
+  assert.equal((await child.wait()).success, true, 'a later wait() resolves too')
 })
 
-test('maxOutputBytes is validated at spawn time', async () => {
-  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-validate'))
-  assert.throws(() => spawnShell(sandbox, echoMarkers, { maxOutputBytes: 1024 }), /maxOutputBytes/)
-  assert.throws(
-    () => spawnShell(sandbox, echoMarkers, { stdout: 'pipe', maxOutputBytes: -1 }),
-    /maxOutputBytes/,
-  )
+test('drives a persistent shell interactively (state persists across turns)', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-shell'))
+  const shell = isWindows
+    ? sandbox.spawn('cmd', ['/D', '/Q'], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+    : sandbox.spawn('/bin/sh', [], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  const exited = shell.wait()
+
+  // Keep one manual iterator across turns; its return() is never called, so
+  // the stream survives between reads — the point of a persistent shell.
+  shell.stdout.setEncoding('utf8')
+  const output = shell.stdout.iterator({ destroyOnReturn: false })
+  async function readUntil(marker) {
+    let seen = ''
+    while (!seen.includes(marker)) {
+      const { value, done } = await output.next()
+      assert.ok(!done, `stdout ended before ${JSON.stringify(marker)}; saw: ${seen}`)
+      seen += value
+    }
+    return seen
+  }
+
+  if (isWindows) {
+    shell.stdin.write('set GUARDRAIL_MARK=guardrail-persists\r\n')
+    shell.stdin.write('echo turn-one-%GUARDRAIL_MARK%\r\n')
+    await readUntil('turn-one-guardrail-persists')
+    shell.stdin.write('echo turn-two-%GUARDRAIL_MARK%\r\n')
+    await readUntil('turn-two-guardrail-persists')
+  } else {
+    shell.stdin.write('GUARDRAIL_MARK=guardrail-persists\n')
+    shell.stdin.write('echo "turn-one-$GUARDRAIL_MARK"\n')
+    await readUntil('turn-one-guardrail-persists')
+    shell.stdin.write('echo "turn-two-$GUARDRAIL_MARK"\n')
+    await readUntil('turn-two-guardrail-persists')
+  }
+
+  // EOF on stdin ends the shell session.
+  shell.stdin.end()
+  const result = await exited
+  assert.equal(result.success, true, `shell exit: ${JSON.stringify(result)}`)
+})
+
+test('kill() unblocks a persistent child and ends its streams', async () => {
+  const sandbox = await guardrail.Sandbox.build(shellSandboxOptions('smoke-kill'))
+  const child = isWindows
+    ? sandbox.spawn('cmd', ['/D', '/Q'], { stdin: 'pipe', stdout: 'pipe' })
+    : sandbox.spawn('/bin/sh', [], { stdin: 'pipe', stdout: 'pipe' })
+  const exited = child.wait()
+
+  child.kill()
+  const [out, result] = await Promise.all([text(child.stdout), exited])
+  assert.equal(result.success, false, 'a killed child must not exit cleanly')
+  assert.equal(typeof out, 'string', 'stdout reaches EOF after the kill')
 })

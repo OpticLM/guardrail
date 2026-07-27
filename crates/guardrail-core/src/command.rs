@@ -17,12 +17,12 @@ pub enum StdioMode {
     /// Connect the stream to the platform null device.
     Null,
     /// Connect the stream to the parent through a pipe. The parent end is
-    /// available on the spawned child via [`get_stdin`], [`get_stdout`], and
-    /// [`get_stderr`], or collected by [`wait_with_output`].
+    /// available on the spawned child via [`take_stdin`], [`take_stdout`],
+    /// and [`take_stderr`], or collected by [`wait_with_output`].
     ///
-    /// [`get_stdin`]: crate::SandboxChild::get_stdin
-    /// [`get_stdout`]: crate::SandboxChild::get_stdout
-    /// [`get_stderr`]: crate::SandboxChild::get_stderr
+    /// [`take_stdin`]: crate::SandboxChild::take_stdin
+    /// [`take_stdout`]: crate::SandboxChild::take_stdout
+    /// [`take_stderr`]: crate::SandboxChild::take_stderr
     /// [`wait_with_output`]: crate::SandboxChild::wait_with_output
     Piped,
     /// Connect the stream to this open file (read for stdin, write for

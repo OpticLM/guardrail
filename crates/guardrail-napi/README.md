@@ -33,25 +33,129 @@ const sandbox = await Sandbox.build({
 
 const child = sandbox.spawn('/usr/bin/true')
 const result = await child.wait()
-// result: { code, signal, success, stdout?, stderr? }
+// result: { code, signal, success }
 ```
 
 `spawn(command, args, options)` is also available as a one-shot wrapper, but
 `await Sandbox.build(options)` is preferred when running more than one command.
 
-Standard streams are inherited by default. To capture output instead, pass
-per-spawn `stdout`/`stderr` dispositions (`'inherit'` | `'pipe'` | `'ignore'`)
-and read the Buffers from the `wait()` result:
+Standard streams are inherited by default. Pass per-spawn `stdin`/`stdout`/
+`stderr` dispositions (`'inherit'` | `'pipe'` | `'ignore'`) to wire them up;
+`'pipe'` attaches real Node streams to the child handle, exactly like
+`child_process.spawn`:
 
 ```js
-const child = sandbox.spawn('/usr/bin/uname', ['-a'], {
-  stdout: 'pipe',
-  stderr: 'pipe',
-  maxOutputBytes: 1024 * 1024, // optional per-stream cap
-})
-const result = await child.wait()
-console.log(result.stdout.toString())
+import { text } from 'node:stream/consumers'
+
+const child = sandbox.spawn('/usr/bin/uname', ['-a'], { stdout: 'pipe' })
+const [out, result] = await Promise.all([text(child.stdout), child.wait()])
+console.log(out)
 ```
+
+`wait()` resolves with exit status only and is memoized — await it as many
+times as you like. Piped output is consumed from `child.stdout` /
+`child.stderr` (`Readable`); `child.stdin` (`Writable`) feeds the child when
+spawned with `stdin: 'pipe'`. See
+[Streaming stdio for LLM tool loops](#streaming-stdio-for-llm-tool-loops) for
+the interactive patterns.
+
+## Streaming stdio for LLM tool loops
+
+The stdio surface is built for the agent use case: a host that spawns a
+confined child, feeds it input incrementally, and reads output as it appears.
+Guardrail stays at the plumbing level — `child.stdin` is a `Writable`,
+`child.stdout` and `child.stderr` are `Readable`s (async-iterable,
+`pipe()`-able) — so any protocol you would run over `child_process.spawn`
+runs unchanged over a sandboxed child, and the framing between the LLM and
+the child belongs to your application.
+
+### Persistent shell
+
+Spawn the platform shell once with all three streams piped and keep it for
+the whole session. It is one process, so variables, functions, and the
+working directory persist between commands, while the sandbox policy stays
+enforced for everything the shell — or anything it starts — does:
+
+```js
+const sandbox = await Sandbox.build({ fs, env, network: 'deny' })
+const shell = sandbox.spawn('/bin/sh', [], {
+  stdin: 'pipe',
+  stdout: 'pipe',
+  stderr: 'ignore', // stderr is folded into stdout below
+})
+const exited = shell.wait() // resolves if the shell dies; memoized
+
+// One transcript for the LLM: redirect the session's stderr into stdout.
+shell.stdin.write('exec 2>&1\n')
+
+shell.stdout.setEncoding('utf8')
+// One iterator for the whole session; destroyOnReturn: false keeps the
+// stream open between commands.
+const output = shell.stdout.iterator({ destroyOnReturn: false })
+
+// Frame each command with a sentinel so the loop knows where output ends.
+let turn = 0
+async function run(command) {
+  const sentinel = `__guardrail_done_${turn++}_`
+  shell.stdin.write(`${command}\necho ${sentinel}$?\n`)
+  let seen = ''
+  while (true) {
+    const at = seen.indexOf(sentinel)
+    const end = at === -1 ? -1 : seen.indexOf('\n', at)
+    if (end !== -1) {
+      return {
+        output: seen.slice(0, at),
+        exitCode: Number(seen.slice(at + sentinel.length, end)),
+      }
+    }
+    const { value, done } = await output.next()
+    if (done) throw new Error(`shell exited: ${JSON.stringify(await exited)}`)
+    seen += value
+  }
+}
+
+await run('FOO=hello')                      // state persists in the shell…
+console.log(await run('echo "$FOO world"')) // …so later commands see it
+
+shell.stdin.end() // EOF ends the session
+console.log(await exited)
+```
+
+The LLM side of the loop is now trivial: hand `run()`'s output back to the
+model, execute the next command it produces, and `kill()` — safe at any
+time, even with `wait()` pending — when the session should die. On Windows
+spawn `cmd` with `['/D', '/Q']` (or `pwsh`) instead of `/bin/sh`, framing
+with `echo ${sentinel}%ERRORLEVEL%` (and per-command `2>&1`, since cmd has no
+`exec`); the stream mechanics are identical.
+
+Notes for long-lived children:
+
+- These are pipes, not a PTY. Shells run non-interactively (no prompts, no
+  job control), which is what a machine-driven loop wants; programs that
+  insist on a terminal need a PTY layer, which guardrail does not provide.
+- Backpressure is structural. A chunk is read only when you ask for one, so
+  a child that outruns its consumer blocks on a full OS pipe (~64 KiB)
+  instead of growing host memory. The reverse also holds: if you pipe a
+  stream, read it — a child blocked on a full pipe never exits, so `wait()`
+  without a reader deadlocks exactly like `child_process`.
+- To cap a hostile child's output, count bytes as you read and kill on
+  overrun:
+
+  ```js
+  let bytes = 0
+  for await (const chunk of child.stdout) {
+    bytes += chunk.length
+    if (bytes > LIMIT) {
+      child.kill()
+      break
+    }
+    consume(chunk)
+  }
+  ```
+
+- Each piped stream (and each pending `wait()`) is serviced by a dedicated
+  native thread rather than Node's small libuv threadpool, so idle
+  persistent shells do not starve `fs`/`dns` work in the host process.
 
 ## Linux Setup Guide
 
@@ -130,10 +234,11 @@ Notes:
   exception. A single writable parent such as `workRoot` is easier to reason
   about than separate writable grants for every child directory.
 - To consume a command's output from the host, spawn it with
-  `stdout: 'pipe'` / `stderr: 'pipe'` and read the Buffers from the `wait()`
-  result, setting `maxOutputBytes` when the child is not fully trusted. For
-  very large logs, redirecting into a file under `workRoot` remains cheaper
-  than buffering.
+  `stdout: 'pipe'` / `stderr: 'pipe'` and read the returned Node streams
+  (`await text(child.stdout)` from `node:stream/consumers` for exec-style
+  collection). When the child is not fully trusted, count bytes as you read
+  and `kill()` past a limit. For very large logs, redirecting into a file
+  under `workRoot` remains cheaper than collecting in memory.
 
 ### Coreutils
 
@@ -1202,14 +1307,15 @@ package SID and are not isolated from each other.
   `Sandbox.build()` or one-shot `spawn()`, not `probeSupport()`.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.
-- Each standard stream follows its per-spawn disposition. `stdin` is always
-  inherited from the parent process. `stdout` and `stderr` default to
-  `'inherit'`; `'pipe'` buffers the stream and returns it as a Buffer on the
-  `wait()` result (`result.stdout` / `result.stderr`), and `'ignore'` connects
-  the platform null device. A `'pipe'` stream is only drained while `wait()`
-  runs, so always await it — an unread child can otherwise block on a full
-  pipe. `maxOutputBytes` caps each piped stream; when a stream exceeds it, the
-  child is killed and `wait()` rejects with an error naming the limit.
+- Each standard stream follows its per-spawn disposition (`'inherit'` |
+  `'pipe'` | `'ignore'`, default `'inherit'`). `'pipe'` attaches Node streams
+  to the child handle — `child.stdin` (`Writable`), `child.stdout` and
+  `child.stderr` (`Readable`) — and `'ignore'` connects the platform null
+  device. `wait()` resolves with exit status only, is memoized, and never
+  consumes the streams. Reads are demand-driven: an unread piped child blocks
+  on a full OS pipe rather than growing host memory, so if you pipe a stream,
+  read it — otherwise the child (and `wait()`) can block forever, as with
+  `child_process`.
 - No other parent file descriptor or handle reaches the child: on Linux and
   macOS every descriptor above stderr is closed at exec, and on Windows an
   explicit handle list restricts inheritance to the three standard streams.
@@ -1221,8 +1327,9 @@ package SID and are not isolated from each other.
   const child = sandbox.spawn('/usr/bin/mytool', ['--flag'], { cwd: workRoot })
   ```
 
-- `child.kill()` is best-effort once `wait()` is in flight: it sends SIGKILL on
-  Unix and is unsupported on Windows in that state.
+- `child.kill()` is safe at any time — before, during, or after `wait()` (a
+  no-op once the child has been reaped). It sends SIGKILL on Unix and
+  terminates the Job Object (the whole process tree) on Windows.
 - `linuxUnixSockets` is Linux-only and ignored on macOS and Windows. On Linux
   it is enforced only on Landlock ABI v9+ and ignored without path validation
   on older ABIs.

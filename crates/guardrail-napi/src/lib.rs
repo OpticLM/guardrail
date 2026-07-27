@@ -2,19 +2,25 @@
 //!
 //! Exposes a reusable [`Sandbox`] object plus a one-shot [`spawn`] wrapper that
 //! launches a child process confined by the platform backend, returning a
-//! [`SandboxChild`] handle with async `wait()` and `kill()`.
+//! [`SandboxChild`] handle with async `wait()` and `kill()` and per-stream
+//! primitives (`readStdout`/`readStderr`/`writeStdin`/`endStdin`) that the
+//! hand-written `index.js` wrapper composes into Node `Readable`/`Writable`
+//! streams. Blocking pipe and wait calls run on dedicated OS threads so a
+//! long-lived child (e.g. a persistent shell driven by an LLM tool loop)
+//! never parks a libuv threadpool worker.
 #![deny(clippy::all)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
-use std::process::{ChildStderr, ChildStdout, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::process::{ChildStdin, ExitStatus};
+use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
 
-use napi::Task;
 use napi::bindgen_prelude::*;
+use napi::{Env, JsDeferred, Task};
 use napi_derive::napi;
 
 use guardrail::{
@@ -65,9 +71,10 @@ impl From<JsUserNamespacePolicy> for UserNamespacePolicy {
     }
 }
 
-/// Disposition of a child output stream: `"inherit"` | `"pipe"` | `"ignore"`.
-/// `"inherit"` shares the parent's stream, `"pipe"` buffers the stream and
-/// returns it from `wait()`, `"ignore"` connects the platform null device.
+/// Disposition of a child standard stream: `"inherit"` | `"pipe"` |
+/// `"ignore"`. `"inherit"` shares the parent's stream, `"pipe"` connects a
+/// pipe surfaced as a Node stream on the child handle, and `"ignore"`
+/// connects the platform null device.
 #[napi(string_enum, js_name = "StdioMode")]
 pub enum JsStdioMode {
     #[napi(value = "inherit")]
@@ -219,16 +226,16 @@ pub struct SpawnOptions {
     pub windows_acl_verification: Option<String>,
     /// Working directory for the child. Defaults to the parent's cwd.
     pub cwd: Option<String>,
+    /// stdin disposition; `"inherit"` (default) shares the parent's stream,
+    /// `"pipe"` exposes a `Writable` as `child.stdin`, `"ignore"` connects
+    /// the null device.
+    pub stdin: Option<JsStdioMode>,
     /// stdout disposition; `"inherit"` (default) shares the parent's stream,
-    /// `"pipe"` buffers output returned by `wait()`, `"ignore"` uses the null
-    /// device.
+    /// `"pipe"` exposes a `Readable` as `child.stdout`, `"ignore"` connects
+    /// the null device.
     pub stdout: Option<JsStdioMode>,
-    /// stderr disposition; same values as `stdout`.
+    /// stderr disposition; same values as `stdout` (`child.stderr`).
     pub stderr: Option<JsStdioMode>,
-    /// Per-stream cap in bytes for `"pipe"` output. When a piped stream
-    /// exceeds it, the child is killed and `wait()` rejects. No cap when
-    /// omitted.
-    pub max_output_bytes: Option<i64>,
 }
 
 /// Per-spawn launch options for a reusable [`Sandbox`].
@@ -237,16 +244,16 @@ pub struct SpawnOptions {
 pub struct SandboxSpawnOptions {
     /// Working directory for the child. Defaults to the parent's cwd.
     pub cwd: Option<String>,
+    /// stdin disposition; `"inherit"` (default) shares the parent's stream,
+    /// `"pipe"` exposes a `Writable` as `child.stdin`, `"ignore"` connects
+    /// the null device.
+    pub stdin: Option<JsStdioMode>,
     /// stdout disposition; `"inherit"` (default) shares the parent's stream,
-    /// `"pipe"` buffers output returned by `wait()`, `"ignore"` uses the null
-    /// device.
+    /// `"pipe"` exposes a `Readable` as `child.stdout`, `"ignore"` connects
+    /// the null device.
     pub stdout: Option<JsStdioMode>,
-    /// stderr disposition; same values as `stdout`.
+    /// stderr disposition; same values as `stdout` (`child.stderr`).
     pub stderr: Option<JsStdioMode>,
-    /// Per-stream cap in bytes for `"pipe"` output. When a piped stream
-    /// exceeds it, the child is killed and `wait()` rejects. No cap when
-    /// omitted.
-    pub max_output_bytes: Option<i64>,
 }
 
 /// The result of awaiting a child's exit.
@@ -258,10 +265,6 @@ pub struct ExitResult {
     pub signal: Option<i32>,
     /// `true` iff the process exited cleanly with code 0.
     pub success: bool,
-    /// Buffered stdout; present only when the stream was spawned with `"pipe"`.
-    pub stdout: Option<Buffer>,
-    /// Buffered stderr; present only when the stream was spawned with `"pipe"`.
-    pub stderr: Option<Buffer>,
 }
 
 impl From<ExitStatus> for ExitResult {
@@ -278,8 +281,6 @@ impl From<ExitStatus> for ExitResult {
             code: status.code(),
             signal,
             success: status.success(),
-            stdout: None,
-            stderr: None,
         }
     }
 }
@@ -376,9 +377,9 @@ impl From<SpawnOptions> for (SandboxOptions, SandboxSpawnOptions) {
             },
             SandboxSpawnOptions {
                 cwd: options.cwd,
+                stdin: options.stdin,
                 stdout: options.stdout,
                 stderr: options.stderr,
-                max_output_bytes: options.max_output_bytes,
             },
         )
     }
@@ -539,31 +540,17 @@ fn spawn_with_backend(
     args: Option<Vec<String>>,
     launch: SandboxSpawnOptions,
 ) -> Result<SandboxChild> {
-    let piped = matches!(launch.stdout, Some(JsStdioMode::Pipe))
-        || matches!(launch.stderr, Some(JsStdioMode::Pipe));
-    let max_output_bytes = match launch.max_output_bytes {
-        None => None,
-        Some(n) if n < 0 => {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "maxOutputBytes must be non-negative",
-            ));
-        }
-        Some(_) if !piped => {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "maxOutputBytes requires stdout or stderr set to 'pipe'",
-            ));
-        }
-        Some(n) => Some(n.cast_unsigned()),
-    };
-
     let mut cmd = SandboxCommand::new(command);
     if let Some(args) = args {
         cmd.args = args.into_iter().map(Into::into).collect();
     }
     if let Some(cwd) = launch.cwd {
         cmd.current_dir = Some(cwd.into());
+    }
+    match launch.stdin.unwrap_or(JsStdioMode::Inherit) {
+        JsStdioMode::Pipe => cmd.stdin = StdioMode::Piped,
+        JsStdioMode::Ignore => cmd.stdin = StdioMode::Null,
+        JsStdioMode::Inherit => {}
     }
     match launch.stdout.unwrap_or(JsStdioMode::Inherit) {
         JsStdioMode::Pipe => cmd.stdout = StdioMode::Piped,
@@ -579,14 +566,15 @@ fn spawn_with_backend(
     materialize_inherited_stdio(&mut cmd)?;
 
     let mut child = backend.spawn(cmd).map_err(to_napi_err)?;
-    let stdout_pipe = child.get_stdout();
-    let stderr_pipe = child.get_stderr();
+    let stdin = child.take_stdin().map(StdinWriter::spawn);
+    let stdout = child.take_stdout().map(PipeReader::spawn);
+    let stderr = child.take_stderr().map(PipeReader::spawn);
 
     Ok(SandboxChild {
         inner: SharedSandboxChild::new(child),
-        stdout_pipe: Mutex::new(stdout_pipe),
-        stderr_pipe: Mutex::new(stderr_pipe),
-        max_output_bytes,
+        stdin,
+        stdout,
+        stderr,
     })
 }
 
@@ -618,12 +606,16 @@ fn duplicate_stdio(fd: BorrowedFd<'_>, name: &str) -> Result<StdioMode> {
 }
 
 /// Handle to a spawned, sandboxed child process.
+///
+/// The methods here are the raw binding surface; the package's hand-written
+/// `index.js` wraps them into the public class whose `stdin`/`stdout`/`stderr`
+/// are real Node streams.
 #[napi]
 pub struct SandboxChild {
     inner: SharedSandboxChild,
-    stdout_pipe: Mutex<Option<ChildStdout>>,
-    stderr_pipe: Mutex<Option<ChildStderr>>,
-    max_output_bytes: Option<u64>,
+    stdin: Option<StdinWriter>,
+    stdout: Option<PipeReader>,
+    stderr: Option<PipeReader>,
 }
 
 #[napi]
@@ -634,158 +626,221 @@ impl SandboxChild {
         self.inner.pid()
     }
 
-    /// Wait for the child to exit. Resolves with its [`ExitResult`], including
-    /// buffered `stdout`/`stderr` for streams spawned with `"pipe"`. A piped
-    /// stream is only drained while `wait()` runs, so always await it. Calling
-    /// `wait()` while another wait is active, or after one succeeds, rejects.
-    /// A failed wait may be retried, but a retry cannot return output already
-    /// consumed by the failed attempt.
+    /// Wait for the child to exit on a dedicated thread, resolving with its
+    /// [`ExitResult`]. Calling `wait()` while another wait is active, or
+    /// after one succeeds, rejects; the `index.js` wrapper memoizes the
+    /// promise so JS callers can await it any number of times.
     #[napi(ts_return_type = "Promise<ExitResult>")]
-    pub fn wait(&self) -> AsyncTask<WaitTask> {
-        AsyncTask::new(WaitTask {
-            inner: self.inner.clone(),
-            stdout: take_pipe(&self.stdout_pipe),
-            stderr: take_pipe(&self.stderr_pipe),
-            max_output_bytes: self.max_output_bytes,
-        })
+    pub fn wait<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        let (deferred, promise) = env.create_deferred::<ExitResult, ExitResolver>()?;
+        let inner = self.inner.clone();
+        std::thread::spawn(move || match inner.wait() {
+            Ok(status) => deferred.resolve(Box::new(move |_| Ok(ExitResult::from(status)))),
+            Err(err) => deferred.reject(Error::new(
+                Status::GenericFailure,
+                format!("failed to wait for child: {err}"),
+            )),
+        });
+        Ok(promise)
     }
 
-    /// Kill the child immediately. Best-effort: if `wait()` is already in
-    /// flight, killing falls back to an OS signal on Unix and is unsupported on
-    /// Windows (see the package README).
+    /// Kill the child immediately: SIGKILL on Unix, Job Object termination on
+    /// Windows. Safe at any time — before, during, or after `wait()` (a no-op
+    /// once the child has been reaped).
     #[napi]
     pub fn kill(&self) -> Result<()> {
         self.inner
             .kill()
             .map_err(|e| Error::new(Status::GenericFailure, format!("failed to kill child: {e}")))
     }
-}
 
-fn take_pipe<T>(pipe: &Mutex<Option<T>>) -> Option<T> {
-    pipe.lock().unwrap_or_else(|e| e.into_inner()).take()
-}
-
-/// libuv-threadpool task backing the async `wait()`.
-pub struct WaitTask {
-    inner: SharedSandboxChild,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
-    max_output_bytes: Option<u64>,
-}
-
-/// Exit status plus piped output drained on the threadpool; shaped into an
-/// [`ExitResult`] with JS `Buffer`s on the JS thread in `resolve`.
-pub struct WaitOutput {
-    status: ExitStatus,
-    stdout: Option<Vec<u8>>,
-    stderr: Option<Vec<u8>>,
-}
-
-struct DrainOutcome {
-    data: Vec<u8>,
-    exceeded: bool,
-}
-
-/// Read `pipe` to EOF, or until `cap` would be exceeded — then kill the child
-/// (best effort; returning drops the read end, which unblocks the child with a
-/// broken pipe even if the kill failed) and report the overrun.
-fn drain_capped(
-    mut pipe: impl Read,
-    cap: Option<u64>,
-    child: &SharedSandboxChild,
-) -> std::io::Result<DrainOutcome> {
-    let mut data = Vec::new();
-    let Some(cap) = cap else {
-        pipe.read_to_end(&mut data)?;
-        return Ok(DrainOutcome {
-            data,
-            exceeded: false,
-        });
-    };
-    // Read at most cap + 1 bytes: the extra byte detects an overrun without
-    // buffering the child's entire output.
-    pipe.take(cap.saturating_add(1)).read_to_end(&mut data)?;
-    let exceeded = u64::try_from(data.len()).unwrap_or(u64::MAX) > cap;
-    if exceeded {
-        drop(child.kill());
+    /// Resolve with the next stdout chunk, or `null` at end-of-stream.
+    /// Primitive consumed by the `index.js` `Readable`; issue one call at a
+    /// time and stop after `null`.
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn read_stdout<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        read_chunk(env, self.stdout.as_ref())
     }
-    Ok(DrainOutcome { data, exceeded })
+
+    /// Resolve with the next stderr chunk, or `null` at end-of-stream. See
+    /// [`read_stdout`](Self::read_stdout).
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn read_stderr<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        read_chunk(env, self.stderr.as_ref())
+    }
+
+    /// Write `data` to the child's piped stdin, resolving once the OS
+    /// accepted the bytes — the backpressure signal the `index.js` `Writable`
+    /// propagates. Rejects when stdin was not spawned with `"pipe"` or has
+    /// already been ended.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn write_stdin<'env>(&self, env: &'env Env, data: Buffer) -> Result<Object<'env>> {
+        let (deferred, promise) = env.create_deferred::<(), UnitResolver>()?;
+        match &self.stdin {
+            Some(writer) => writer.write(data.to_vec(), deferred),
+            None => deferred.reject(Error::new(
+                Status::GenericFailure,
+                "stdin is not piped; spawn with stdin: 'pipe'",
+            )),
+        }
+        Ok(promise)
+    }
+
+    /// Close the child's piped stdin once queued writes have flushed,
+    /// delivering EOF to the child. Idempotent; a no-op when stdin was never
+    /// piped.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn end_stdin<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        let (deferred, promise) = env.create_deferred::<(), UnitResolver>()?;
+        match &self.stdin {
+            Some(writer) => writer.end(deferred),
+            None => deferred.resolve(Box::new(|_| Ok(()))),
+        }
+        Ok(promise)
+    }
 }
 
-impl Task for WaitTask {
-    type Output = WaitOutput;
-    type JsValue = ExitResult;
+// Boxed resolver aliases: JsDeferred is generic over its resolver closure, so
+// channel and helper signatures need a nameable type.
+type ChunkResolver = Box<dyn FnOnce(Env) -> Result<Option<Buffer>> + Send>;
+type ChunkDeferred = JsDeferred<Option<Buffer>, ChunkResolver>;
+type UnitResolver = Box<dyn FnOnce(Env) -> Result<()> + Send>;
+type UnitDeferred = JsDeferred<(), UnitResolver>;
+type ExitResolver = Box<dyn FnOnce(Env) -> Result<ExitResult> + Send>;
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        // The wait/kill coordination (take-out-for-wait, reaped guard, raw
-        // signal fallback) lives in `SharedSandboxChild`; this drains any
-        // piped output, blocks until the child exits, and shapes the result
-        // for JS.
-        let cap = self.max_output_bytes;
-        // stderr drains on a helper thread while stdout drains inline, so the
-        // child cannot deadlock by filling one pipe while the other is read.
-        let stderr_thread = self.stderr.take().map(|pipe| {
-            let child = self.inner.clone();
-            std::thread::spawn(move || drain_capped(pipe, cap, &child))
+fn io_error(context: &str, err: std::io::Error) -> Error {
+    Error::new(Status::GenericFailure, format!("{context}: {err}"))
+}
+
+/// Demand-driven reader for one piped output stream.
+///
+/// A dedicated OS thread owns the pipe end and blocks in `read` only while a
+/// JS read is pending, so an idle child costs one parked thread — never a
+/// libuv threadpool worker, whose small process-wide pool (4 by default) must
+/// stay available to Node. Reading only on demand also bounds buffering at
+/// one chunk plus the OS pipe capacity: a child that outruns its consumer
+/// blocks on a full pipe instead of growing host memory.
+struct PipeReader {
+    demand: Sender<ChunkDeferred>,
+}
+
+impl PipeReader {
+    fn spawn(pipe: impl Read + Send + 'static) -> Self {
+        let (demand, requests) = channel::<ChunkDeferred>();
+        std::thread::spawn(move || {
+            let mut pipe = Some(pipe);
+            let mut buffer = vec![0u8; 64 * 1024];
+            for deferred in requests {
+                let Some(open) = pipe.as_mut() else {
+                    // End-of-stream is sticky once EOF or a read error closed
+                    // the pipe.
+                    deferred.resolve(Box::new(|_| Ok(None)));
+                    continue;
+                };
+                match open.read(&mut buffer) {
+                    Ok(0) => {
+                        pipe = None;
+                        deferred.resolve(Box::new(|_| Ok(None)));
+                    }
+                    Ok(read) => {
+                        let chunk = buffer.get(..read).unwrap_or_default().to_vec();
+                        deferred.resolve(Box::new(move |_| Ok(Some(Buffer::from(chunk)))));
+                    }
+                    Err(err) => {
+                        pipe = None;
+                        deferred.reject(io_error("failed to read piped output", err));
+                    }
+                }
+            }
         });
-        let stdout_drain = self
-            .stdout
-            .take()
-            .map(|pipe| drain_capped(pipe, cap, &self.inner));
-        let stderr_drain = stderr_thread.map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| Err(std::io::Error::other("stderr drain thread panicked")))
-        });
+        Self { demand }
+    }
+}
 
-        // Both pipes are at EOF or dropped, so the child is reaped in every
-        // path — overrun, drain error, or success — before any error is
-        // surfaced.
-        let status = self.inner.wait();
-
-        for (name, drain) in [("stdout", &stdout_drain), ("stderr", &stderr_drain)] {
-            if let Some(Ok(outcome)) = drain
-                && outcome.exceeded
-            {
-                return Err(Error::new(
-                    Status::GenericFailure,
-                    format!(
-                        "child {name} exceeded maxOutputBytes ({}); the child was killed",
-                        cap.unwrap_or(0),
-                    ),
-                ));
+fn read_chunk<'env>(env: &'env Env, reader: Option<&PipeReader>) -> Result<Object<'env>> {
+    let (deferred, promise) = env.create_deferred::<Option<Buffer>, ChunkResolver>()?;
+    match reader {
+        Some(reader) => {
+            // The reader thread outlives its sender, so a failed send can only
+            // mean it is gone; answer end-of-stream rather than wedging the
+            // pending promise.
+            if let Err(returned) = reader.demand.send(deferred) {
+                returned.0.resolve(Box::new(|_| Ok(None)));
             }
         }
-        let to_data = |drain: Option<std::io::Result<DrainOutcome>>| {
-            drain
-                .transpose()
-                .map_err(|e| {
-                    Error::new(
-                        Status::GenericFailure,
-                        format!("failed to read piped output: {e}"),
-                    )
-                })
-                .map(|outcome| outcome.map(|o| o.data))
-        };
-        let stdout = to_data(stdout_drain)?;
-        let stderr = to_data(stderr_drain)?;
-        let status = status.map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("failed to wait for child: {e}"),
-            )
-        })?;
-        Ok(WaitOutput {
-            status,
-            stdout,
-            stderr,
-        })
+        // Stream not piped: permanent end-of-stream instead of an error, so
+        // wrapper misuse cannot wedge a Readable.
+        None => deferred.resolve(Box::new(|_| Ok(None))),
+    }
+    Ok(promise)
+}
+
+/// Order-preserving writer for the child's piped stdin.
+///
+/// A dedicated OS thread owns the write end: a full pipe (the child stopped
+/// reading) blocks that thread rather than the JS thread or a libuv worker,
+/// and each write's promise resolves only after the OS accepted the bytes.
+struct StdinWriter {
+    requests: Sender<StdinRequest>,
+}
+
+enum StdinRequest {
+    Write(Vec<u8>, UnitDeferred),
+    End(UnitDeferred),
+}
+
+impl StdinWriter {
+    fn spawn(pipe: ChildStdin) -> Self {
+        let (requests, incoming) = channel::<StdinRequest>();
+        std::thread::spawn(move || {
+            let mut pipe = Some(pipe);
+            for request in incoming {
+                match request {
+                    StdinRequest::Write(data, deferred) => match pipe.as_mut() {
+                        Some(open) => match open.write_all(&data) {
+                            Ok(()) => deferred.resolve(Box::new(|_| Ok(()))),
+                            Err(err) => {
+                                // A broken pipe (the child exited) stays
+                                // broken; drop our end so the child side sees
+                                // EOF either way.
+                                pipe = None;
+                                deferred.reject(io_error("failed to write to stdin", err));
+                            }
+                        },
+                        None => deferred.reject(Error::new(
+                            Status::GenericFailure,
+                            "stdin has already been ended",
+                        )),
+                    },
+                    StdinRequest::End(deferred) => {
+                        // Requests are handled in arrival order, so queued
+                        // writes have flushed; dropping the write end delivers
+                        // EOF.
+                        pipe = None;
+                        deferred.resolve(Box::new(|_| Ok(())));
+                    }
+                }
+            }
+        });
+        Self { requests }
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        let mut result = ExitResult::from(output.status);
-        result.stdout = output.stdout.map(Buffer::from);
-        result.stderr = output.stderr.map(Buffer::from);
-        Ok(result)
+    fn write(&self, data: Vec<u8>, deferred: UnitDeferred) {
+        if let Err(returned) = self.requests.send(StdinRequest::Write(data, deferred))
+            && let StdinRequest::Write(_, deferred) = returned.0
+        {
+            deferred.reject(Error::new(
+                Status::GenericFailure,
+                "stdin writer is no longer running",
+            ));
+        }
+    }
+
+    fn end(&self, deferred: UnitDeferred) {
+        if let Err(returned) = self.requests.send(StdinRequest::End(deferred))
+            && let StdinRequest::End(deferred) = returned.0
+        {
+            deferred.resolve(Box::new(|_| Ok(())));
+        }
     }
 }

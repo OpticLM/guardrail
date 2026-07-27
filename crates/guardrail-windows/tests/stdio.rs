@@ -80,7 +80,7 @@ fn piped_stdin_reaches_the_child() {
     command.stdout = StdioMode::Piped;
 
     let mut child = spawn_child(&config, command);
-    let mut stdin = child.get_stdin().expect("piped stdin end");
+    let mut stdin = child.take_stdin().expect("piped stdin end");
     stdin
         .write_all(b"guardrail-stdin-roundtrip")
         .expect("write stdin");

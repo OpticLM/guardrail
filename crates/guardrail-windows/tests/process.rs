@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use guardrail_core::{
     Backend, FsAccess, NetworkPolicy, ResourceLimits, SandboxChild, SandboxCommand, SandboxConfig,
-    StdioMode, UserNamespacePolicy,
+    SharedSandboxChild, StdioMode, UserNamespacePolicy,
 };
 use guardrail_windows::WindowsBackend;
 
@@ -49,9 +49,9 @@ fn raw_child_accessors_return_documented_results() {
         child.as_child_mut().is_none(),
         "a raw Windows child wraps no std::process::Child"
     );
-    assert!(child.get_stdin().is_none(), "stdin was not piped");
-    assert!(child.get_stdout().is_none(), "stdout was not piped");
-    assert!(child.get_stderr().is_none(), "stderr was not piped");
+    assert!(child.take_stdin().is_none(), "stdin was not piped");
+    assert!(child.take_stdout().is_none(), "stdout was not piped");
+    assert!(child.take_stderr().is_none(), "stderr was not piped");
 
     let mut child = child
         .try_into_child()
@@ -72,6 +72,30 @@ fn failed_unwrap_returns_a_killable_handle() {
         .expect_err("a raw Windows child cannot unwrap into a std::process::Child");
     child.kill().expect("kill through the returned handle");
     let status = child.wait().expect("wait after kill");
+    assert!(!status.success(), "a killed spinner must not exit cleanly");
+}
+
+#[test]
+fn shared_child_kill_terminates_inflight_wait() {
+    // The persistent-child lifecycle: wait() pending for the child's whole
+    // life, kill() as the shutdown path. The duplicated Job Object handle in
+    // SharedSandboxChild must terminate the tree even while the wait blocks.
+    let config = config_with_probe_grant();
+    let mut command = probe();
+    command.args = vec!["spin".into()];
+
+    let child = SharedSandboxChild::new(spawn_child(&config, command));
+    let waiter = child.clone();
+    let handle = std::thread::spawn(move || waiter.wait());
+    // Give the waiter time to enter the blocking wait. If kill() wins the
+    // race it goes through the same job-handle path, so the assertion holds
+    // either way.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    child.kill().expect("kill while wait() is in flight");
+    let status = handle
+        .join()
+        .expect("waiter thread panicked")
+        .expect("wait after kill");
     assert!(!status.success(), "a killed spinner must not exit cleanly");
 }
 

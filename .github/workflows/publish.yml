@@ -27,25 +27,25 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --esm --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-unknown-linux-gnu --use-napi-cross
             test: true
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --esm --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: macos-26
             target: x86_64-apple-darwin
-            build: pnpm exec napi build --platform --release --esm --target x86_64-apple-darwin
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-apple-darwin
           - host: macos-26
             target: aarch64-apple-darwin
-            build: pnpm exec napi build --platform --release --esm --target aarch64-apple-darwin
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-apple-darwin
             test: true
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --esm --target x86_64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-pc-windows-msvc
             test: true
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --esm --target aarch64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-pc-windows-msvc
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -94,7 +94,7 @@ jobs:
       - name: Test binding
         if: matrix.settings.test
         # The loader prefers the binding built by this job (guardrail.*.node
-        # next to index.js). The version check makes a fallback to a previously
+        # next to binding.js). The version check makes a fallback to a previously
         # published @opticlm/guardrail-* binary fail loudly instead of passing
         # the test against a stale binding.
         env:
@@ -162,7 +162,7 @@ jobs:
         # user + mount + IPC namespaces.
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Smoke test the packaged host binding
-        # Remove the downloaded copies next to index.js so the committed loader
+        # Remove the downloaded copies next to binding.js so the committed loader
         # can only resolve the artifact staged into its final npm package layout.
         run: |
           rm -- "${APP_NAME}".*.node
