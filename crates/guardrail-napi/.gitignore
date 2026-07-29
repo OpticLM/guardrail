@@ -1,6 +1,6 @@
 node_modules/
 target/
-# Compiled native addon (per-platform; rebuilt by `napi build`)
+index.mjs
+index.cjs
+index.d.ts
 *.node
-# Generated per-platform npm package dirs (regenerated in CI by plan 002)
-npm/

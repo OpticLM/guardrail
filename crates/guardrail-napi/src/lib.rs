@@ -4,7 +4,7 @@
 //! launches a child process confined by the platform backend, returning a
 //! [`SandboxChild`] handle with async `wait()` and `kill()` and per-stream
 //! primitives (`readStdout`/`readStderr`/`writeStdin`/`endStdin`) that the
-//! hand-written `index.js` wrapper composes into Node `Readable`/`Writable`
+//! hand-written `index.ts` facade composes into Node `Readable`/`Writable`
 //! streams. Blocking pipe and wait calls run on dedicated OS threads so a
 //! long-lived child (e.g. a persistent shell driven by an LLM tool loop)
 //! never parks a libuv threadpool worker.
@@ -608,7 +608,7 @@ fn duplicate_stdio(fd: BorrowedFd<'_>, name: &str) -> Result<StdioMode> {
 /// Handle to a spawned, sandboxed child process.
 ///
 /// The methods here are the raw binding surface; the package's hand-written
-/// `index.js` wraps them into the public class whose `stdin`/`stdout`/`stderr`
+/// `index.ts` wraps them into the public class whose `stdin`/`stdout`/`stderr`
 /// are real Node streams.
 #[napi]
 pub struct SandboxChild {
@@ -628,7 +628,7 @@ impl SandboxChild {
 
     /// Wait for the child to exit on a dedicated thread, resolving with its
     /// [`ExitResult`]. Calling `wait()` while another wait is active, or
-    /// after one succeeds, rejects; the `index.js` wrapper memoizes the
+    /// after one succeeds, rejects; the `index.ts` facade memoizes the
     /// promise so JS callers can await it any number of times.
     #[napi(ts_return_type = "Promise<ExitResult>")]
     pub fn wait<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
@@ -655,7 +655,7 @@ impl SandboxChild {
     }
 
     /// Resolve with the next stdout chunk, or `null` at end-of-stream.
-    /// Primitive consumed by the `index.js` `Readable`; issue one call at a
+    /// Primitive consumed by the `index.ts` `Readable`; issue one call at a
     /// time and stop after `null`.
     #[napi(ts_return_type = "Promise<Buffer | null>")]
     pub fn read_stdout<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
@@ -670,7 +670,7 @@ impl SandboxChild {
     }
 
     /// Write `data` to the child's piped stdin, resolving once the OS
-    /// accepted the bytes — the backpressure signal the `index.js` `Writable`
+    /// accepted the bytes — the backpressure signal the `index.ts` `Writable`
     /// propagates. Rejects when stdin was not spawned with `"pipe"` or has
     /// already been ended.
     #[napi(ts_return_type = "Promise<void>")]

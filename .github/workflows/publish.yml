@@ -1,4 +1,4 @@
-name: Publish Node
+name: Publish NPM Package
 
 env:
   DEBUG: napi:*
@@ -27,25 +27,25 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --no-js --target x86_64-unknown-linux-gnu --use-napi-cross
             test: true
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --no-js --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: macos-26
             target: x86_64-apple-darwin
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-apple-darwin
+            build: pnpm exec napi build --platform --release --no-js --target x86_64-apple-darwin
           - host: macos-26
             target: aarch64-apple-darwin
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-apple-darwin
+            build: pnpm exec napi build --platform --release --no-js --target aarch64-apple-darwin
             test: true
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target x86_64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --no-js --target x86_64-pc-windows-msvc
             test: true
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: pnpm exec napi build --platform --release --esm --js binding.js --dts binding.d.ts --target aarch64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --no-js --target aarch64-pc-windows-msvc
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -85,21 +85,6 @@ jobs:
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
-      - name: Enable unprivileged user namespaces
-        # Ubuntu 24.04 runners restrict unprivileged user namespaces via
-        # AppArmor; the Linux backend needs them for its per-spawn
-        # user + mount + IPC namespaces.
-        if: matrix.settings.test && runner.os == 'Linux'
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Test binding
-        if: matrix.settings.test
-        # The loader prefers the binding built by this job (guardrail.*.node
-        # next to binding.js). The version check makes a fallback to a previously
-        # published @opticlm/guardrail-* binary fail loudly instead of passing
-        # the test against a stale binding.
-        env:
-          NAPI_RS_ENFORCE_VERSION_CHECK: '1'
-        run: pnpm test
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -128,10 +113,10 @@ jobs:
           cache-dependency-path: crates/guardrail-napi/pnpm-lock.yaml
           registry-url: https://registry.npmjs.org/
       - name: Install dependencies
-        # --no-optional keeps previously published @opticlm/guardrail-* binaries
-        # out of node_modules, so the smoke test can only load the artifacts
-        # staged for this release.
-        run: pnpm install --frozen-lockfile --no-optional
+        # tsdown needs Rolldown's platform-specific optional native binding.
+        run: pnpm install --frozen-lockfile
+      - name: Bundle package entry points
+        run: pnpm bundle
       - name: Download native artifacts
         uses: actions/download-artifact@v7
         with:
@@ -142,36 +127,5 @@ jobs:
         run: |
           node_count="$(find . -maxdepth 1 -type f -name "${APP_NAME}.*.node" | wc -l | tr -d ' ')"
           test "$node_count" = "6"
-      - name: Create platform package directories
-        run: pnpm create-npm-dirs
-      - name: Move artifacts into platform packages
-        run: pnpm artifacts
-      - name: Verify platform package directories
-        run: |
-          package_count="$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-          test "$package_count" = "6"
-      - name: Verify platform package contents
-        run: |
-          for package_dir in npm/*/; do
-            main="$(node -p "require('./${package_dir}package.json').main")"
-            test -s "${package_dir}${main}"
-          done
-      - name: Enable unprivileged user namespaces
-        # Ubuntu 24.04 runners restrict unprivileged user namespaces via
-        # AppArmor; the Linux backend needs them for its per-spawn
-        # user + mount + IPC namespaces.
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Smoke test the packaged host binding
-        # Remove the downloaded copies next to binding.js so the committed loader
-        # can only resolve the artifact staged into its final npm package layout.
-        run: |
-          rm -- "${APP_NAME}".*.node
-          NAPI_RS_NATIVE_LIBRARY_PATH="$PWD/npm/linux-x64-gnu/${APP_NAME}.linux-x64-gnu.node" pnpm test
-      - name: Publish main package
+      - name: Publish package
         run: pnpm publish --access public --no-git-checks
-      - name: Publish platform packages
-        run: |
-          for package_dir in npm/*; do
-            [ -d "$package_dir" ] || continue
-            (cd "$package_dir" && pnpm publish --access public --no-git-checks)
-          done

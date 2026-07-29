@@ -66,10 +66,7 @@ jobs:
       - name: Test native platform backend
         run: cargo test -p ${{ matrix.native_package }} --all-targets
       - name: Install Node binding dependencies
-        # --no-optional keeps previously published @opticlm/guardrail-* binaries
-        # out of node_modules, so the loader can only resolve the binding built
-        # in the next step.
-        run: pnpm install --frozen-lockfile --no-optional
+        run: pnpm install --frozen-lockfile
         working-directory: crates/guardrail-napi
       - name: Build Node binding
         run: pnpm build:debug

@@ -1,6 +1,6 @@
 {
   "name": "@opticlm/guardrail",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Node.js runtime of guardrail, a cross-platform process sandbox for LLM agents.",
   "license": "Apache-2.0",
   "repository": {
@@ -11,14 +11,15 @@
   "exports": {
     ".": {
       "types": "./index.d.ts",
-      "import": "./index.js"
+      "import": "./index.mjs",
+      "require": "./index.cjs"
     }
   },
   "files": [
-    "index.js",
+    "index.cjs",
+    "index.mjs",
     "index.d.ts",
-    "binding.js",
-    "binding.d.ts"
+    "*.node"
   ],
   "napi": {
     "npmClient": "pnpm",
@@ -42,22 +43,17 @@
     "access": "public"
   },
   "scripts": {
-    "create-npm-dirs": "napi create-npm-dirs",
-    "artifacts": "napi artifacts --output-dir .",
-    "build": "napi build --platform --release --esm --js binding.js --dts binding.d.ts",
-    "build:debug": "napi build --platform --esm --js binding.js --dts binding.d.ts",
+    "build": "napi build --platform --release --js binding.cjs --dts binding.d.ts && napi build --platform --release --esm --js binding.mjs --dts binding.d.ts && pnpm bundle",
+    "build:debug": "napi build --platform --js binding.cjs --dts binding.d.ts && napi build --platform --esm --js binding.mjs --dts binding.d.ts && pnpm bundle",
+    "bundle": "pnpm typecheck && tsdown",
+    "typecheck": "tsc --noEmit",
     "test": "node --test __test__/smoke.test.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.2.0"
+    "@napi-rs/cli": "^3.2.0",
+    "@types/node": "^26.1.2",
+    "tsdown": "^0.22.14",
+    "typescript": "^7"
   },
-  "packageManager": "pnpm@11.9.0",
-  "optionalDependencies": {
-    "@opticlm/guardrail-darwin-arm64": "0.0.2",
-    "@opticlm/guardrail-darwin-x64": "0.0.2",
-    "@opticlm/guardrail-linux-arm64-gnu": "0.0.2",
-    "@opticlm/guardrail-linux-x64-gnu": "0.0.2",
-    "@opticlm/guardrail-win32-arm64-msvc": "0.0.2",
-    "@opticlm/guardrail-win32-x64-msvc": "0.0.2"
-  }
+  "packageManager": "pnpm@11.9.0"
 }

@@ -1,21 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { once } from 'node:events'
 import { createRequire } from 'node:module'
+import { once } from 'node:events'
 import { text } from 'node:stream/consumers'
 import { Worker } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import * as guardrail from '../index.mjs'
 
-const require = createRequire(import.meta.url)
-const guardrail = require('../index.js')
 const execFileAsync = promisify(execFile)
+const require = createRequire(import.meta.url)
+const guardrailCjs = require('../index.cjs')
 
 test('module exposes the expected API', () => {
-  assert.equal(typeof guardrail.spawn, 'function')
-  assert.equal(typeof guardrail.Sandbox, 'function')
-  assert.equal(typeof guardrail.probeSupport, 'function')
+  for (const module of [guardrail, guardrailCjs]) {
+    assert.equal(typeof module.spawn, 'function')
+    assert.equal(typeof module.Sandbox, 'function')
+    assert.equal(typeof module.probeSupport, 'function')
+  }
 })
 
 test('probeSupport passes on CI-supported machines', () => {
@@ -112,7 +115,7 @@ test('inherits Node standard streams on Unix', { skip: process.platform === 'win
   // libuv marks Node's own descriptors close-on-exec. Run the binding in a
   // nested Node process whose three standard streams are pipes, then require
   // the sandboxed shell to read and write through those exact streams.
-  const bindingUrl = new URL('../index.js', import.meta.url).href
+  const bindingUrl = new URL('../index.mjs', import.meta.url).href
   const darwinRuntimeProfile = fileURLToPath(
     new URL('../../guardrail-macos/tests/fixtures/runtime.sb', import.meta.url),
   )
@@ -200,7 +203,7 @@ test('inherits Node standard output and error on Windows', { skip: process.platf
   // Run the binding in a nested Node process whose stdout/stderr are pipes
   // owned by this test. The sandboxed cmd process must inherit those exact
   // handles for its markers to reach execFile's captured output.
-  const bindingUrl = new URL('../index.js', import.meta.url).href
+  const bindingUrl = new URL('../index.mjs', import.meta.url).href
   const script = `
     const guardrail = await import(${JSON.stringify(bindingUrl)})
     const env = {}

@@ -20,7 +20,7 @@ export declare class Sandbox {
  * Handle to a spawned, sandboxed child process.
  *
  * The methods here are the raw binding surface; the package's hand-written
- * `index.js` wraps them into the public class whose `stdin`/`stdout`/`stderr`
+ * `index.ts` wraps them into the public class whose `stdin`/`stdout`/`stderr`
  * are real Node streams.
  */
 export declare class SandboxChild {
@@ -29,7 +29,7 @@ export declare class SandboxChild {
   /**
    * Wait for the child to exit on a dedicated thread, resolving with its
    * [`ExitResult`]. Calling `wait()` while another wait is active, or
-   * after one succeeds, rejects; the `index.js` wrapper memoizes the
+   * after one succeeds, rejects; the `index.ts` facade memoizes the
    * promise so JS callers can await it any number of times.
    */
   wait(): Promise<ExitResult>
@@ -41,7 +41,7 @@ export declare class SandboxChild {
   kill(): void
   /**
    * Resolve with the next stdout chunk, or `null` at end-of-stream.
-   * Primitive consumed by the `index.js` `Readable`; issue one call at a
+   * Primitive consumed by the `index.ts` `Readable`; issue one call at a
    * time and stop after `null`.
    */
   readStdout(): Promise<Buffer | null>
@@ -52,7 +52,7 @@ export declare class SandboxChild {
   readStderr(): Promise<Buffer | null>
   /**
    * Write `data` to the child's piped stdin, resolving once the OS
-   * accepted the bytes — the backpressure signal the `index.js` `Writable`
+   * accepted the bytes — the backpressure signal the `index.ts` `Writable`
    * propagates. Rejects when stdin was not spawned with `"pipe"` or has
    * already been ended.
    */
