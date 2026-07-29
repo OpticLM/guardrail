@@ -82,7 +82,11 @@ impl Principals {
     }
 
     fn principal_of(&self, sid: PSID) -> Option<Principal> {
-        for principal in [Principal::Package, Principal::Filesystem, Principal::Reallow] {
+        for principal in [
+            Principal::Package,
+            Principal::Filesystem,
+            Principal::Reallow,
+        ] {
             if unsafe { EqualSid(self.sid(principal), sid) } != 0 {
                 return Some(principal);
             }
@@ -255,7 +259,11 @@ fn rebuild(
 ) -> io::Result<()> {
     let old_roots: BTreeSet<&Path> = previous.iter().map(|rule| rule.path.as_path()).collect();
     for path in old_roots {
-        for principal in [Principal::Package, Principal::Filesystem, Principal::Reallow] {
+        for principal in [
+            Principal::Package,
+            Principal::Filesystem,
+            Principal::Reallow,
+        ] {
             match remove_acl_entries(path, principals.sid(principal)) {
                 Ok(()) => {}
                 // The root may have been deleted since; nothing to strip.

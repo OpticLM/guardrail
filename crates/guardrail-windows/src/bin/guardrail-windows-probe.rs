@@ -178,11 +178,8 @@ fn main() {
             // success/failure — for bisecting which access bit a tool's open
             // is denied on.
             let path = required_arg(&args, 2);
-            let mask = u32::from_str_radix(
-                required_arg(&args, 3).trim_start_matches("0x"),
-                16,
-            )
-            .unwrap_or_else(|_| exit(2));
+            let mask = u32::from_str_radix(required_arg(&args, 3).trim_start_matches("0x"), 16)
+                .unwrap_or_else(|_| exit(2));
             #[cfg(windows)]
             {
                 use std::os::windows::ffi::OsStrExt;
@@ -215,7 +212,10 @@ fn main() {
                     )
                 };
                 if handle as isize == -1 {
-                    eprintln!("open-bits {mask:#010x} failed: {}", std::io::Error::last_os_error());
+                    eprintln!(
+                        "open-bits {mask:#010x} failed: {}",
+                        std::io::Error::last_os_error()
+                    );
                     exit(3);
                 }
                 eprintln!("open-bits {mask:#010x} ok");
@@ -295,7 +295,10 @@ fn final_path_report() {
         )
     };
     if handle as isize == -1 {
-        eprintln!("open-cwd-0-access failed: {}", std::io::Error::last_os_error());
+        eprintln!(
+            "open-cwd-0-access failed: {}",
+            std::io::Error::last_os_error()
+        );
         return;
     }
     eprintln!("open-cwd-0-access ok");
@@ -312,7 +315,10 @@ fn final_path_report() {
             GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), 1024, flag)
         };
         if len == 0 {
-            eprintln!("final-path {label} failed: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "final-path {label} failed: {}",
+                std::io::Error::last_os_error()
+            );
         } else {
             let text = String::from_utf16_lossy(&buffer[..len.min(1024) as usize]);
             eprintln!("final-path {label} ok: {text}");

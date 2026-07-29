@@ -428,10 +428,9 @@ fn acl_with_grants_subtracted(dacl: *mut ACL, grants: &[Grant]) -> io::Result<Ve
         let mut ace = ptr::null_mut();
         bool_result(unsafe { GetAce(dacl, index, &mut ace) })?;
         let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        let mut bytes = unsafe {
-            core::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize))
-        }
-        .to_vec();
+        let mut bytes =
+            unsafe { core::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize)) }
+                .to_vec();
 
         if u32::from(header.AceFlags) & INHERITED_ACE == 0
             && header.AceType == ACCESS_ALLOWED_ACE_TYPE

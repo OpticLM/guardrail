@@ -33,12 +33,17 @@ const MANIFEST_HEADER: &str = "guardrail-windows-manifest v1";
 const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
 
 /// The directory holding this namespace's manifest and active marker.
-pub(crate) fn namespace_dir(config: &SandboxConfig, sanitized_namespace: &str) -> io::Result<PathBuf> {
+pub(crate) fn namespace_dir(
+    config: &SandboxConfig,
+    sanitized_namespace: &str,
+) -> io::Result<PathBuf> {
     let base = match &config.windows_manifest_dir {
         Some(dir) => dir.clone(),
         None => {
             let local = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
-                io::Error::other("LOCALAPPDATA is not set and windows_manifest_dir is not configured")
+                io::Error::other(
+                    "LOCALAPPDATA is not set and windows_manifest_dir is not configured",
+                )
             })?;
             PathBuf::from(local).join("guardrail")
         }

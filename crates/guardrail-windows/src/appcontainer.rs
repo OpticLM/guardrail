@@ -23,7 +23,6 @@ const SE_GROUP_ENABLED: u32 = 4;
 const ERROR_ALREADY_EXISTS: i32 = 183;
 
 pub(crate) struct AppContainerProfile {
-
     sid: Sid,
     restricting_sid: Sid,
     reallow_sid: Sid,
@@ -76,7 +75,6 @@ impl AppContainerProfile {
             .map_err(|err| Error::confinement("appcontainer", err))?;
 
         Ok(Self {
-
             sid,
             restricting_sid,
             reallow_sid,

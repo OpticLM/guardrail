@@ -116,10 +116,7 @@ fn create_entry(namespace: &str, config: &SandboxConfig) -> Result<CachedAppCont
 /// `namespace`/`manifest_dir` mirror `SandboxConfig::windows_cache_namespace`
 /// and `windows_manifest_dir`. Fails when the namespace is active in any
 /// process.
-pub fn cleanup_namespace(
-    namespace: Option<&str>,
-    manifest_dir: Option<&Path>,
-) -> io::Result<()> {
+pub fn cleanup_namespace(namespace: Option<&str>, manifest_dir: Option<&Path>) -> io::Result<()> {
     let namespace = namespace
         .filter(|namespace| !namespace.is_empty())
         .unwrap_or(DEFAULT_NAMESPACE);
