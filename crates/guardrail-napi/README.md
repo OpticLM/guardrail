@@ -1228,7 +1228,11 @@ Tested result: `go version` and `go build` completed successfully.
   user certificate store readable —
   `%APPDATA%\Microsoft\SystemCertificates` — in addition to the network
   policy; this combination has not been verified green yet.
-- stdio is inherited; output capture is not yet supported.
+- Standard streams are inherited by default. Set per-spawn `stdin`/`stdout`/
+  `stderr` to `'pipe'` to expose Node `Writable`/`Readable` streams, or to
+  `'ignore'` to connect the platform null device. `wait()` reports exit status
+  only and does not buffer output; see
+  [Streaming stdio for LLM tool loops](#streaming-stdio-for-llm-tool-loops).
 
 ## Platform Capability Matrix
 
