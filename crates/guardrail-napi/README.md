@@ -292,16 +292,14 @@ await cargoSandbox.spawn(`${rustSysroot}/bin/cargo`, ['build', '--offline'], {
 ```
 
 Tested result: a dependency-free Rust binary builds successfully with
-`cargo build --offline`.
-
-Current Linux backend limitation: `cargo fetch` needs `network: 'full'` on this
-backend, not `outbound-only`.
+`cargo build --offline`, and `cargo fetch` into a fresh `CARGO_HOME` (sparse
+index plus crate downloads) completes with `network: 'outbound-only'`.
 
 ### pnpm
 
 pnpm needs read/execute access to the pnpm installation plus writable project,
-store, npm cache, XDG cache/config, home, and temp paths. On this backend,
-`pnpm add` also needs `network: 'full'`.
+store, npm cache, XDG cache/config, home, and temp paths. Registry downloads
+work with `network: 'outbound-only'`.
 
 ```js
 const pnpmHome = '/home/me/.local/share/pnpm'
@@ -338,7 +336,7 @@ const pnpmSandbox = await Sandbox.build({
     XDG_CONFIG_HOME: xdgConfig,
     CI: '1',
   },
-  network: 'full',
+  network: 'outbound-only',
 })
 
 await pnpmSandbox.spawn(
@@ -1242,7 +1240,7 @@ marked *ignored* is an honest no-op there.
 | Option | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
-| `network` | seccomp socket-family filter; ABI-gated Landlock TCP/UDP-bind restrictions for `outbound-only` | Seatbelt network rules | AppContainer capabilities |
+| `network` | seccomp socket-family filter — a denied family fails gracefully with `EAFNOSUPPORT`, so glibc DNS lookups (which probe an `AF_NETLINK` socket) keep working; ABI-gated Landlock TCP/UDP-bind restrictions for `outbound-only` | Seatbelt network rules | AppContainer capabilities |
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
@@ -1304,7 +1302,8 @@ package SID and are not isolated from each other.
   it verifies Landlock ABI v2 enforcement (Linux 5.19+; required so write
   grants honor cross-directory rename and link) on a disposable thread, but
   the seccomp
-  check only queries whether the kernel reports the filter's `Trap` action.
+  check only queries whether the kernel reports the filters' `Trap` and
+  `Errno` actions.
   Ambient policy may still prevent filter installation, so a successful probe
   is not proof that spawning will succeed. The policy-specific Landlock ABI v4
   check for outbound-only networking happens in

@@ -63,7 +63,8 @@ fn enforce_landlock_on_probe_thread() -> Result<()> {
 }
 
 /// Query whether the kernel reports the seccomp actions used by the backend's
-/// filters: `Trap` for violations and `Errno` for the io_uring denial. This
+/// filters: `Trap` for kernel-surface violations and `Errno` for the
+/// socket-family, probed-interface, and io_uring denials. This
 /// does not install a filter and is not proof that a later
 /// `SECCOMP_SET_MODE_FILTER` call will be permitted or have resources.
 fn probe_seccomp_action_availability() -> Result<()> {

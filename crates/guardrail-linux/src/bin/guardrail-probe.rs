@@ -28,11 +28,16 @@
 //!                     read from the (supposedly inherited) descriptor FD;
 //!                     exit 0 if it yields EXPECTED, 3 if the read fails or
 //!                     the content differs
-//!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if denied
-//!   socket-netlink    create an AF_NETLINK route socket; exit 0 if allowed, 3 if denied
-//!   socket-packet     create an AF_PACKET raw socket; exit 0 if allowed, 3 if denied
-//!   socket-vsock      create an AF_VSOCK stream socket; exit 0 if allowed, 3 if denied
-//!   socket-unix       create an AF_UNIX stream socket; exit 0 if allowed, 3 if denied
+//!   socket-inet       create an AF_INET TCP socket; exit 0 if allowed, 3 if
+//!                     denied with EAFNOSUPPORT
+//!   socket-netlink    create an AF_NETLINK route socket; exit 0 if allowed,
+//!                     3 if denied with EAFNOSUPPORT
+//!   socket-packet     create an AF_PACKET raw socket; exit 0 if allowed, 3 if
+//!                     denied with EAFNOSUPPORT
+//!   socket-vsock      create an AF_VSOCK stream socket; exit 0 if allowed,
+//!                     3 if denied with EAFNOSUPPORT
+//!   socket-unix       create an AF_UNIX stream socket; exit 0 if allowed, 3 if
+//!                     denied with EAFNOSUPPORT
 //!   socketpair-unix   create a connected AF_UNIX socketpair; exit 0 if
 //!                     allowed, 3 if denied
 //!   socketpair-unix-dgram-sendto <NAME>
@@ -999,7 +1004,12 @@ fn exit_socket_probe(domain: libc::c_int, socket_type: libc::c_int, protocol: li
     // SAFETY: socket() takes scalar args; close the fd if created.
     let fd = unsafe { libc::socket(domain, socket_type, protocol) };
     if fd < 0 {
-        exit(3);
+        // Exit 3 is reserved for the sandbox's family denial errno; any other
+        // failure is a host problem, not a policy result.
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EAFNOSUPPORT) => exit(3),
+            _ => exit(2),
+        }
     }
     // SAFETY: fd was returned by socket() above and is owned here.
     unsafe { libc::close(fd) };

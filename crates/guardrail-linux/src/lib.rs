@@ -101,6 +101,13 @@
 //! `bind(2)`, so Landlock does not deny it. This behavior is independent of
 //! local IPC.
 //!
+//! Creating a socket of a family outside the network policy's allowlist
+//! fails with `EAFNOSUPPORT`, the errno of a kernel built without that
+//! family, so probing runtimes fall back instead of dying: glibc's
+//! `getaddrinfo` opens an `AF_NETLINK` route socket to enumerate local
+//! addresses on every lookup, and a trapping denial would kill any DNS
+//! caller under `Deny` and `OutboundOnly`.
+//!
 //! Unless the network policy is `Full`, the `io_uring_*` syscalls fail with
 //! `ENOSYS`: ring-submitted operations
 //! (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, `IORING_OP_BIND`, ...) are not

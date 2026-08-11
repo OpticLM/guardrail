@@ -1,18 +1,23 @@
 //! Network and kernel-attack-surface confinement via seccomp-BPF denylists.
 //!
-//! Default action is Allow (arbitrary shell tools must keep working); specific
-//! syscalls/arguments are mapped to `VIOLATION_ACTION`. Trap is used so a
-//! violation terminates the child with SIGSYS, which the parent can observe.
-//! Network rules live here, alongside kernel-interface syscalls no shell tool
-//! legitimately calls (kernel code loading, keyring, host-state interference,
-//! and — under `UserNamespacePolicy::Deny` — the mount machinery).
+//! Default action is Allow (arbitrary shell tools must keep working); the
+//! stacked filters below deny specific syscalls/arguments. The kernel runs
+//! every installed filter and applies the highest-precedence action
+//! (Trap > Errno > Allow):
 //!
-//! seccomp cannot see a socket fd's family, so under `OutboundOnly` the
-//! family-aware TCP and UDP bind restrictions live in the Landlock network
-//! layer (see `crate::net`).
+//! * Kernel-interface syscalls no shell tool legitimately calls — kernel code
+//!   loading, the keyring, host-state interference, and, under
+//!   `UserNamespacePolicy::Deny`, the mount machinery — are mapped to
+//!   `VIOLATION_ACTION`. Trap is used so a violation terminates the child
+//!   with SIGSYS, which the parent can observe.
 //!
-//! Two more filters are stacked as needed; the kernel runs every installed
-//! filter and applies the highest-precedence action (Trap > Errno > Allow):
+//! * Creating a socket of a family outside the network policy's allowlist
+//!   fails with `EAFNOSUPPORT` — the errno of a kernel built without that
+//!   family, which every network runtime's probe-and-fall-back path already
+//!   handles. A trap would turn routine libc behavior into a kill: glibc's
+//!   `getaddrinfo` opens an `AF_NETLINK` route socket to enumerate local
+//!   addresses, so every DNS lookup through libc would die with SIGSYS under
+//!   `Deny` and `OutboundOnly`.
 //!
 //! * Kernel interfaces that legitimate tooling probes and must fall back from
 //!   gracefully — `bpf`, `perf_event_open`, `userfaultfd`, plus namespace
@@ -29,6 +34,10 @@
 //!   under `UserNamespacePolicy::Deny`: its flags live in a struct seccomp
 //!   cannot read, and `ENOSYS` makes glibc and other runtimes fall back to
 //!   plain `clone`, whose flags the `EPERM` filter can inspect.
+//!
+//! seccomp cannot see a socket fd's family, so under `OutboundOnly` the
+//! family-aware TCP and UDP bind restrictions live in the Landlock network
+//! layer (see `crate::net`).
 
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -39,9 +48,10 @@ use seccompiler::{
     SeccompRule,
 };
 
-/// Action taken when a denied syscall is attempted. Trap -> SIGSYS (observable
-/// by the parent). Change to `SeccompAction::Errno(libc::EACCES as u32)` for
-/// graceful per-call failure instead of process termination.
+/// Action taken when a kernel-attack-surface syscall is attempted. Trap ->
+/// SIGSYS (observable by the parent). Change to
+/// `SeccompAction::Errno(libc::EACCES as u32)` for graceful per-call failure
+/// instead of process termination.
 const VIOLATION_ACTION: SeccompAction = SeccompAction::Trap;
 
 type RuleMap = BTreeMap<i64, Vec<SeccompRule>>;
@@ -129,7 +139,16 @@ const IO_URING_SYSCALLS: &[i64] = &[
 pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
     let mut programs = Vec::new();
 
-    programs.push(compile(violation_rules(config)?, VIOLATION_ACTION)?);
+    programs.push(compile(violation_rules(config), VIOLATION_ACTION)?);
+
+    let network = network_rules(config.network)?;
+    if !network.is_empty() {
+        programs.push(compile(
+            network,
+            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
+        )?);
+    }
+
     programs.push(compile(
         probed_kernel_rules(config)?,
         SeccompAction::Errno(libc::EPERM as u32),
@@ -143,13 +162,11 @@ pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
     Ok(programs)
 }
 
-/// Rules mapped to `VIOLATION_ACTION`: network policy and the unconditional
-/// kernel-attack-surface denylist.
-fn violation_rules(config: &SandboxConfig) -> Result<RuleMap> {
+/// Rules mapped to `VIOLATION_ACTION`: the kernel-attack-surface denylist.
+fn violation_rules(config: &SandboxConfig) -> RuleMap {
     let mut rules = RuleMap::new();
-    add_network_rules(&mut rules, config.network)?;
     add_kernel_surface_rules(&mut rules, config.linux_user_namespaces);
-    Ok(rules)
+    rules
 }
 
 fn add_kernel_surface_rules(rules: &mut RuleMap, policy: UserNamespacePolicy) {
@@ -250,13 +267,18 @@ pub(crate) fn apply(programs: &[BpfProgram]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
+/// Rules mapped to `Errno(EAFNOSUPPORT)`: socket creation outside the network
+/// policy's family allowlist. The graceful errno keeps probing runtimes alive
+/// (glibc `getaddrinfo`'s netlink interface scan, IPv6 availability probes)
+/// while still refusing the socket.
+fn network_rules(policy: NetworkPolicy) -> Result<RuleMap> {
+    let mut rules = RuleMap::new();
     match policy {
         NetworkPolicy::Deny => {
             // Block every non-Unix family, including families added by future
             // kernels. AF_UNIX is host-local IPC, not network reach.
             add_syscall_rule(
-                rules,
+                &mut rules,
                 libc::SYS_socket,
                 socket_domain_allowlist_rule(&[libc::AF_UNIX])?,
             );
@@ -265,7 +287,7 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
             // IP and Unix sockets pass this filter; every other family is
             // blocked.
             add_syscall_rule(
-                rules,
+                &mut rules,
                 libc::SYS_socket,
                 socket_domain_allowlist_rule(&[libc::AF_UNIX, libc::AF_INET, libc::AF_INET6])?,
             );
@@ -274,7 +296,7 @@ fn add_network_rules(rules: &mut RuleMap, policy: NetworkPolicy) -> Result<()> {
         }
         NetworkPolicy::Full => {}
     }
-    Ok(())
+    Ok(rules)
 }
 
 fn add_syscall_rule(rules: &mut RuleMap, syscall: i64, rule: SeccompRule) {
@@ -377,16 +399,28 @@ mod tests {
     }
 
     #[test]
-    fn outbound_only_never_uses_family_blind_bind_listen_traps() {
-        let rules = violation_rules(&config(
-            NetworkPolicy::OutboundOnly,
-            UserNamespacePolicy::Deny,
-        ))
-        .expect("violation rules");
+    fn socket_family_denial_follows_network_policy() {
+        for (network, denied) in [
+            (NetworkPolicy::Deny, true),
+            (NetworkPolicy::OutboundOnly, true),
+            (NetworkPolicy::Full, false),
+        ] {
+            let rules = network_rules(network).expect("network rules");
+            assert_eq!(
+                rules.contains_key(&libc::SYS_socket),
+                denied,
+                "socket family rule for network={network:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_only_never_denies_family_blind_bind_listen() {
+        let rules = network_rules(NetworkPolicy::OutboundOnly).expect("network rules");
         for sys in [libc::SYS_bind, libc::SYS_listen] {
             assert!(
                 !rules.contains_key(&sys),
-                "syscall {sys} trap under OutboundOnly"
+                "syscall {sys} denied under OutboundOnly"
             );
         }
     }
@@ -394,8 +428,7 @@ mod tests {
     #[test]
     fn kernel_surface_is_trapped_regardless_of_policy() {
         for user_namespaces in [UserNamespacePolicy::Deny, UserNamespacePolicy::Allow] {
-            let rules = violation_rules(&config(NetworkPolicy::Full, user_namespaces))
-                .expect("violation rules");
+            let rules = violation_rules(&config(NetworkPolicy::Full, user_namespaces));
             for &sys in KERNEL_SURFACE_SYSCALLS {
                 assert!(
                     rules.contains_key(&sys),
@@ -411,8 +444,7 @@ mod tests {
             (UserNamespacePolicy::Deny, true),
             (UserNamespacePolicy::Allow, false),
         ] {
-            let rules = violation_rules(&config(NetworkPolicy::Deny, user_namespaces))
-                .expect("violation rules");
+            let rules = violation_rules(&config(NetworkPolicy::Deny, user_namespaces));
             for &sys in MOUNT_SYSCALLS {
                 assert_eq!(
                     rules.contains_key(&sys),
@@ -455,7 +487,7 @@ mod tests {
         let programs =
             build(&config(NetworkPolicy::Full, UserNamespacePolicy::Allow)).expect("filters");
         // Trap (kernel surface) and EPERM (bpf/perf/userfaultfd) remain; the
-        // ENOSYS filter has nothing to deny.
+        // EAFNOSUPPORT and ENOSYS filters have nothing to deny.
         assert_eq!(programs.len(), 2);
     }
 }

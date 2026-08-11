@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
 
 use std::net::{TcpListener, UdpSocket};
-use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
 use guardrail_core::{Backend, FsAccess, NetworkPolicy, SandboxCommand, SandboxConfig};
@@ -26,8 +25,10 @@ fn allowed(config: &SandboxConfig, args: &[&str]) -> bool {
     status(config, args).success()
 }
 
-fn blocked_by_seccomp(config: &SandboxConfig, args: &[&str]) -> bool {
-    status(config, args).signal() == Some(libc::SIGSYS)
+/// The probe observed a graceful denial (exit 3): `EAFNOSUPPORT` for the
+/// socket-family probes, the mode-specific errno otherwise.
+fn denied(config: &SandboxConfig, args: &[&str]) -> bool {
+    status(config, args).code() == Some(3)
 }
 
 /// True when the host kernel itself offers io_uring; it may be absent
@@ -51,8 +52,8 @@ fn deny_blocks_inet_socket_creation() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     assert!(
-        blocked_by_seccomp(&config, &["socket-inet"]),
-        "creating an AF_INET socket must be blocked under Deny"
+        denied(&config, &["socket-inet"]),
+        "creating an AF_INET socket must fail with EAFNOSUPPORT under Deny"
     );
 }
 
@@ -61,8 +62,8 @@ fn deny_blocks_netlink_socket_creation() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     assert!(
-        blocked_by_seccomp(&config, &["socket-netlink"]),
-        "creating an AF_NETLINK socket must be blocked under Deny"
+        denied(&config, &["socket-netlink"]),
+        "creating an AF_NETLINK socket must fail with EAFNOSUPPORT under Deny"
     );
 }
 
@@ -71,8 +72,8 @@ fn deny_blocks_packet_socket_creation() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     assert!(
-        blocked_by_seccomp(&config, &["socket-packet"]),
-        "creating an AF_PACKET socket must be blocked under Deny"
+        denied(&config, &["socket-packet"]),
+        "creating an AF_PACKET socket must fail with EAFNOSUPPORT under Deny"
     );
 }
 
@@ -81,8 +82,8 @@ fn deny_blocks_vsock_socket_creation() {
     let mut config = common::base();
     config.network = NetworkPolicy::Deny;
     assert!(
-        blocked_by_seccomp(&config, &["socket-vsock"]),
-        "creating an AF_VSOCK socket must be blocked under Deny"
+        denied(&config, &["socket-vsock"]),
+        "creating an AF_VSOCK socket must fail with EAFNOSUPPORT under Deny"
     );
 }
 
@@ -114,11 +115,11 @@ fn outbound_only_allows_ip_and_unix_sockets_but_blocks_other_families_and_tcp_bi
     );
     for probe in ["socket-netlink", "socket-packet", "socket-vsock"] {
         assert!(
-            blocked_by_seccomp(&config, &[probe]),
-            "{probe} must be blocked under OutboundOnly"
+            denied(&config, &[probe]),
+            "{probe} must fail with EAFNOSUPPORT under OutboundOnly"
         );
     }
-    // Exit 3, not SIGSYS: the denial is Landlock's EACCES, family-aware so
+    // Exit 3 here too, but from Landlock's EACCES on bind(2): family-aware so
     // Unix-domain servers stay available (see below).
     assert_eq!(
         status(&config, &["tcp-bind"]).code(),
