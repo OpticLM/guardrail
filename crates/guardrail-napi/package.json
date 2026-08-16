@@ -1,6 +1,6 @@
 {
   "name": "@opticlm/guardrail",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Node.js runtime of guardrail, a cross-platform process sandbox for LLM agents.",
   "license": "Apache-2.0",
   "repository": {
