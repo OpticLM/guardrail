@@ -28,6 +28,59 @@
 //! masks (`MNT_LOCKED`) against children permitted to create namespaces of
 //! their own. See `src/ns.rs` for the mechanism.
 //!
+//! # Policy paths are pinned at construction
+//!
+//! Every rule path is canonicalized and opened once, in [`LinuxBackend::new`],
+//! and both layers apply to the inode it resolved to then — the Landlock
+//! grants through that descriptor directly, the mount masks by re-resolving
+//! the path in the child's own mount namespace and checking it still names the
+//! recorded inode. A backend is reusable across spawns, and re-deriving the
+//! targets from path strings each time would let a sandboxed child that may
+//! write a directory on the way to a policy path move it aside between two
+//! spawns and have the next spawn's grant or mask land on an inode of its
+//! choosing.
+//!
+//! Two consequences: replacing a policy path after the backend is constructed
+//! does not re-point the policy, and a spawn whose mask target no longer names
+//! its compiled inode is refused (`EPERM`) rather than confining the wrong
+//! thing. Construct a new backend to follow a replaced path.
+//!
+//! # Deny durability across restarts
+//!
+//! That pinning lives in the process, so it cannot outlive the sandbox — and
+//! the filesystem changes a child makes do. A child that can rename a
+//! directory on the way to a policy path may move it aside, leave a decoy at
+//! the old name, and simply wait: the next time the same policy is compiled it
+//! resolves that name to the decoy and confines it, leaving the real data
+//! beside it under the surrounding allow rule. Persisting inode identity
+//! across runs would trade that for spurious refusals on every legitimate
+//! `git checkout` or editor rewrite, so the policy *shape* is rejected instead.
+//!
+//! A path is durable when neither it nor any directory above it can be renamed
+//! by the sandbox — which holds when each is either a mount this policy
+//! installs (renaming a mount point fails with `EBUSY`) or sits where the
+//! policy grants no write on its parent. In practice:
+//!
+//! ```text
+//! WriteAllow(project), WriteDeny(project/.git)      accepted
+//!     moving `project` needs rights above the grant root, never granted
+//!
+//! WriteAllow(w), WriteDeny(w/vault/locked)          Unsupported
+//!     `w/vault` is writable, so it can be moved aside and faked
+//!
+//! WriteAllow(w), WriteDeny(w/vault),
+//!                WriteDeny(w/vault/locked)          accepted
+//!     `w/vault` is masked, so it is a mount point and cannot be renamed
+//!
+//! ReadAllow(w/sub), WriteAllow(w)                   Unsupported
+//!     `w/sub` itself is movable; a later run would grant over the decoy
+//! ```
+//!
+//! Read-only policies are never affected: without a write grant the sandbox
+//! cannot rename anything. This limit is specific to the Linux backend's
+//! mount-and-Landlock encoding, like the read-deny-with-write-allow refusal
+//! above.
+//!
 //! # Per-spawn IPC isolation
 //!
 //! Every spawn enters a fresh IPC namespace, isolating its SysV shared-memory,

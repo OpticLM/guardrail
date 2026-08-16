@@ -240,6 +240,76 @@ Notes:
   and `kill()` past a limit. For very large logs, redirecting into a file
   under `workRoot` remains cheaper than collecting in memory.
 
+### Deny Rules and Their Limits
+
+Landlock rules are additive grants, so a deny beneath an allowed parent cannot
+be expressed as a Landlock rule. Guardrail enforces those boundaries with a
+second layer instead: the allowed parent is granted wholesale, and each deny is
+overmounted inside the child's private mount namespace — an empty read-only
+filesystem for `read-deny`, a read-only or `noexec` bind for `write-deny` and
+`execute-deny`. This is why entries created after `Sandbox.build()` still follow
+the policy.
+
+Two policy shapes have no faithful encoding on Linux, and `Sandbox.build()` (or
+one-shot `spawn()`) throws rather than approximating them.
+
+**1. Denying read while write or execute stays allowed.** A hidden path cannot
+also be writable, so deny the other rights on it too, or move it out of the
+read-denied subtree.
+
+**2. A path the sandbox could relocate.** Masks and grants are bound to the
+directory they were compiled against, not to its name, so nothing can be
+redirected while a sandbox is alive. But the sandbox is not alive forever, and
+a rename outlives it: a child that can rename a directory on the way to a
+policy path may move it aside, leave a decoy at the old name, and wait for the
+next run to compile the same policy against the rewritten tree — protecting the
+decoy while the real data sits beside it under the surrounding allow rule.
+Guardrail rejects the shape rather than let a later run be quietly misdirected.
+
+A path is durable when neither it nor any directory above it can be renamed by
+the child, which holds when each is either denied by this policy (a mask is a
+mount point, and renaming one fails with `EBUSY`) or sits somewhere the policy
+grants no write on its parent:
+
+```js
+// accepted — moving `project` needs write on its parent, never granted
+{ kind: 'write-allow',  path: project }
+{ kind: 'write-deny',   path: `${project}/.git` }
+
+// throws — `vault` is writable, so the child can move it aside and fake it
+{ kind: 'write-allow',  path: workRoot }
+{ kind: 'write-deny',   path: `${workRoot}/vault/locked` }
+
+// accepted — denying `vault` makes it a mount point that cannot be renamed
+{ kind: 'write-allow',  path: workRoot }
+{ kind: 'write-deny',   path: `${workRoot}/vault` }
+{ kind: 'write-deny',   path: `${workRoot}/vault/locked` }
+
+// throws — the allow root itself is movable, so a later run could be
+// pointed at a directory of the child's choosing
+{ kind: 'write-allow',  path: workRoot }
+{ kind: 'read-allow',   path: `${workRoot}/sub` }
+```
+
+The error names the offending directory and both remedies. Practical guidance:
+
+- Keep deny rules directly beneath the writable root they carve out of. The
+  common case — one writable `workRoot` with a few protected paths just under
+  it — is always accepted.
+- To protect something nested deeper, deny write on each directory between it
+  and the writable root as well.
+- Read-only policies are never affected: without a write grant the child cannot
+  rename anything, so allow roots may nest however deep you like.
+- This constraint is specific to the Linux backend's mount-based encoding. The
+  macOS and Windows backends compile the same policy independently and do not
+  reject these shapes, so a policy that builds there can still throw on Linux.
+
+Related, and true for any accepted policy: rule paths are resolved once, when
+the sandbox is built. Replacing a policy path afterwards does not re-point the
+policy — the sandbox keeps confining what it validated — and a spawn whose
+denied path stopped naming that directory is refused instead of confining the
+wrong one. Rebuild the sandbox to follow a path you replaced deliberately.
+
 ### Coreutils
 
 For tools such as `ls`, `cat`, and `grep`, the baseline policy is enough when
@@ -1239,7 +1309,7 @@ marked *ignored* is an honest no-op there.
 
 | Option | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| `fs` | Landlock | Seatbelt profile | AppContainer + additive ACL grants |
+| `fs` | Landlock, plus mount masks for deny-under-allow boundaries; two policy shapes are refused at build time (see [Deny Rules and Their Limits](#deny-rules-and-their-limits)) | Seatbelt profile | AppContainer + additive ACL grants |
 | `network` | seccomp socket-family filter — a denied family fails gracefully with `EAFNOSUPPORT`, so glibc DNS lookups (which probe an `AF_NETLINK` socket) keep working; ABI-gated Landlock TCP/UDP-bind restrictions for `outbound-only` | Seatbelt network rules | AppContainer capabilities |
 | `memoryLimitMb`, `cpuTimeLimitSecs`, `maxProcesses` | `setrlimit` — per-process caps, not tree-wide budgets; `maxProcesses` is `RLIMIT_NPROC`, counted per real UID and not enforced for privileged users | `setrlimit` — same per-process semantics as Linux | Job Object — aggregate budget for the whole process tree |
 | `env` | cleared, then set | cleared, then set | cleared, then set |
@@ -1310,6 +1380,12 @@ package SID and are not isolated from each other.
   `Sandbox.build()` or one-shot `spawn()`, not `probeSupport()`.
 - Filesystem rules are applied in array order. Later matching rules override
   earlier matching rules for the same right.
+- Deny rules beneath an allowed parent are a Linux-specific mechanism with two
+  shapes it refuses to encode — denying read while write or execute stays
+  allowed, and any path the sandbox could rename out from under a later run.
+  Both throw from `Sandbox.build()`; see
+  [Deny Rules and Their Limits](#deny-rules-and-their-limits). macOS and
+  Windows compile the same policy independently and accept these shapes.
 - Each standard stream follows its per-spawn disposition (`'inherit'` |
   `'pipe'` | `'ignore'`, default `'inherit'`). `'pipe'` attaches Node streams
   to the child handle — `child.stdin` (`Writable`), `child.stdout` and

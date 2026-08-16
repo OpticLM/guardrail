@@ -24,6 +24,14 @@
 //!                     rename SRC to DST; exit 0 if allowed, 3 if denied
 //!   link-file <SRC> <DST>
 //!                     hard-link SRC to DST; exit 0 if allowed, 3 if denied
+//!   mkdir <PATH>      create the directory PATH; exit 0 if allowed, 3 if denied
+//!   redirect-path <PATH> <ASIDE> <TARGET>
+//!                     rename PATH to ASIDE, then plant a symlink at PATH
+//!                     pointing at TARGET; exit 0 if both steps are allowed,
+//!                     3 if either is denied. Both syscalls run in one process
+//!                     because a real sandboxed tool call is a process, not a
+//!                     single syscall — splitting them across two spawns would
+//!                     only test the harness's restart window.
 //!   read-fd <FD> <EXPECTED>
 //!                     read from the (supposedly inherited) descriptor FD;
 //!                     exit 0 if it yields EXPECTED, 3 if the read fails or
@@ -217,6 +225,28 @@ fn main() {
                 exit(2);
             };
             match std::fs::hard_link(src, dst) {
+                Ok(()) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "mkdir" => {
+            let Some(path) = args.get(2) else {
+                exit(2);
+            };
+            match std::fs::create_dir(path) {
+                Ok(()) => exit(0),
+                Err(_) => exit(3),
+            }
+        }
+        "redirect-path" => {
+            let (Some(path), Some(aside), Some(target)) = (args.get(2), args.get(3), args.get(4))
+            else {
+                exit(2);
+            };
+            if std::fs::rename(path, aside).is_err() {
+                exit(3);
+            }
+            match std::os::unix::fs::symlink(target, path) {
                 Ok(()) => exit(0),
                 Err(_) => exit(3),
             }
@@ -973,6 +1003,7 @@ fn main() {
                 "usage: guardrail-probe \
                  <echo-env|alloc|spin|fork|read-file|wait-read-file|write-file|\
                  rename-file|link-file|read-fd|\
+                 mkdir|redirect-path|\
                  socket-inet|socket-netlink|socket-packet|socket-vsock|socket-unix|\
                  socketpair-unix|socketpair-unix-dgram-sendto|tcp-bind|tcp-listen-unbound|\
                  udp-bind|tcp-connect|\

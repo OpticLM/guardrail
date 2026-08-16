@@ -35,6 +35,23 @@
 //! default `UserNamespacePolicy::Deny` the seccomp filters additionally trap
 //! the whole mount machinery.
 //!
+//! Masks are installed on the inode the policy was compiled against, not on
+//! whatever the denied path happens to name at spawn time. The child cannot
+//! simply inherit the parent's pinned descriptor — it unshares its own mount
+//! namespace first, and the mount syscalls reject a descriptor belonging to
+//! another namespace — so it re-resolves each [`Target`] and checks the result
+//! against the identity the parent recorded (see [`crate::fs::Pin`]). The
+//! descriptor that passes the check is the one every subsequent syscall uses,
+//! so there is no window between checking and mounting. A path that no longer
+//! names its compiled inode fails the spawn instead of masking the wrong
+//! thing, which is what stops a sandboxed child from moving a directory aside
+//! between two spawns and having the next spawn's mask land on a decoy.
+//!
+//! Each mask is built with the new mount API: `open_tree(OPEN_TREE_CLONE)` or
+//! `fsmount` produces a detached mount, `mount_setattr` strips rights from it
+//! while it is still detached, and `move_mount` attaches it onto the verified
+//! descriptor with `MOVE_MOUNT_T_EMPTY_PATH`.
+//!
 //! Everything here follows the crate's `pre_exec` contract: plans are
 //! compiled to `CString`s and fixed buffers in the parent, and the child only
 //! issues raw syscalls over that prepared data.
@@ -53,15 +70,21 @@ use guardrail_core::{Error, Result};
 const OPEN_TREE_CLONE: libc::c_uint = 0x1;
 const OPEN_TREE_CLOEXEC: libc::c_uint = libc::O_CLOEXEC as libc::c_uint;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
+const AT_EMPTY_PATH: libc::c_uint = libc::AT_EMPTY_PATH as libc::c_uint;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
 pub(crate) const MOUNT_ATTR_RDONLY: u64 = 0x1;
 const MOUNT_ATTR_NOSUID: u64 = 0x2;
 const MOUNT_ATTR_NODEV: u64 = 0x4;
 pub(crate) const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 const FSOPEN_CLOEXEC: libc::c_uint = 0x1;
 const FSMOUNT_CLOEXEC: libc::c_uint = 0x1;
+const FSCONFIG_SET_STRING: libc::c_uint = 1;
 const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
 const PRIVATE_SHM_OPTIONS: &CStr = c"mode=1777,size=67108864";
+/// Mount attributes shared by every mask mount: they are policy scaffolding,
+/// never a place to carry executables, device nodes, or set-ID semantics.
+const MASK_MOUNT_ATTRS: u64 = MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC;
 
 /// `struct mount_attr` for `mount_setattr(2)`. Mirrored locally for the same
 /// target-coverage reason as the constants above.
@@ -73,20 +96,32 @@ struct MountAttr {
     userns_fd: u64,
 }
 
-/// One masking mount, fully described by parent-prepared bytes.
+/// A path a mask is installed on, together with the identity it resolved to
+/// when the policy was compiled. [`open_target`] refuses to proceed if the two
+/// stop agreeing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Target {
+    pub(crate) path: CString,
+    pub(crate) dev: libc::dev_t,
+    pub(crate) ino: libc::ino_t,
+}
+
+/// One masking mount, fully described by parent-prepared bytes. Only the
+/// operations targeting an entry inside a hiding tmpfs this plan mounts are
+/// addressed by bare path, because no such entry exists to pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MaskOp {
-    /// Overmount a denied directory with an empty tmpfs. `data` carries the
-    /// mount options (`mode=0`, or `mode=0111` when re-allowed descendants
-    /// are attached inside and the tmpfs is sealed read-only afterwards).
+    /// Overmount a denied directory with an empty tmpfs. `mode` carries the
+    /// tmpfs's `mode` option (`0`, or `0111` when re-allowed descendants are
+    /// attached inside and the tmpfs is sealed read-only afterwards).
     HideDir {
-        path: CString,
-        data: CString,
+        target: Target,
+        mode: CString,
         seal_later: bool,
     },
     /// Overmount a denied regular file with an empty read-only `mode=0` file
     /// created on a detached tmpfs.
-    HideFile { path: CString },
+    HideFile { target: Target },
     /// Create a traversal-only (`mode=0111`) directory inside a hiding tmpfs
     /// on the way to an attached re-allowed descendant.
     SkeletonDir { path: CString },
@@ -95,21 +130,22 @@ pub(crate) enum MaskOp {
     SkeletonFile { path: CString },
     /// Attach the detached clone `clone_sources[slot]` at `path`.
     Attach { slot: usize, path: CString },
-    /// Self-bind `path` and strip rights via mount attributes
-    /// (`MOUNT_ATTR_RDONLY` / `MOUNT_ATTR_NOEXEC`).
+    /// Clone the target subtree and re-attach it over itself with rights
+    /// stripped via mount attributes (`MOUNT_ATTR_RDONLY` /
+    /// `MOUNT_ATTR_NOEXEC`).
     Restrict {
-        path: CString,
+        target: Target,
         attr_set: u64,
         recursive: bool,
     },
 }
 
-/// A compiled masking plan: what to clone before masking, the depth-ordered
-/// mount operations, and which hiding tmpfs mounts to seal read-only after
-/// their attachments are in place.
+/// A compiled masking plan: which subtrees to clone before masking, the
+/// depth-ordered mount operations, and which hiding tmpfs mounts to seal
+/// read-only after their attachments are in place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MountPlan {
-    pub(crate) clone_sources: Vec<CString>,
+    pub(crate) clone_sources: Vec<Target>,
     pub(crate) ops: Vec<MaskOp>,
     pub(crate) seal_readonly: Vec<CString>,
 }
@@ -153,19 +189,23 @@ impl PreparedNamespace {
         mount_private_mqueue()?;
         mount_private_shm()?;
 
-        // Clone every re-exposed subtree before any mask shadows its path. The
-        // plan pairs each source with a slot, so iterate them in lockstep.
+        // Clone every re-exposed subtree before any mask shadows it. The plan
+        // pairs each source with a slot, so iterate them in lockstep.
         for (source, slot_fd) in self
             .plan
             .clone_sources
             .iter()
             .zip(self.clone_fds.iter_mut())
         {
-            *slot_fd = open_tree(
-                libc::AT_FDCWD,
-                source,
-                OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE,
-            )?;
+            let source_fd = open_target(source)?;
+            let cloned = open_tree(
+                source_fd,
+                c"",
+                OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE,
+            );
+            // SAFETY: source_fd was opened above and is owned here.
+            unsafe { libc::close(source_fd) };
+            *slot_fd = cloned?;
         }
 
         for op in &self.plan.ops {
@@ -185,6 +225,36 @@ impl PreparedNamespace {
         enter_user_mount_ns(&self.uid_map, &self.gid_map)?;
         Ok(())
     }
+}
+
+/// Resolve `target` in the child's mount namespace and verify it is still the
+/// inode the policy was compiled against. Every later syscall uses the
+/// returned descriptor rather than the path, so nothing can change underneath
+/// between the check and the mount.
+///
+/// `EPERM` on a mismatch: the path was redirected after the policy was
+/// compiled, and confining the wrong inode would silently drop a deny.
+fn open_target(target: &Target) -> io::Result<libc::c_int> {
+    // SAFETY: the path is NUL-terminated and owned by the plan; the flags are
+    // scalar. O_PATH pins the (mount, dentry) pair without granting access.
+    let fd = check_fd(unsafe { libc::open(target.path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) })?;
+    // SAFETY: `stat` is a plain C struct; an all-zero value is a valid initial
+    // state for `fstat` to overwrite.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd was opened above and st is a valid out-pointer.
+    let rc = unsafe { libc::fstat(fd, &mut st) };
+    let verdict = if rc != 0 {
+        Err(io::Error::last_os_error())
+    } else if st.st_dev != target.dev || st.st_ino != target.ino {
+        Err(io::Error::from_raw_os_error(libc::EPERM))
+    } else {
+        Ok(fd)
+    };
+    if verdict.is_err() {
+        // SAFETY: fd was opened above and is owned here.
+        unsafe { libc::close(fd) };
+    }
+    verdict
 }
 
 /// Mount the fresh IPC namespace's POSIX message-queue filesystem over the
@@ -226,28 +296,23 @@ fn mount_private_shm() -> io::Result<()> {
 fn apply_op(op: &MaskOp, clone_fds: &mut [libc::c_int]) -> io::Result<()> {
     match op {
         MaskOp::HideDir {
-            path,
-            data,
+            target,
+            mode,
             seal_later,
         } => {
-            let mut flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+            let mut attrs = MASK_MOUNT_ATTRS;
             if !seal_later {
-                flags |= libc::MS_RDONLY;
+                attrs |= MOUNT_ATTR_RDONLY;
             }
-            // SAFETY: all pointers are NUL-terminated strings owned by the
-            // plan for the duration of the call.
-            let rc = unsafe {
-                libc::mount(
-                    c"guardrail".as_ptr(),
-                    path.as_ptr(),
-                    c"tmpfs".as_ptr(),
-                    flags,
-                    data.as_ptr().cast(),
-                )
-            };
-            check_rc(rc)
+            with_target(target, |tfd| {
+                let mfd = new_tmpfs(mode, attrs)?;
+                let result = move_mount_onto(mfd, tfd);
+                // SAFETY: mfd was created above and is owned here.
+                unsafe { libc::close(mfd) };
+                result
+            })
         }
-        MaskOp::HideFile { path } => hide_file(path),
+        MaskOp::HideFile { target } => with_target(target, hide_file),
         MaskOp::SkeletonDir { path } => {
             // SAFETY: path is a NUL-terminated string owned by the plan.
             let rc = unsafe { libc::mkdir(path.as_ptr(), 0o111) };
@@ -286,38 +351,75 @@ fn apply_op(op: &MaskOp, clone_fds: &mut [libc::c_int]) -> io::Result<()> {
             Ok(())
         }
         MaskOp::Restrict {
-            path,
+            target,
             attr_set,
             recursive,
         } => {
-            let bind_flags = libc::MS_BIND | if *recursive { libc::MS_REC } else { 0 };
-            // SAFETY: both path pointers are the same NUL-terminated string
-            // owned by the plan.
-            let rc = unsafe {
-                libc::mount(
-                    path.as_ptr(),
-                    path.as_ptr(),
-                    std::ptr::null(),
-                    bind_flags,
-                    std::ptr::null(),
-                )
-            };
-            check_rc(rc)?;
-            mount_setattr_path(path, if *recursive { AT_RECURSIVE } else { 0 }, *attr_set)
+            let at_recursive = if *recursive { AT_RECURSIVE } else { 0 };
+            with_target(target, |tfd| {
+                // Clone the target subtree, strip the denied rights while the
+                // clone is still detached, and only then attach it over the
+                // original — the restricted view is never briefly permissive.
+                let otfd = open_tree(
+                    tfd,
+                    c"",
+                    OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | at_recursive,
+                )?;
+                let result = mount_setattr_fd(otfd, at_recursive, *attr_set)
+                    .and_then(|()| move_mount_onto(otfd, tfd));
+                // SAFETY: otfd was opened above and is owned here.
+                unsafe { libc::close(otfd) };
+                result
+            })
         }
     }
 }
 
-/// Overmount a denied regular file with an empty read-only `mode=0` file:
-/// build a detached tmpfs (`fsopen`/`fsmount`), create the file there, clone
-/// it as a detached file mount, strip every right, and move it over `path`.
-/// No host filesystem path is touched along the way.
-fn hide_file(path: &CStr) -> io::Result<()> {
+/// Resolve and verify `target`, run `f` over the resulting descriptor, and
+/// close it either way.
+fn with_target<F>(target: &Target, f: F) -> io::Result<()>
+where
+    F: FnOnce(libc::c_int) -> io::Result<()>,
+{
+    let tfd = open_target(target)?;
+    let result = f(tfd);
+    // SAFETY: tfd was opened above and is owned here.
+    unsafe { libc::close(tfd) };
+    result
+}
+
+/// Create a detached tmpfs with the given `mode` option and mount attributes.
+/// Returns its mount descriptor, ready for [`move_mount_onto`].
+fn new_tmpfs(mode: &CStr, attrs: u64) -> io::Result<libc::c_int> {
     // SAFETY: fsopen takes a NUL-terminated filesystem name and scalar flags.
     let fsfd = check_fd(unsafe {
         libc::syscall(libc::SYS_fsopen, c"tmpfs".as_ptr(), FSOPEN_CLOEXEC) as libc::c_int
     })?;
-    // SAFETY: FSCONFIG_CMD_CREATE takes no key/value; fsfd is owned above.
+    let result = configure_and_mount_tmpfs(fsfd, mode, attrs);
+    // SAFETY: fsfd was opened above and is owned here.
+    unsafe { libc::close(fsfd) };
+    result
+}
+
+fn configure_and_mount_tmpfs(
+    fsfd: libc::c_int,
+    mode: &CStr,
+    attrs: u64,
+) -> io::Result<libc::c_int> {
+    // SAFETY: the key and value are NUL-terminated and fsfd is owned by the
+    // caller for the duration of the call.
+    check_rc(unsafe {
+        libc::syscall(
+            libc::SYS_fsconfig,
+            fsfd,
+            FSCONFIG_SET_STRING,
+            c"mode".as_ptr(),
+            mode.as_ptr(),
+            0 as libc::c_int,
+        ) as libc::c_int
+    })?;
+    // SAFETY: FSCONFIG_CMD_CREATE takes no key/value; fsfd is owned by the
+    // caller.
     check_rc(unsafe {
         libc::syscall(
             libc::SYS_fsconfig,
@@ -329,9 +431,31 @@ fn hide_file(path: &CStr) -> io::Result<()> {
         ) as libc::c_int
     })?;
     // SAFETY: fsfd holds a created superblock; scalar flags only.
-    let mfd = check_fd(unsafe {
-        libc::syscall(libc::SYS_fsmount, fsfd, FSMOUNT_CLOEXEC, 0 as libc::c_uint) as libc::c_int
-    })?;
+    check_fd(unsafe {
+        libc::syscall(
+            libc::SYS_fsmount,
+            fsfd,
+            FSMOUNT_CLOEXEC,
+            attrs as libc::c_uint,
+        ) as libc::c_int
+    })
+}
+
+/// Overmount a denied regular file with an empty read-only `mode=0` file:
+/// build a detached tmpfs (`fsopen`/`fsmount`), create the file there, clone
+/// it as a detached file mount, strip every right, and move it over the pinned
+/// descriptor. No host filesystem path is touched along the way.
+fn hide_file(target: libc::c_int) -> io::Result<()> {
+    // Writable at first: the placeholder file has to be created before the
+    // clone is sealed read-only below.
+    let mfd = new_tmpfs(c"0", MASK_MOUNT_ATTRS)?;
+    let result = hide_file_onto(mfd, target);
+    // SAFETY: mfd was created above and is owned here.
+    unsafe { libc::close(mfd) };
+    result
+}
+
+fn hide_file_onto(mfd: libc::c_int, target: libc::c_int) -> io::Result<()> {
     // SAFETY: mfd is a mount fd usable as a directory fd; the name is a
     // NUL-terminated literal. mode 0 is immune to the inherited umask.
     let ffd = check_fd(unsafe {
@@ -347,18 +471,15 @@ fn hide_file(path: &CStr) -> io::Result<()> {
     let otfd = open_tree(mfd, c"f", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC)?;
     // The mount itself goes read-only, so not even the owner can chmod the
     // mode-0 file back open.
-    mount_setattr_fd(
+    let result = mount_setattr_fd(
         otfd,
+        0,
         MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
-    )?;
-    move_mount_fd(otfd, path)?;
+    )
+    .and_then(|()| move_mount_onto(otfd, target));
     // SAFETY: otfd was opened above and is owned here.
     unsafe { libc::close(otfd) };
-    // SAFETY: mfd was opened above and is owned here.
-    unsafe { libc::close(mfd) };
-    // SAFETY: fsfd was opened above and is owned here.
-    unsafe { libc::close(fsfd) };
-    Ok(())
+    result
 }
 
 /// Enter the first user + mount namespace together with a fresh IPC namespace.
@@ -514,6 +635,23 @@ fn move_mount_fd(fd: libc::c_int, to: &CStr) -> io::Result<()> {
     })
 }
 
+/// Attach the detached mount `fd` directly onto the pinned descriptor `to`,
+/// naming neither end by path.
+fn move_mount_onto(fd: libc::c_int, to: libc::c_int) -> io::Result<()> {
+    // SAFETY: both empty-path literals are NUL-terminated; `fd` is a detached
+    // mount and `to` an `O_PATH` descriptor, both owned by the caller.
+    check_rc(unsafe {
+        libc::syscall(
+            libc::SYS_move_mount,
+            fd,
+            c"".as_ptr(),
+            to,
+            c"".as_ptr(),
+            MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+        ) as libc::c_int
+    })
+}
+
 fn mount_setattr_path(path: &CStr, flags: libc::c_uint, attr_set: u64) -> io::Result<()> {
     let attr = MountAttr {
         attr_set,
@@ -535,7 +673,7 @@ fn mount_setattr_path(path: &CStr, flags: libc::c_uint, attr_set: u64) -> io::Re
     })
 }
 
-fn mount_setattr_fd(fd: libc::c_int, attr_set: u64) -> io::Result<()> {
+fn mount_setattr_fd(fd: libc::c_int, flags: libc::c_uint, attr_set: u64) -> io::Result<()> {
     let attr = MountAttr {
         attr_set,
         attr_clr: 0,
@@ -549,7 +687,7 @@ fn mount_setattr_fd(fd: libc::c_int, attr_set: u64) -> io::Result<()> {
             libc::SYS_mount_setattr,
             fd,
             c"".as_ptr(),
-            libc::AT_EMPTY_PATH,
+            AT_EMPTY_PATH | flags,
             &attr,
             std::mem::size_of::<MountAttr>(),
         ) as libc::c_int

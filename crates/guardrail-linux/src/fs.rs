@@ -19,16 +19,19 @@
 //! write or execute stays allowed there (a hidden path cannot remain
 //! writable). Compilation fails with [`Error::Unsupported`] instead of
 //! approximating.
+//!
+//! Both layers are applied through descriptors *pinned at compile time*, never
+//! by re-resolving a path string later — see [`Pin`].
 
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use landlock::{
-    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreated, RulesetCreatedAttr, make_bitflags,
+    ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr,
+    RulesetCreated, RulesetCreatedAttr, make_bitflags,
 };
 
 use guardrail_core::{Error, FsAccess, Result};
@@ -46,12 +49,77 @@ struct LandlockPathBeneathAttr {
     parent_fd: libc::c_int,
 }
 
-#[derive(Debug, PartialEq)]
+/// A rule path pinned to the inode it resolved to when the policy was
+/// compiled.
+///
+/// Rule paths are canonicalized and opened exactly once, in [`compile`] — that
+/// is, in `LinuxBackend::new`. Resolving the path string again at spawn time
+/// would make the policy follow the *name* rather than the inode it was
+/// compiled against: a sandboxed child that may write a directory on the way
+/// to a policy path could move that directory aside between two spawns and
+/// leave a symlink or a decoy in its place, so the next spawn's grant or mask
+/// landed on an inode of the child's choosing — widening a grant or missing a
+/// deny.
+///
+/// The two layers consume the pin differently, because [`prepare`] runs in the
+/// parent while the masks are installed in the child:
+///
+/// * Landlock rules are built pre-fork, so they use `fd` directly and never
+///   resolve the path a second time;
+/// * the child unshares its own mount namespace first, and the mount syscalls
+///   reject a descriptor belonging to another namespace, so it re-resolves the
+///   path and checks the result against [`Pin::identity`] before masking it —
+///   a redirected path fails the spawn rather than masking the wrong inode.
+///   Keeping `fd` open for the backend's lifetime is what makes that check
+///   sound: the pinned inode cannot be freed and its number recycled beneath
+///   a decoy.
+///
+/// The consequence to be aware of: replacing a policy path after the backend
+/// is constructed does not re-point the policy. The sandbox keeps confining
+/// the inode the policy was validated against.
+#[derive(Debug)]
+struct Pin {
+    path: PathBuf,
+    fd: OwnedFd,
+}
+
+impl Pin {
+    /// The `(device, inode)` this path resolved to when it was pinned.
+    fn identity(&self) -> Result<(libc::dev_t, libc::ino_t)> {
+        // SAFETY: `stat` is a plain C struct; an all-zero value is a valid
+        // initial state for `fstat` to overwrite.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor is owned by `self` and `st` is a valid
+        // out-pointer for the duration of the call.
+        if unsafe { libc::fstat(self.fd.as_raw_fd(), &mut st) } != 0 {
+            return Err(Error::confinement(
+                "landlock",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok((st.st_dev, st.st_ino))
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct CompiledRules {
+    /// Every distinct rule path, sorted, so a path's pin index is stable.
+    pins: Vec<Pin>,
     read_paths: BTreeSet<PathBuf>,
     write_paths: BTreeSet<PathBuf>,
     execute_paths: BTreeSet<PathBuf>,
     pub(crate) mount_plan: ns::MountPlan,
+}
+
+impl CompiledRules {
+    /// Keep the pins alive for the backend's lifetime: the child's masking
+    /// checks a re-resolved path against [`Pin::identity`], and an open
+    /// descriptor is what stops the pinned inode from being freed and its
+    /// number reused by a decoy.
+    #[cfg(test)]
+    fn pin_count(&self) -> usize {
+        self.pins.len()
+    }
 }
 
 /// Compile ordered filesystem allow/deny rules into positive Landlock paths
@@ -59,18 +127,75 @@ pub(crate) struct CompiledRules {
 ///
 /// This runs in the parent before `fork()`, so policy compilation errors
 /// remain structured [`Error::Confinement`] / [`Error::Unsupported`] values
-/// instead of being collapsed into a `pre_exec` spawn failure.
+/// instead of being collapsed into a `pre_exec` spawn failure. It is also
+/// where every rule path is pinned (see [`Pin`]).
 pub(crate) fn compile(rules: &[FsAccess]) -> Result<CompiledRules> {
     let normalized = normalize_rules(rules)?;
+    let pins = pin_rule_paths(&normalized)?;
     let read_paths = allow_roots(&normalized, FsRight::Read);
     let write_paths = allow_roots(&normalized, FsRight::Write);
     let execute_paths = allow_roots(&normalized, FsRight::Execute);
-    let mount_plan = plan_masks(&normalized, &read_paths, &write_paths, &execute_paths)?;
+    let mount_plan = plan_masks(
+        &normalized,
+        &pins,
+        &read_paths,
+        &write_paths,
+        &execute_paths,
+    )?;
     Ok(CompiledRules {
+        pins,
         read_paths,
         write_paths,
         execute_paths,
         mount_plan,
+    })
+}
+
+/// Open one `O_PATH` descriptor per distinct rule path. Sorted, so a path's
+/// index into the result is stable for the mask plan that references it.
+fn pin_rule_paths(rules: &[NormalizedRule]) -> Result<Vec<Pin>> {
+    let paths: BTreeSet<&Path> = rules.iter().map(|rule| rule.path.as_path()).collect();
+    paths
+        .into_iter()
+        .map(|path| {
+            let c_path = mount_cstring(path)?;
+            // SAFETY: the path is NUL-terminated and the flags are scalar.
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return Err(Error::confinement(
+                    "landlock",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            Ok(Pin {
+                path: path.to_path_buf(),
+                // SAFETY: `fd` was just returned by a successful `open` and is
+                // owned by nothing else.
+                fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            })
+        })
+        .collect()
+}
+
+/// The pin index of a rule path. Every path reaching this came from the same
+/// normalized rule set the pins were built from.
+fn pin_index(pins: &[Pin], path: &Path) -> usize {
+    pins.iter()
+        .position(|pin| pin.path == path)
+        .expect("every rule path is pinned")
+}
+
+/// The masking target for a rule path: the path the child re-resolves in its
+/// own mount namespace, plus the identity that resolution must produce.
+fn target_for(pins: &[Pin], path: &Path) -> Result<ns::Target> {
+    let pin = pins
+        .get(pin_index(pins, path))
+        .expect("pin_index returns an in-range index");
+    let (dev, ino) = pin.identity()?;
+    Ok(ns::Target {
+        path: mount_cstring(path)?,
+        dev,
+        ino,
     })
 }
 
@@ -210,18 +335,21 @@ pub(crate) fn prepare(rules: &CompiledRules) -> Result<PreparedRuleset> {
         // every rule targeting an individual file.
         .set_compatibility(CompatLevel::BestEffort);
 
-    ruleset = add_path_rules(
+    ruleset = add_pinned_rules(
         ruleset,
+        &rules.pins,
         &rules.read_paths,
         access_for_right(FsRight::Read, abi),
     )?;
-    ruleset = add_path_rules(
+    ruleset = add_pinned_rules(
         ruleset,
+        &rules.pins,
         &rules.write_paths,
         access_for_right(FsRight::Write, abi),
     )?;
-    ruleset = add_path_rules(
+    ruleset = add_pinned_rules(
         ruleset,
+        &rules.pins,
         &rules.execute_paths,
         access_for_right(FsRight::Execute, abi),
     )?;
@@ -321,6 +449,98 @@ fn allow_roots(rules: &[NormalizedRule], right: FsRight) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+/// Whether the sandbox could rename `dir`. `rename(2)` is mediated by
+/// Landlock's `Refer` right on the *parent* directory — which every write
+/// grant carries — so a directory is movable exactly when write is finally
+/// allowed one level up.
+fn renameable_by_the_sandbox(rules: &[NormalizedRule], dir: &Path) -> bool {
+    dir.parent()
+        .is_some_and(|parent| final_effect(rules, FsRight::Write, parent) == RuleEffect::Allow)
+}
+
+/// Refuse policies whose paths the sandbox could relocate.
+///
+/// Masks and grants are bound to inodes, not names, so within one sandbox a
+/// rename changes nothing: a mount travels with the directory it is glued to,
+/// and a spawn whose target stopped naming its compiled inode is refused. But
+/// the rename outlives the process. A child can move a directory aside, leave
+/// a decoy at the old name, and wait — a later run compiles this same policy
+/// against the rewritten tree, and its grant or mask lands on the decoy while
+/// the real data sits beside it under the surrounding allow rule. Pinning
+/// inside one process cannot see that, and persisting inode identity across
+/// runs would break on every legitimate `git checkout` or editor rewrite.
+///
+/// So the shape is rejected up front. A policy path is safe when neither it
+/// nor any directory above it can be renamed by the sandbox, which holds when
+/// each is either a mount point in this plan (renaming one fails with `EBUSY`)
+/// or sits where the policy grants no write on its parent. That keeps the
+/// common shapes — `WriteAllow(project)` with `WriteDeny(project/.git)` is
+/// fine, because moving `project` needs rights the policy never grants above
+/// its own root — and rejects a deny buried under a directory the sandbox may
+/// freely move.
+fn reject_relocatable_policy_paths(
+    rules: &[NormalizedRule],
+    planned: &[Planned],
+    grants: [&BTreeSet<PathBuf>; 3],
+) -> Result<()> {
+    let mounted: BTreeSet<&Path> = planned
+        .iter()
+        .filter(|entry| entry.is_mount())
+        .map(Planned::path)
+        .collect();
+
+    // Everything the policy identifies by path and must still identify next
+    // run: the Landlock grant roots and every masked deny boundary.
+    let policy_paths: BTreeSet<&Path> = grants
+        .into_iter()
+        .flatten()
+        .map(PathBuf::as_path)
+        .chain(mounted.iter().copied())
+        .collect();
+
+    for path in policy_paths {
+        let mut candidate = Some(path);
+        while let Some(dir) = candidate {
+            if !mounted.contains(dir) && renameable_by_the_sandbox(rules, dir) {
+                return Err(Error::Unsupported(not_durable(path, dir)));
+            }
+            candidate = dir.parent();
+        }
+    }
+    Ok(())
+}
+
+/// The refusal [`reject_relocatable_policy_paths`] raises, phrased for whether
+/// the movable directory is the rule path itself or one above it.
+fn not_durable(path: &Path, dir: &Path) -> String {
+    let common = "A child can move it aside, leave a decoy at the old name, and \
+                  a later run of this policy would confine the decoy instead of \
+                  the real path.";
+    if path == dir {
+        format!(
+            "cannot enforce this ordered policy on Linux: the rule for `{}` is \
+             not durable, because the sandbox may rename it — write is allowed \
+             on its parent. {common} Deny write on `{}` too, which makes it a \
+             mount point that cannot be renamed, or keep it out of a \
+             write-allowed subtree",
+            path.display(),
+            path.display()
+        )
+    } else {
+        format!(
+            "cannot enforce this ordered policy on Linux: the rule for `{}` is \
+             not durable, because the sandbox may rename `{}` on the way to it \
+             — write is allowed on that directory's parent. {common} Deny write \
+             on `{}` as well, which makes it a mount point that cannot be \
+             renamed, or keep `{}` out of a write-allowed subtree",
+            path.display(),
+            dir.display(),
+            dir.display(),
+            path.display()
+        )
+    }
+}
+
 /// How a rule path already processed shapes the paths beneath it.
 #[derive(Debug)]
 enum Special {
@@ -407,6 +627,21 @@ impl Planned {
         }
     }
 
+    /// Whether this operation installs a mount at its path. Renaming a mount
+    /// point fails with `EBUSY`, so a mount on the way to a policy path is
+    /// what keeps the sandbox from relocating it — see
+    /// [`reject_relocatable_policy_paths`]. Skeletons are plain entries
+    /// created inside a hiding tmpfs, not mounts.
+    fn is_mount(&self) -> bool {
+        match self {
+            Planned::HideDir(_)
+            | Planned::HideFile(_)
+            | Planned::Attach { .. }
+            | Planned::Restrict { .. } => true,
+            Planned::SkeletonDir(_) | Planned::SkeletonFile(_) => false,
+        }
+    }
+
     /// Ordering among operations at the same depth and path: masks first,
     /// then the skeleton they contain, then attachments, then restrictions
     /// layered on top of an attachment.
@@ -425,8 +660,19 @@ impl Planned {
 /// where the final effect denies a right that a Landlock grant would allow
 /// gets a mask, and each path the policy re-allows beneath a mask gets its
 /// real subtree cloned and attached back.
+///
+/// Masks and clone sources are emitted as [`ns::Target`]s carrying the pinned
+/// inode identity, so the child installs them on the inodes the policy was
+/// compiled against or refuses to spawn. The skeleton and attach operations
+/// stay plain paths: they target entries *inside* a hiding tmpfs this plan
+/// mounts, which has no compile-time inode to pin. A swapped path prefix can
+/// therefore still misplace a re-allowed subtree, but not reveal a masked one
+/// — the hide itself is verified, and the Landlock grant for the re-allowed
+/// path is pinned too, so a misplaced attachment is reachable only where the
+/// policy already allowed it.
 fn plan_masks(
     rules: &[NormalizedRule],
+    pins: &[Pin],
     read_grants: &BTreeSet<PathBuf>,
     write_grants: &BTreeSet<PathBuf>,
     execute_grants: &BTreeSet<PathBuf>,
@@ -565,6 +811,11 @@ fn plan_masks(
     for dir in &skeleton_dirs {
         planned.push(Planned::SkeletonDir(dir.clone()));
     }
+
+    // Every mount this plan installs is known now, so the durability of the
+    // paths it is all keyed on can be settled before anything else is built.
+    reject_relocatable_policy_paths(rules, &planned, [read_grants, write_grants, execute_grants])?;
+
     planned.sort_by(|a, b| {
         let key = |p: &Planned| (p.path().components().count(), p.rank());
         key(a).cmp(&key(b)).then_with(|| a.path().cmp(b.path()))
@@ -577,15 +828,15 @@ fn plan_masks(
                 Planned::HideDir(path) => {
                     let seal_later = sealed_hides.contains(path);
                     ns::MaskOp::HideDir {
-                        path: mount_cstring(path)?,
+                        target: target_for(pins, path)?,
                         // Traversal-only when re-allowed descendants are
                         // attached inside; fully closed otherwise.
-                        data: CString::from(if seal_later { c"mode=0111" } else { c"mode=0" }),
+                        mode: CString::from(if seal_later { c"0111" } else { c"0" }),
                         seal_later,
                     }
                 }
                 Planned::HideFile(path) => ns::MaskOp::HideFile {
-                    path: mount_cstring(path)?,
+                    target: target_for(pins, path)?,
                 },
                 Planned::SkeletonDir(path) => ns::MaskOp::SkeletonDir {
                     path: mount_cstring(path)?,
@@ -610,7 +861,7 @@ fn plan_masks(
                         attr_set |= ns::MOUNT_ATTR_NOEXEC;
                     }
                     ns::MaskOp::Restrict {
-                        path: mount_cstring(path)?,
+                        target: target_for(pins, path)?,
                         attr_set,
                         recursive: *recursive,
                     }
@@ -622,7 +873,7 @@ fn plan_masks(
     Ok(ns::MountPlan {
         clone_sources: clone_sources
             .iter()
-            .map(|p| mount_cstring(p))
+            .map(|path| target_for(pins, path))
             .collect::<Result<Vec<_>>>()?,
         ops,
         seal_readonly: sealed_hides
@@ -637,15 +888,22 @@ fn mount_cstring(path: &Path) -> Result<CString> {
         .map_err(|err| Error::confinement("mount masking", err))
 }
 
-fn add_path_rules(
+/// Grant `access` beneath each allow root, identifying the root by its pinned
+/// descriptor rather than re-opening its path. `PathBeneath` only borrows the
+/// descriptor, so the pin stays owned by [`CompiledRules`] and usable by the
+/// next spawn.
+fn add_pinned_rules(
     mut ruleset: RulesetCreated,
+    pins: &[Pin],
     paths: &BTreeSet<PathBuf>,
     access: BitFlags<AccessFs>,
 ) -> Result<RulesetCreated> {
     for path in paths {
-        let fd = PathFd::new(path).map_err(|err| Error::confinement("landlock", err))?;
+        let pin = pins
+            .get(pin_index(pins, path))
+            .expect("pin_index returns an in-range index");
         ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, access))
+            .add_rule(PathBeneath::new(&pin.fd, access))
             .map_err(|err| Error::confinement("landlock", err))?;
     }
     Ok(ruleset)
@@ -670,6 +928,13 @@ fn execute_access() -> BitFlags<AccessFs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl CompiledRules {
+        /// The mask target a plan carries for `path`.
+        fn target(&self, path: &Path) -> ns::Target {
+            target_for(&self.pins, &canon(path)).unwrap()
+        }
+    }
 
     fn canon(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap()
@@ -697,7 +962,9 @@ mod tests {
         assert_eq!(compiled.read_paths, BTreeSet::from([canon(temp.path())]));
         assert_eq!(
             compiled.mount_plan.ops,
-            vec![ns::MaskOp::HideFile { path: c(&secret) }]
+            vec![ns::MaskOp::HideFile {
+                target: compiled.target(&secret),
+            }]
         );
         assert!(compiled.mount_plan.clone_sources.is_empty());
         assert!(compiled.mount_plan.seal_readonly.is_empty());
@@ -724,15 +991,20 @@ mod tests {
             compiled.read_paths,
             BTreeSet::from([canon(temp.path()), canon(&grandchild)])
         );
-        assert_eq!(compiled.mount_plan.clone_sources, vec![c(&grandchild)]);
+        assert_eq!(
+            compiled.mount_plan.clone_sources,
+            vec![compiled.target(&grandchild)]
+        );
         assert_eq!(
             compiled.mount_plan.ops,
             vec![
                 ns::MaskOp::HideDir {
-                    path: c(&child),
-                    data: CString::from(c"mode=0111"),
+                    target: compiled.target(&child),
+                    mode: CString::from(c"0111"),
                     seal_later: true,
                 },
+                // Skeletons and attachments land inside the tmpfs mounted
+                // above, which has no compile-time inode to pin.
                 ns::MaskOp::SkeletonFile {
                     path: c(&grandchild)
                 },
@@ -761,7 +1033,7 @@ mod tests {
         assert_eq!(
             compiled.mount_plan.ops,
             vec![ns::MaskOp::Restrict {
-                path: c(&locked),
+                target: compiled.target(&locked),
                 attr_set: ns::MOUNT_ATTR_RDONLY,
                 recursive: true,
             }]
@@ -785,11 +1057,140 @@ mod tests {
         assert_eq!(
             compiled.mount_plan.ops,
             vec![ns::MaskOp::Restrict {
-                path: c(&locked),
+                target: compiled.target(&locked),
                 attr_set: ns::MOUNT_ATTR_RDONLY | ns::MOUNT_ATTR_NOEXEC,
                 recursive: true,
             }]
         );
+    }
+
+    #[test]
+    fn deny_beneath_a_sandbox_movable_directory_is_unsupported() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        let locked = vault.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+
+        // `vault` is inside the write grant, so the sandbox can rename it and
+        // stage a decoy that a later run of this policy would mask instead.
+        let result = compile(&[
+            FsAccess::ReadAllow(temp.path().into()),
+            FsAccess::WriteAllow(temp.path().into()),
+            FsAccess::WriteDeny(locked),
+        ]);
+
+        assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+    }
+
+    #[test]
+    fn deny_beneath_a_denied_directory_is_supported() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        let locked = vault.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+
+        // Denying write on `vault` too makes it a mount point, which cannot be
+        // renamed (EBUSY) — so nothing on the way to `locked` can move.
+        let compiled = compile(&[
+            FsAccess::ReadAllow(temp.path().into()),
+            FsAccess::WriteAllow(temp.path().into()),
+            FsAccess::WriteDeny(vault.clone()),
+            FsAccess::WriteDeny(locked),
+        ])
+        .unwrap();
+
+        // Only `vault` needs a mask: the recursive read-only bind already
+        // covers everything beneath it.
+        assert_eq!(
+            compiled.mount_plan.ops,
+            vec![ns::MaskOp::Restrict {
+                target: compiled.target(&vault),
+                attr_set: ns::MOUNT_ATTR_RDONLY,
+                recursive: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn deny_directly_beneath_its_write_grant_is_supported() {
+        let temp = tempfile::tempdir().unwrap();
+        let locked = temp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+
+        // The shape real policies use (`WriteAllow(project)` +
+        // `WriteDeny(project/.git)`): moving the grant root needs rights on
+        // its parent, which this policy never grants.
+        let compiled = compile(&[
+            FsAccess::ReadAllow(temp.path().into()),
+            FsAccess::WriteAllow(temp.path().into()),
+            FsAccess::WriteDeny(locked.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            compiled.mount_plan.ops,
+            vec![ns::MaskOp::Restrict {
+                target: compiled.target(&locked),
+                attr_set: ns::MOUNT_ATTR_RDONLY,
+                recursive: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn allow_root_inside_a_write_grant_is_unsupported() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // The sandbox can rename `sub`, so a later run's Landlock grant would
+        // be issued over whatever the name points at by then.
+        let result = compile(&[FsAccess::ReadAllow(sub), FsAccess::WriteAllow(work)]);
+
+        assert!(matches!(result, Err(Error::Unsupported(_))), "{result:?}");
+    }
+
+    #[test]
+    fn read_only_policies_are_never_relocatable() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Without a write grant the sandbox cannot rename anything, so nesting
+        // is fine however deep it goes.
+        let compiled =
+            compile(&[FsAccess::ReadAllow(work), FsAccess::ReadAllow(sub.clone())]).unwrap();
+
+        assert!(compiled.read_paths.contains(&canon(&sub)));
+    }
+
+    #[test]
+    fn every_rule_path_is_pinned_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let locked = temp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+
+        let compiled = compile(&[
+            FsAccess::ReadAllow(temp.path().into()),
+            FsAccess::WriteAllow(temp.path().into()),
+            FsAccess::WriteDeny(locked.clone()),
+        ])
+        .unwrap();
+
+        // Two distinct paths across three rules: pins are per path, not per
+        // rule.
+        let paths: Vec<&Path> = compiled.pins.iter().map(|pin| pin.path.as_path()).collect();
+        assert_eq!(paths, vec![canon(temp.path()), canon(&locked)]);
+        assert_eq!(compiled.pin_count(), 2);
+
+        // Each pin records the identity the child must re-observe, and the
+        // descriptor stays open so that inode cannot be recycled.
+        let identity = compiled.target(&locked);
+        let meta = std::fs::metadata(&locked).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((identity.dev, identity.ino), (meta.dev(), meta.ino()));
     }
 
     #[test]
