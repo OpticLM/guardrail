@@ -30,7 +30,7 @@ audit — **denial observability** — with a deliberately minimal shape:
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001  | macOS denials name the rule that caused them in the unified log | P1 | S | — | TODO |
-| 002  | Opted-in Linux sandboxes carry a pinned marker the kernel audit trail can filter on | P1 | M | — | TODO |
+| 002  | Opted-in Linux sandboxes carry a pinned marker the kernel audit trail can filter on | P1 | M | — | DONE |
 | 003  | Opted-in Linux sandboxes have Landlock and seccomp record their own denials | P2 | S | 002 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
@@ -43,8 +43,14 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   `/dev/mqueue` directory; the container these plans were written in lacks
   the directory until `mkdir /dev/mqueue` is run as root — see plan 002's
   "Host requirement").
-- Plan 002's code blocks were built and run on 2026-11-15; plan 003's were
-  not.
+- Plan 002 was implemented on 2026-11-16, including its live audit-daemon
+  step. Plan 003's code blocks have not been built or run.
+- Two host traps found while running the Linux suite. The tests that call
+  `common::landlock_enforced()` read `/sys/kernel/security/lsm` and skip
+  silently when securityfs is not mounted
+  (`mount -t securityfs securityfs /sys/kernel/security`). And
+  `filesystem::read_allow_then_read_deny_denies_child_but_allows_sibling`
+  fails when the suite runs as root; see "Known gaps".
 - 003 depends on 002 in code. 002 adds `SandboxConfig::linux_audit_denials`
   and threads it through the Linux backend and the Node binding; 003 adds
   the kernel logging flags under the same field.
@@ -101,6 +107,13 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   logging decision from the newest layer that denies. The access is denied
   either way, so the process gains nothing and learns nothing about
   guardrail's policy.
+- Linux, host running as root: a read-denied file or directory beneath an
+  allowed parent is hidden, not refused. The sandboxed process keeps
+  `CAP_DAC_OVERRIDE` inside its user namespace, so opening the mode-0 mask
+  succeeds and yields an empty file or directory. The content does not leak,
+  but no errno is returned, so no errno-keyed audit rule records the attempt.
+  This predates these plans (checked on `a5c8219`, 2026-11-16) and is not
+  addressed by them.
 - Linux: the audit queue drops records under load, so counts are a lower
   bound, and a process can provoke that deliberately. Queue size and
   overflow behavior are host audit settings.

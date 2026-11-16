@@ -242,8 +242,12 @@ with `Unsupported(…namespace…)`; after `mkdir /dev/mqueue` (as root) the
 suite passes there except
 `network::outbound_only_keeps_ipv4_and_ipv6_connections`, which needs an
 IPv6 loopback the container lacks. CI uses `ubuntu-latest` after
-`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Unlike plan
-002's, this plan's code blocks have not been built or run.
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Tests that
+call `common::landlock_enforced()` skip silently unless securityfs is mounted
+(`mount -t securityfs securityfs /sys/kernel/security`), and as root
+`filesystem::read_allow_then_read_deny_denies_child_but_allows_sibling` fails
+on unmodified code. Unlike plan 002's, this plan's code blocks have not been
+built or run.
 
 ## Scope
 

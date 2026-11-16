@@ -107,7 +107,9 @@ contradict). Kernel facts are from the v6.18 source unless noted.
   `cargo clippy -p guardrail-linux --all-targets` reported nothing in the new
   code, `cargo fmt --all -- --check` was clean, and the Node binding built
   and passed `pnpm test`. The macOS and Windows edits were applied but could
-  not be compiled there. Step 9 (a live audit daemon) was not run.
+  not be compiled there. Step 9 was run on the same host on 2026-11-16 with
+  `auditctl` 3.1.2: the `pers&=0x3000000` syntax loaded and the denied write
+  was recorded with `per=3000000`.
 
 ## Current state
 
@@ -367,6 +369,14 @@ root) the suite passes there except
 `network::outbound_only_keeps_ipv4_and_ipv6_connections`, which needs an
 IPv6 loopback the container lacks. CI uses `ubuntu-latest` after
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Two more traps on that container. Tests that call `common::landlock_enforced()`
+skip silently unless securityfs is mounted
+(`mount -t securityfs securityfs /sys/kernel/security`). With it mounted and
+the suite running as root,
+`filesystem::read_allow_then_read_deny_denies_child_but_allows_sibling` fails
+on unmodified code, because root keeps `CAP_DAC_OVERRIDE` inside the sandbox's
+user namespace and can open a mode-0 mask (it reads as empty).
 
 ## Scope
 
