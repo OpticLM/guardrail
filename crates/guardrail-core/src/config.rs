@@ -49,6 +49,7 @@ pub struct ResourceLimits {
 ///     env: BTreeMap::new(),
 ///     linux_unix_sockets: vec![],
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
+///     linux_audit_denials: false,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
 ///     windows_manifest_dir: None,
@@ -100,6 +101,20 @@ pub struct SandboxConfig {
     /// only when the child runs its own nested sandbox (Chromium/Electron,
     /// bubblewrap, rootless containers). See [`UserNamespacePolicy`].
     pub linux_user_namespaces: UserNamespacePolicy,
+    /// Linux-only opt-in: make this sandbox's denials attributable in the
+    /// host audit log. Non-Linux backends ignore this field.
+    ///
+    /// When `true`, the Linux backend marks the sandboxed process tree with
+    /// `personality(2)` value `0x3000000`, which syscall audit records print
+    /// as `per=` and an audit rule can match (`-F pers`). A seccomp rule
+    /// refuses every `personality(2)` call that would clear the marker, and
+    /// constructing the backend fails with `Error::Unsupported` when the host
+    /// refuses the marker, so an opted-in sandbox never runs unmarked.
+    ///
+    /// Off by default: the seccomp rule makes `setarch`-style tools fail with
+    /// `EPERM` inside the sandbox. Guardrail never reads audit records and
+    /// never installs audit rules; both are the host's job.
+    pub linux_audit_denials: bool,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending

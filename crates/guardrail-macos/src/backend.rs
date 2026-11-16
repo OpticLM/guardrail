@@ -195,6 +195,7 @@ mod tests {
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
             linux_user_namespaces: UserNamespacePolicy::Deny,
+            linux_audit_denials: false,
             windows_cache_namespace: None,
             windows_manifest_dir: None,
             windows_acl_verification: guardrail_core::WindowsAclVerification::default(),

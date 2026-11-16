@@ -810,6 +810,7 @@ fn builder_with_system_root() -> SandboxConfig {
         env,
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
+        linux_audit_denials: false,
         windows_cache_namespace: Some(unique_namespace("policy")),
         windows_manifest_dir: Some(std::env::temp_dir().join("guardrail-test-manifests")),
         windows_acl_verification: guardrail_core::WindowsAclVerification::default(),

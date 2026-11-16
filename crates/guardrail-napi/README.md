@@ -1302,6 +1302,67 @@ Tested result: `go version` and `go build` completed successfully.
   only and does not buffer output; see
   [Streaming stdio for LLM tool loops](#streaming-stdio-for-llm-tool-loops).
 
+## Auditing Denials
+
+Guardrail does not collect or expose denial logs. It leaves markers in each
+platform's own log so you can filter and attribute denials with the tools you
+already run.
+
+### Linux
+
+Set `linuxAuditDenials: true` to mark a sandbox for the kernel audit
+subsystem. The whole sandboxed process tree then carries the `personality(2)`
+value `0x3000000`, which every syscall audit record prints as `per=3000000`
+and which an audit rule can match. The marker logs nothing by itself. Records
+appear once the host administrator installs rules such as:
+
+```sh
+sudo auditctl -a always,exit -F arch=b64 -S all -F 'pers&=0x3000000' -F exit=-EACCES -k guardrail
+sudo auditctl -a always,exit -F arch=b64 -S all -F 'pers&=0x3000000' -F exit=-EROFS -k guardrail
+sudo auditctl -a always,exit -F arch=b64 -S all -F 'pers&=0x3000000' -F exit=-EPERM -k guardrail
+sudo ausearch -k guardrail --start recent
+```
+
+Each `SYSCALL` record names the process (`pid`, `comm`, `exe`) and comes with
+a `PATH` record holding the path as the process typed it; for a denied
+create, the `PATH` record names the parent directory. The rules catch
+Landlock denials and also the mount-mask denials (`EROFS`, `EACCES`) behind
+deny-under-allow rules, which Landlock's own records cannot show. Expect
+records for routine probes too: under a narrow `fs` policy the dynamic
+loader's attempt to open `/etc/ld.so.cache` is denied, and recorded, on every
+spawn.
+
+The marker is pinned. A seccomp rule refuses, with `EPERM`, every
+`personality(2)` call that would drop it, so nothing inside the sandbox can
+leave the audited set. The cost is that tools which overwrite the whole
+personality word — `setarch`, `linux32` — fail inside an opted-in sandbox.
+Debuggers that add `ADDR_NO_RANDOMIZE` to the current value keep working.
+
+Building a sandbox with `linuxAuditDenials: true` fails on a host that
+refuses `personality(2)`, such as a systemd unit with `LockPersonality=yes`
+or a container under Docker's default seccomp profile. Guardrail never runs
+an opted-in sandbox unmarked. On such a host you can still filter syscall
+audit records by the uid the agent runs as (`-F uid=`), which also matches
+the host application's own failures.
+
+Limits:
+
+- Syscalls refused by the seccomp filters (denied socket families, the
+  kernel-surface syscalls) never reach the audit entry hook, so these rules
+  do not record them.
+- A lookup inside a read-denied directory that has a re-allowed descendant
+  returns `ENOENT` and is not caught by these rules.
+
+Tested result: kernel 6.18.44 x86_64 with `auditctl` 3.1.2 and the
+`pers&=0x3000000` syntax shown above. A write refused under a read-only grant
+produced this event (`exit=-13` is `EACCES`; the `exe` path is shortened):
+
+```text
+type=SYSCALL msg=audit(1794788855.070:25): arch=c000003e syscall=257 per=3000000 success=no exit=-13 a0=ffffff9c a1=7ffd61f342e8 a2=80241 a3=1b6 items=1 ppid=1623 pid=1672 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="guardrail-probe" exe=".../guardrail-probe" key="guardrail"
+type=CWD msg=audit(1794788855.070:25): cwd="/home/user/guardrail/crates/guardrail-linux"
+type=PATH msg=audit(1794788855.070:25): item=0 name="/tmp/.tmptWc5AG/" inode=582106 dev=fe:00 mode=040755 ouid=0 ogid=0 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+```
+
 ## Platform Capability Matrix
 
 Each option is enforced by a different mechanism per platform; an option
@@ -1315,6 +1376,7 @@ marked *ignored* is an honest no-op there.
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
+| `linuxAuditDenials` | opt-in: marks the sandboxed process tree with a pinned `personality(2)` value that host syscall audit rules can match; guardrail does not read the records (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 

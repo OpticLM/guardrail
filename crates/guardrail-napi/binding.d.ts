@@ -154,6 +154,15 @@ export interface SandboxOptions {
    */
   linuxUserNamespaces?: UserNamespacePolicy
   /**
+   * Linux-only opt-in: make this sandbox's denials attributable in the
+   * host audit log; `false` if omitted. Marks the sandboxed process tree
+   * with `personality(2)` value `0x3000000` for host syscall audit rules
+   * and pins it, so `setarch`-style tools fail with `EPERM` inside the
+   * sandbox. Building the sandbox fails when the host refuses the marker.
+   * Guardrail never reads audit records. Ignored on macOS and Windows.
+   */
+  linuxAuditDenials?: boolean
+  /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
    * descendants but not aggregated across forks.
@@ -258,6 +267,15 @@ export interface SpawnOptions {
    * machinery such a sandbox needs.
    */
   linuxUserNamespaces?: UserNamespacePolicy
+  /**
+   * Linux-only opt-in: make this sandbox's denials attributable in the
+   * host audit log; `false` if omitted. Marks the sandboxed process tree
+   * with `personality(2)` value `0x3000000` for host syscall audit rules
+   * and pins it, so `setarch`-style tools fail with `EPERM` inside the
+   * sandbox. Building the sandbox fails when the host refuses the marker.
+   * Guardrail never reads audit records. Ignored on macOS and Windows.
+   */
+  linuxAuditDenials?: boolean
   /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by

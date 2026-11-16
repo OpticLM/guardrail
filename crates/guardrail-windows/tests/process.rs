@@ -116,6 +116,7 @@ fn config_with_probe_grant() -> SandboxConfig {
         env,
         darwin_sandbox_profiles: vec![],
         linux_user_namespaces: UserNamespacePolicy::Deny,
+        linux_audit_denials: false,
         windows_cache_namespace: Some(unique_namespace("process")),
         windows_manifest_dir: Some(std::env::temp_dir().join("guardrail-test-manifests")),
         windows_acl_verification: guardrail_core::WindowsAclVerification::default(),

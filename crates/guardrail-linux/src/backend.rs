@@ -2,7 +2,7 @@ use std::os::unix::process::CommandExt;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
-use crate::{fs, ipc, net, ns, rlimit, seccomp, support};
+use crate::{audit, fs, ipc, net, ns, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
@@ -23,13 +23,18 @@ impl LinuxBackend {
     /// [`Backend::probe_support`]); when `NetworkPolicy::OutboundOnly` is
     /// requested and the kernel lacks Landlock network support (ABI v4,
     /// Linux 6.7+; see the crate-level ABI table);
-    /// or when the host forbids the unprivileged IPC/user/mount namespaces
+    /// when the host forbids the unprivileged IPC/user/mount namespaces
     /// required for every sandbox's IPC isolation (see the crate-level
-    /// namespace documentation).
+    /// namespace documentation); or when `linux_audit_denials` is set and the
+    /// host refuses the `personality(2)` audit marker (see the crate-level
+    /// auditing documentation).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
         ns::probe_namespace_support()?;
+        if config.linux_audit_denials {
+            audit::probe_marker_support()?;
+        }
         let ipc_policy = ipc::Policy::new(&config)?;
         let net_ruleset = net::prepare(&config)?;
         let seccomp_programs = seccomp::build(&config)?;
@@ -62,6 +67,7 @@ impl Backend for LinuxBackend {
         // plan is CStrings and fixed buffers compiled in `new`. The child
         // adds only its freshly mounted private IPC filesystems to Landlock.
         let limits = self.config.limits;
+        let audit_denials = self.config.linux_audit_denials;
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let ipc_ruleset = self.ipc_policy.prepare()?;
         let net_ruleset = self
@@ -84,6 +90,15 @@ impl Backend for LinuxBackend {
                 //     below, and a hardening measure on its own. prctl is
                 //     async-signal-safe.
                 set_no_new_privs()?;
+
+                // (1b) Audit marker, when the policy opted in: tag this
+                //      process tree so host syscall auditing can attribute
+                //      its denials. A refusal fails the spawn, so an opted-in
+                //      sandbox never runs unmarked. The seccomp filters
+                //      applied last pin the marker.
+                if audit_denials {
+                    audit::mark()?;
+                }
 
                 // (2) Enter fresh IPC/user/mount namespaces, mount private
                 //     /dev/mqueue and /dev/shm filesystems, and install any

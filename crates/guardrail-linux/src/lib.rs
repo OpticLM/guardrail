@@ -177,6 +177,31 @@
 //! inspect a host process in its parent domain. This is separate from the ABI
 //! v6 signal scope in the table above.
 //!
+//! # Auditing denials
+//!
+//! Guardrail does not read or expose denial logs. With
+//! `SandboxConfig::linux_audit_denials`, it marks the sandboxed process tree
+//! with `personality(2)` value `0x3000000` (`SHORT_INODE | WHOLE_SECONDS`,
+//! flags the kernel never reads) so the host's own syscall auditing can
+//! select it. The value is inherited across `fork` and `execve`, appears as
+//! `per=3000000` in syscall audit records, and is matchable with an audit
+//! rule (`-F pers`). Nothing is logged unless the host administrator
+//! installs such rules. With them, every denial that reaches the kernel
+//! proper is recorded with the path the process used — including the
+//! mount-mask denials (`EROFS`, `EACCES`) that Landlock's own audit records
+//! cannot show. Syscalls refused by the seccomp filters never reach the
+//! audit entry hook and are not covered by the marker.
+//!
+//! The marker is part of the sandbox, not a hint. A seccomp rule refuses,
+//! with `EPERM`, every `personality(2)` call that would drop a marker bit,
+//! so the tree cannot clear it; queries and changes that keep both bits
+//! still work. Tools that overwrite the whole personality word (`setarch`,
+//! `linux32`) therefore fail inside an opted-in sandbox. A host that refuses
+//! `personality(2)` (systemd `LockPersonality=`, some container seccomp
+//! profiles) cannot carry the marker: constructing the backend fails with
+//! `Error::Unsupported`, and a spawn fails rather than run unmarked. With
+//! the option off, nothing is marked and `personality(2)` is unrestricted.
+//!
 //! # Kernel attack surface and threat model
 //!
 //! Kernel interfaces no shell tool legitimately calls are denied regardless
@@ -221,6 +246,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod audit;
 mod backend;
 mod fs;
 mod ipc;

@@ -22,7 +22,9 @@
 //! * Kernel interfaces that legitimate tooling probes and must fall back from
 //!   gracefully — `bpf`, `perf_event_open`, `userfaultfd`, plus namespace
 //!   creation/joining under `UserNamespacePolicy::Deny` — fail with `EPERM`,
-//!   the same errno an unprivileged caller sees from a hardened kernel.
+//!   the same errno an unprivileged caller sees from a hardened kernel. When
+//!   the policy opts in to auditing, a `personality(2)` call that would clear
+//!   the audit marker joins this filter (see `crate::audit`).
 //!
 //! * io_uring is denied with `ENOSYS` unless the network policy is `Full`:
 //!   ring-submitted operations (`IORING_OP_SOCKET`,
@@ -47,6 +49,8 @@ use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule,
 };
+
+use crate::audit;
 
 /// Action taken when a kernel-attack-surface syscall is attempted. Trap ->
 /// SIGSYS (observable by the parent). Change to
@@ -181,7 +185,8 @@ fn add_kernel_surface_rules(rules: &mut RuleMap, policy: UserNamespacePolicy) {
 }
 
 /// Rules mapped to `Errno(EPERM)`: kernel interfaces that legitimate tools
-/// probe, plus namespace creation/joining under `UserNamespacePolicy::Deny`.
+/// probe, plus namespace creation/joining under `UserNamespacePolicy::Deny`
+/// and, when the policy opts in to auditing, clearing the audit marker.
 fn probed_kernel_rules(config: &SandboxConfig) -> Result<RuleMap> {
     let mut rules = RuleMap::new();
     for &sys in PROBED_KERNEL_SYSCALLS {
@@ -193,7 +198,35 @@ fn probed_kernel_rules(config: &SandboxConfig) -> Result<RuleMap> {
         add_syscall_rule(&mut rules, libc::SYS_clone, newuser);
         add_whole_syscall_rule(&mut rules, libc::SYS_setns);
     }
+    if config.linux_audit_denials {
+        for rule in marker_clearing_rules()? {
+            add_syscall_rule(&mut rules, libc::SYS_personality, rule);
+        }
+    }
     Ok(rules)
+}
+
+/// Rules matching a `personality(2)` argument that would leave the audit
+/// marker incomplete: one rule per way its two bits can be. The query value
+/// `0xffffffff` has both bits set, so it matches none of them and stays
+/// allowed, as does any change that keeps the marker. Dword: the kernel reads
+/// the argument as a 32-bit `unsigned int`.
+fn marker_clearing_rules() -> Result<Vec<SeccompRule>> {
+    const SHORT_INODE: u64 = 0x0100_0000;
+    const WHOLE_SECONDS: u64 = 0x0200_0000;
+    [0, SHORT_INODE, WHOLE_SECONDS]
+        .into_iter()
+        .map(|kept| {
+            let condition = SeccompCondition::new(
+                0, // arg0 = persona
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(u64::from(audit::MARKER)),
+                kept,
+            )
+            .map_err(|e| Error::confinement("seccomp", e))?;
+            SeccompRule::new(vec![condition]).map_err(|e| Error::confinement("seccomp", e))
+        })
+        .collect()
 }
 
 /// A rule matching a `CLONE_NEWUSER`-bearing flags argument. `flags` is arg0
@@ -360,6 +393,21 @@ mod tests {
             linux_user_namespaces: user_namespaces,
             ..SandboxConfig::default()
         }
+    }
+
+    #[test]
+    fn personality_is_pinned_only_when_auditing() {
+        let audited = SandboxConfig {
+            linux_audit_denials: true,
+            ..SandboxConfig::default()
+        };
+        let rules = probed_kernel_rules(&audited).expect("rules");
+        assert_eq!(rules.get(&libc::SYS_personality).map(Vec::len), Some(3));
+        #[cfg(target_arch = "x86_64")]
+        assert!(rules.contains_key(&(libc::SYS_personality | X32_SYSCALL_BIT)));
+
+        let rules = probed_kernel_rules(&SandboxConfig::default()).expect("rules");
+        assert!(!rules.contains_key(&libc::SYS_personality));
     }
 
     #[test]

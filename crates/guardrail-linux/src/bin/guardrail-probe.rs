@@ -118,6 +118,12 @@
 //!                     under the sandbox (SIGSYS)
 //!   bpf               call bpf(2); exit 0 if the syscall reaches the kernel,
 //!                     3 if denied with EPERM
+//!   personality-marker
+//!                     exit 0 if this process carries guardrail's audit
+//!                     personality marker (0x3000000), 3 if it does not
+//!   personality-set <HEX>
+//!                     call personality(2) with the hexadecimal value HEX;
+//!                     exit 0 if allowed, 3 if denied with EPERM
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -998,6 +1004,33 @@ fn main() {
             }
             exit(0);
         }
+        "personality-marker" => {
+            // SAFETY: personality with 0xffffffff only queries the value.
+            let persona = unsafe { libc::personality(0xffff_ffff) };
+            if persona >= 0 && (persona & 0x0300_0000) == 0x0300_0000 {
+                exit(0)
+            } else {
+                exit(3)
+            }
+        }
+        "personality-set" => {
+            let Some(persona) = args
+                .get(2)
+                .and_then(|arg| libc::c_ulong::from_str_radix(arg, 16).ok())
+            else {
+                eprintln!("personality-set needs a hexadecimal personality value");
+                exit(2);
+            };
+            // SAFETY: personality takes one scalar argument.
+            let previous = unsafe { libc::personality(persona) };
+            if previous >= 0 {
+                exit(0);
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EPERM) => exit(3),
+                _ => exit(2),
+            }
+        }
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
@@ -1012,7 +1045,8 @@ fn main() {
                  io-uring-setup|io-uring-enter|io-uring-register|shm|\
                  ipc-namespace|posix-shm|posix-mq|private-shm-mount|\
                  ptrace-self|ptrace-child|process-vm-child|process-vm-host|process-vm-target|\
-                 unshare-user|mount|mount-setattr|kexec-load|bpf> [arg]"
+                 unshare-user|mount|mount-setattr|kexec-load|bpf|\
+                 personality-marker|personality-set> [arg]"
             );
             exit(2);
         }
