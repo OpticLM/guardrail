@@ -11,6 +11,7 @@ pub struct LinuxBackend {
     ipc_policy: ipc::Policy,
     net_ruleset: Option<fs::PreparedRuleset>,
     seccomp_programs: Vec<seccompiler::BpfProgram>,
+    audit_groups: Option<Vec<libc::gid_t>>,
 }
 
 impl LinuxBackend {
@@ -25,9 +26,10 @@ impl LinuxBackend {
     /// Linux 6.7+; see the crate-level ABI table);
     /// when the host forbids the unprivileged IPC/user/mount namespaces
     /// required for every sandbox's IPC isolation (see the crate-level
-    /// namespace documentation); or when `linux_audit_denials` is set and the
-    /// host refuses the `personality(2)` audit marker (see the crate-level
-    /// auditing documentation).
+    /// namespace documentation); when `linux_audit_denials` is set and the
+    /// host refuses the `personality(2)` audit marker; or when
+    /// `linux_audit_group` is set and the host process cannot add the group
+    /// (see the crate-level auditing documentation).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
@@ -35,6 +37,10 @@ impl LinuxBackend {
         if config.linux_audit_denials {
             audit::probe_marker_support()?;
         }
+        let audit_groups = config
+            .linux_audit_group
+            .map(audit::prepare_groups)
+            .transpose()?;
         let ipc_policy = ipc::Policy::new(&config)?;
         let net_ruleset = net::prepare(&config)?;
         let seccomp_programs = seccomp::build(&config)?;
@@ -44,6 +50,7 @@ impl LinuxBackend {
             ipc_policy,
             net_ruleset,
             seccomp_programs,
+            audit_groups,
         })
     }
 }
@@ -68,6 +75,7 @@ impl Backend for LinuxBackend {
         // adds only its freshly mounted private IPC filesystems to Landlock.
         let limits = self.config.limits;
         let audit_denials = self.config.linux_audit_denials;
+        let audit_groups = self.audit_groups.clone();
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let ipc_ruleset = self.ipc_policy.prepare()?;
         let net_ruleset = self
@@ -98,6 +106,14 @@ impl Backend for LinuxBackend {
                 //      applied last pin the marker.
                 if audit_denials {
                     audit::mark()?;
+                }
+
+                // (1c) Audit group, when configured: the host's supplementary
+                //      groups plus the audit group. Must precede the user
+                //      namespace, which denies setgroups(2) from then on, so
+                //      the sandboxed tree cannot drop the group.
+                if let Some(groups) = &audit_groups {
+                    audit::set_groups(groups)?;
                 }
 
                 // (2) Enter fresh IPC/user/mount namespaces, mount private

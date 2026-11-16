@@ -163,6 +163,14 @@ export interface SandboxOptions {
    */
   linuxAuditDenials?: boolean
   /**
+   * Linux-only: a supplementary group id to add to the sandboxed process
+   * tree as an audit marker that host audit rules match with `-F gid=`.
+   * The host process must hold `CAP_SETGID` (for example, run as root);
+   * building the sandbox fails otherwise. Independent of
+   * `linuxAuditDenials`. Ignored on macOS and Windows.
+   */
+  linuxAuditGroup?: number
+  /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
    * descendants but not aggregated across forks.
@@ -276,6 +284,14 @@ export interface SpawnOptions {
    * Guardrail never reads audit records. Ignored on macOS and Windows.
    */
   linuxAuditDenials?: boolean
+  /**
+   * Linux-only: a supplementary group id to add to the sandboxed process
+   * tree as an audit marker that host audit rules match with `-F gid=`.
+   * The host process must hold `CAP_SETGID` (for example, run as root);
+   * building the sandbox fails otherwise. Independent of
+   * `linuxAuditDenials`. Ignored on macOS and Windows.
+   */
+  linuxAuditGroup?: number
   /**
    * Address-space cap in megabytes. Windows: aggregate Job Object budget
    * for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by

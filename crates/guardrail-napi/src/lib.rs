@@ -142,6 +142,12 @@ pub struct SandboxOptions {
     /// sandbox. Building the sandbox fails when the host refuses the marker.
     /// Guardrail never reads audit records. Ignored on macOS and Windows.
     pub linux_audit_denials: Option<bool>,
+    /// Linux-only: a supplementary group id to add to the sandboxed process
+    /// tree as an audit marker that host audit rules match with `-F gid=`.
+    /// The host process must hold `CAP_SETGID` (for example, run as root);
+    /// building the sandbox fails otherwise. Independent of
+    /// `linuxAuditDenials`. Ignored on macOS and Windows.
+    pub linux_audit_group: Option<u32>,
     /// Address-space cap in megabytes. Windows: aggregate Job Object budget
     /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
     /// descendants but not aggregated across forks.
@@ -206,6 +212,12 @@ pub struct SpawnOptions {
     /// sandbox. Building the sandbox fails when the host refuses the marker.
     /// Guardrail never reads audit records. Ignored on macOS and Windows.
     pub linux_audit_denials: Option<bool>,
+    /// Linux-only: a supplementary group id to add to the sandboxed process
+    /// tree as an audit marker that host audit rules match with `-F gid=`.
+    /// The host process must hold `CAP_SETGID` (for example, run as root);
+    /// building the sandbox fails otherwise. Independent of
+    /// `linuxAuditDenials`. Ignored on macOS and Windows.
+    pub linux_audit_group: Option<u32>,
     /// Address-space cap in megabytes. Windows: aggregate Job Object budget
     /// for the whole tree; Linux/macOS: per-process `RLIMIT_AS`, inherited by
     /// descendants but not aggregated across forks.
@@ -354,6 +366,7 @@ fn build_config(opts: SandboxOptions) -> Result<SandboxConfig> {
             .map(|u| u.into())
             .unwrap_or(UserNamespacePolicy::Deny),
         linux_audit_denials: opts.linux_audit_denials.unwrap_or(false),
+        linux_audit_group: opts.linux_audit_group,
         darwin_sandbox_profiles,
         windows_cache_namespace: opts.windows_cache_namespace,
         windows_manifest_dir: opts.windows_manifest_dir.map(PathBuf::from),
@@ -382,6 +395,7 @@ impl From<SpawnOptions> for (SandboxOptions, SandboxSpawnOptions) {
                 linux_unix_sockets: options.linux_unix_sockets,
                 linux_user_namespaces: options.linux_user_namespaces,
                 linux_audit_denials: options.linux_audit_denials,
+                linux_audit_group: options.linux_audit_group,
                 memory_limit_mb: options.memory_limit_mb,
                 cpu_time_limit_secs: options.cpu_time_limit_secs,
                 max_processes: options.max_processes,

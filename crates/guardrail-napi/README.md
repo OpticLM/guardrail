@@ -1345,6 +1345,23 @@ an opted-in sandbox unmarked. On such a host you can still filter syscall
 audit records by the uid the agent runs as (`-F uid=`), which also matches
 the host application's own failures.
 
+If the host process holds `CAP_SETGID` (for example, it runs as root), you
+can mark sandboxes with a supplementary group instead, or as well. Set
+`linuxAuditGroup` to a numeric group id that owns no files. The sandboxed
+tree carries the group and cannot drop it, nothing inside the sandbox is
+restricted further (`setarch` keeps working), and it works on hosts that
+refuse `personality(2)`. Match it with `-F gid=`:
+
+```sh
+sudo auditctl -a always,exit -F arch=b64 -S all -F gid=4242 -F exit=-EACCES -k guardrail
+```
+
+The group itself is not printed in the records; the rule's key is. Different
+sandboxes can use different groups, which makes the group a label you
+choose. Building a sandbox with `linuxAuditGroup` fails when the host process
+cannot add the group. The two options are independent: setting both applies
+both markers, including the `personality(2)` pin.
+
 Limits:
 
 - Syscalls refused by the seccomp filters (denied socket families, the
@@ -1352,10 +1369,17 @@ Limits:
   do not record them.
 - A lookup inside a read-denied directory that has a re-allowed descendant
   returns `ENOENT` and is not caught by these rules.
+- When the host application runs as root, a read-denied file or directory
+  beneath an allowed parent is hidden rather than refused: reading it
+  succeeds and yields nothing, so no error is returned and nothing is
+  recorded. The content does not leak.
 
 Tested result: kernel 6.18.44 x86_64 with `auditctl` 3.1.2 and the
-`pers&=0x3000000` syntax shown above. A write refused under a read-only grant
-produced this event (`exit=-13` is `EACCES`; the `exe` path is shortened):
+`pers&=0x3000000` syntax shown above. With `linuxAuditGroup: 4242` and the
+`gid=4242` rule on the same host, denials from sandboxes carrying the group
+were recorded and none from sandboxes without it. A write refused under a
+read-only grant in a `linuxAuditDenials` sandbox produced this event
+(`exit=-13` is `EACCES`; the `exe` path is shortened):
 
 ```text
 type=SYSCALL msg=audit(1794788855.070:25): arch=c000003e syscall=257 per=3000000 success=no exit=-13 a0=ffffff9c a1=7ffd61f342e8 a2=80241 a3=1b6 items=1 ppid=1623 pid=1672 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="guardrail-probe" exe=".../guardrail-probe" key="guardrail"
@@ -1377,6 +1401,7 @@ marked *ignored* is an honest no-op there.
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
 | `linuxAuditDenials` | opt-in: marks the sandboxed process tree with a pinned `personality(2)` value that host syscall audit rules can match; guardrail does not read the records (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
+| `linuxAuditGroup` | adds a supplementary group to the sandboxed process tree that host audit rules can match (`-F gid=`); needs `CAP_SETGID` in the host process (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 

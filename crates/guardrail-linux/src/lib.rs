@@ -202,6 +202,18 @@
 //! `Error::Unsupported`, and a spawn fails rather than run unmarked. With
 //! the option off, nothing is marked and `personality(2)` is unrestricted.
 //!
+//! `SandboxConfig::linux_audit_group` is a second, independent marker for
+//! hosts that can afford privilege. The backend adds the configured
+//! supplementary group to the child before it enters its user namespace,
+//! which takes `CAP_SETGID` in the host process; constructing the backend
+//! fails with `Error::Unsupported` without it. An audit rule loaded on the
+//! host matches the group with `-F gid=`. The group needs no seccomp rule:
+//! the sandbox's user namespace denies `setgroups(2)` permanently, so the
+//! tree cannot drop it, and nothing else inside the sandbox is restricted.
+//! Inside the namespace the group has no mapping and shows as the overflow
+//! group. Membership still grants that group's file permissions, so pick a
+//! group that owns no files.
+//!
 //! # Kernel attack surface and threat model
 //!
 //! Kernel interfaces no shell tool legitimately calls are denied regardless

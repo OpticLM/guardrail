@@ -124,6 +124,9 @@
 //!   personality-set <HEX>
 //!                     call personality(2) with the hexadecimal value HEX;
 //!                     exit 0 if allowed, 3 if denied with EPERM
+//!   setgroups-empty   call setgroups(2) with an empty list; exit 0 if
+//!                     allowed, 3 if denied with EPERM
+//!   hold              block until stdin reaches end-of-file, then exit 0
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -1031,6 +1034,26 @@ fn main() {
                 _ => exit(2),
             }
         }
+        "setgroups-empty" => {
+            // SAFETY: a zero size makes the kernel ignore the list pointer.
+            let rc = unsafe { libc::setgroups(0, std::ptr::null()) };
+            if rc == 0 {
+                exit(0);
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EPERM) => exit(3),
+                _ => exit(2),
+            }
+        }
+        "hold" => {
+            use std::io::Read;
+
+            let mut sink = Vec::new();
+            match std::io::stdin().read_to_end(&mut sink) {
+                Ok(_) => exit(0),
+                Err(_) => exit(2),
+            }
+        }
         _ => {
             eprintln!(
                 "usage: guardrail-probe \
@@ -1046,7 +1069,7 @@ fn main() {
                  ipc-namespace|posix-shm|posix-mq|private-shm-mount|\
                  ptrace-self|ptrace-child|process-vm-child|process-vm-host|process-vm-target|\
                  unshare-user|mount|mount-setattr|kexec-load|bpf|\
-                 personality-marker|personality-set> [arg]"
+                 personality-marker|personality-set|setgroups-empty|hold> [arg]"
             );
             exit(2);
         }

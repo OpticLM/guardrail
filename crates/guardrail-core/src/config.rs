@@ -50,6 +50,7 @@ pub struct ResourceLimits {
 ///     linux_unix_sockets: vec![],
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
 ///     linux_audit_denials: false,
+///     linux_audit_group: None,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
 ///     windows_manifest_dir: None,
@@ -115,6 +116,21 @@ pub struct SandboxConfig {
     /// `EPERM` inside the sandbox. Guardrail never reads audit records and
     /// never installs audit rules; both are the host's job.
     pub linux_audit_denials: bool,
+    /// Linux-only: a supplementary group to add to the sandboxed process
+    /// tree as an audit marker. Non-Linux backends ignore this field.
+    ///
+    /// The group is inherited across `fork` and `execve`, the sandboxed tree
+    /// cannot drop it, and an audit rule loaded on the host matches it with
+    /// `-F gid=`. It needs no seccomp rule, so nothing inside the sandbox is
+    /// restricted further, and it works on hosts that refuse the
+    /// `personality(2)` marker of `linux_audit_denials`. The two fields are
+    /// independent; setting both applies both markers.
+    ///
+    /// The host process must be able to add the group, which takes
+    /// `CAP_SETGID` (for example, running as root); constructing the backend
+    /// fails with `Error::Unsupported` otherwise. Choose a group that owns no
+    /// files: membership also grants that group's file permissions.
+    pub linux_audit_group: Option<u32>,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending
