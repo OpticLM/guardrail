@@ -23,6 +23,7 @@ audit — **denial observability** — with a deliberately minimal shape:
 | macOS | `(with message "guardrail:fs[N]")` / `"guardrail:default"` on every generated Seatbelt deny rule | yes |
 | Linux | `personality(2)` value `0x3000000` on the sandboxed process tree, shown as `per=` in syscall audit records and matchable by an audit rule. A seccomp rule pins it, so the tree cannot clear it | opt-in (`linux_audit_denials`); silent until the host installs audit rules |
 | Linux | Landlock and seccomp record their own denials | opt-in (the same `linux_audit_denials`) |
+| Linux | A supplementary group on the sandboxed process tree, matchable by an audit rule (`-F gid=`). Needs `CAP_SETGID` in the host process | opt-in (`linux_audit_group`) |
 | Windows | — | deferred |
 
 ## Execution order & status
@@ -88,6 +89,19 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   Landlock domains. Personality is the only one an unprivileged process can
   set, so the marker's weaknesses are fixed around it rather than by
   replacing it.
+- **A privileged marker is offered as an additional approach**:
+  `linux_audit_group`. Maintainer decision, 2026-11-16; implemented directly
+  on the same day, without a plan file. When the field is set, the backend
+  adds that supplementary group to the child before it enters its user
+  namespace. This takes `CAP_SETGID` in the host process, and constructing
+  the backend fails with `Error::Unsupported` without it. The field is
+  independent of `linux_audit_denials`; setting both applies both markers.
+  Why it is simple: the user namespace denies `setgroups(2)` permanently, so
+  the group needs no seccomp pin, `setarch` keeps working, and a host that
+  locks `personality(2)` can still be marked. Checked against kernel v6.18
+  and a live audit daemon: an audit rule's `gid=` matches supplementary
+  groups by kernel gid, the rule selected only sandboxes carrying the group,
+  and the group survived the namespace setup and `execve`.
 
 ## Known gaps after all three plans
 
@@ -114,6 +128,12 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   but no errno is returned, so no errno-keyed audit rule records the attempt.
   This predates these plans (checked on `a5c8219`, 2026-11-16) and is not
   addressed by them.
+- Linux: Landlock and seccomp self-logging (plan 003) sits under
+  `linux_audit_denials`, which also requires the `personality(2)` marker. A
+  host that refuses personality therefore cannot get the self-logging, even
+  when it uses `linux_audit_group` as its marker. Open question for the
+  maintainer: whether a configured group should stand in for the personality
+  marker there.
 - Linux: the audit queue drops records under load, so counts are a lower
   bound, and a process can provoke that deliberately. Queue size and
   overflow behavior are host audit settings.
@@ -161,8 +181,14 @@ not audited.
 - **A different unprivileged process marker**: none exists; see "Personality
   stays the marker" above. The attributes an audit rule can also match
   (supplementary group, login session, security label) all need privilege
-  or host setup to assign. A privileged variant is an open question and not
-  part of these plans.
+  or host setup to assign. The supplementary group was then adopted as an
+  additional, privileged marker; see "Decisions recorded".
+- **The audit login session as the privileged marker** (`/proc/self/loginuid`,
+  giving a per-sandbox `ses=` in every record): not chosen. It needs no
+  capability only while the host has no login session, needs
+  `CAP_AUDIT_CONTROL` otherwise, emits a `LOGIN` record per sandbox, and
+  gives no static rule that separates sandbox from host inside a login
+  session.
 - **Letting a marker-clearing `personality(2)` call through and only logging
   it** (seccomp `SECCOMP_RET_LOG`): keeps `setarch` working but makes
   clearing visible instead of impossible. Not chosen.

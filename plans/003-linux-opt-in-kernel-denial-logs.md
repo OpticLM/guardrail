@@ -14,7 +14,11 @@
 > new `src/audit.rs` and `tests/audit_marker.rs`; in
 > `crates/guardrail-napi`, `src/lib.rs`, the generated `binding.*` files, and
 > the README; and one added line per `SandboxConfig` literal in the macOS and
-> Windows crates. For any other difference, compare the "Current state"
+> Windows crates. A later commit added `linux_audit_group`, an independent
+> supplementary-group marker, in the same files (`config.rs`, `audit.rs`,
+> `backend.rs`, the probe, the Node binding, the config literals, and the new
+> `tests/audit_group.rs`); it does not interact with this plan.
+> For any other difference, compare the "Current state"
 > excerpts against the live code before proceeding; on a mismatch, treat it
 > as a STOP condition.
 
