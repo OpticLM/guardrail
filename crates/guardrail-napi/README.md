@@ -1310,11 +1310,77 @@ already run.
 
 ### Linux
 
-Set `linuxAuditDenials: true` to mark a sandbox for the kernel audit
-subsystem. The whole sandboxed process tree then carries the `personality(2)`
-value `0x3000000`, which every syscall audit record prints as `per=3000000`
-and which an audit rule can match. The marker logs nothing by itself. Records
-appear once the host administrator installs rules such as:
+Set `linuxAuditDenials: true` or `linuxAuditGroup` to audit a sandbox. Either
+one has the kernel record the denials Landlock and seccomp make, with no audit
+rule needed. Each also marks the sandboxed process tree so that audit rules
+you install can select it for everything else; the two markers are described
+further below.
+
+Landlock records need Landlock ABI v7 (Linux 6.15) or newer and host auditing
+enabled (`auditctl -s` shows `enabled 1`). An audit daemon writes them to its
+log; without one they go to the kernel log. seccomp records are written even
+while auditing is off, to the kernel log (`dmesg`, rate-limited) when no audit
+daemon runs. auditd 3.1.2 prints Landlock's record types as
+`UNKNOWN[1423]` (access) and `UNKNOWN[1424]` (domain), so query them by
+number:
+
+```sh
+sudo ausearch -m 1423,1424,SECCOMP --start recent
+```
+
+A write refused under a read-only grant in a `linuxAuditDenials` sandbox
+produced these records (`exe` paths shortened, `PROCTITLE` records and the
+second denial's `SYSCALL` record omitted; `exit=-13` is `EACCES`):
+
+```text
+type=UNKNOWN[1423] msg=audit(1795442357.466:23): domain=1c9475220 blockers=fs.read_file path="/etc/ld.so.cache" dev="vda" ino=835595
+type=UNKNOWN[1424] msg=audit(1795442357.466:23): domain=1c9475220 status=allocated mode=enforcing pid=7839 uid=0 exe=".../audit_denials-3bc893ad4d9f8cc4" comm="logged_landlock"
+type=SYSCALL msg=audit(1795442357.466:23): arch=c000003e syscall=257 per=3000000 success=no exit=-13 a0=ffffff9c a1=7fade26d038f a2=80000 a3=0 items=0 ppid=7791 pid=7839 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="guardrail-probe" exe=".../guardrail-probe" key=(null)
+type=UNKNOWN[1423] msg=audit(1795442357.466:25): domain=1c9475220 blockers=fs.make_reg path="/tmp/.tmpEh6dex" dev="vda" ino=606617
+type=UNKNOWN[1424] msg=audit(1795442357.518:33): domain=1c9475220 status=deallocated denials=3
+```
+
+`blockers=` names the access Landlock refused and `path=` the object. The
+`status=allocated` record is written with a domain's first logged denial. Its
+`pid` is the pid of the child `spawn` returned, because guardrail creates the
+domain in the forked child before `execve`; its `exe` and `comm` are
+therefore your host application's. The `status=deallocated` record counts
+every denial the domain made, including ones that were not logged. Each spawn
+creates up to three Landlock domains, each with its own `domain=` id:
+filesystem, network (`outbound-only` only), and IPC. A record names the
+youngest domain that denied. Every Landlock record comes with the `SYSCALL`
+record of the denied call, even when no rule is loaded, and that record
+carries `per=3000000` when `linuxAuditDenials` is on.
+
+A socket of a denied address family produced this record:
+
+```text
+type=SECCOMP msg=audit(1795442357.466:22): auid=4294967295 uid=0 gid=0 ses=4294967295 pid=7836 comm="guardrail-probe" exe=".../guardrail-probe" sig=0 arch=c000003e syscall=41 compat=0 ip=0x7f261432c53b code=0x50000
+```
+
+`syscall=` names the refused call (`41` is `socket` on x86-64). `code=0x50000`
+means the call failed with an errno; the kernel does not record which one.
+`code=0x30000` is a trapped kernel-surface syscall, such as `syscall=165`
+(`mount`), and an `ANOM_ABEND` record with `sig=31` follows when the process
+dies of `SIGSYS`. A record with `syscall=135` (`personality`; `92` on
+aarch64) is a process trying to clear the audit marker. SECCOMP records carry
+no `per=` and come with no `SYSCALL` record, so attribute them by `pid` and
+`exe`. seccomp writes errno and trap records only for filters installed with
+the log flag, such as an audited sandbox's. The filter that answers `clone3`
+and io_uring with `ENOSYS`, so that runtimes fall back to older syscalls, is
+never logged.
+
+Expect routine records. Under a narrow `fs` policy every spawn logs the
+dynamic loader's read of `/etc/ld.so.cache` and a read of `/proc/<pid>/maps`.
+Under `outbound-only`, the `AF_NETLINK` socket a glibc DNS lookup probes is
+logged as a `socket` record. Even with both options off, the kernel records a
+Landlock denial that happens before the sandboxed program starts, such as a
+program the policy does not let execute (`blockers=fs.execute`).
+
+`linuxAuditDenials` marks the whole sandboxed process tree with the
+`personality(2)` value `0x3000000`, which every syscall audit record prints as
+`per=3000000` and which an audit rule can match. The marker itself logs
+nothing. Rules such as these record the tree's failed syscalls:
 
 ```sh
 sudo auditctl -a always,exit -F arch=b64 -S all -F 'pers&=0x3000000' -F exit=-EACCES -k guardrail
@@ -1327,10 +1393,9 @@ Each `SYSCALL` record names the process (`pid`, `comm`, `exe`) and comes with
 a `PATH` record holding the path as the process typed it; for a denied
 create, the `PATH` record names the parent directory. The rules catch
 Landlock denials and also the mount-mask denials (`EROFS`, `EACCES`) behind
-deny-under-allow rules, which Landlock's own records cannot show. Expect
-records for routine probes too: under a narrow `fs` policy the dynamic
-loader's attempt to open `/etc/ld.so.cache` is denied, and recorded, on every
-spawn.
+deny-under-allow rules, which Landlock's own records cannot show. Syscalls
+the seccomp filters refuse never reach these rules; only seccomp's own records
+show them.
 
 The marker is pinned. A seccomp rule refuses, with `EPERM`, every
 `personality(2)` call that would drop it, so nothing inside the sandbox can
@@ -1359,27 +1424,34 @@ sudo auditctl -a always,exit -F arch=b64 -S all -F gid=4242 -F exit=-EACCES -k g
 The group itself is not printed in the records; the rule's key is. Different
 sandboxes can use different groups, which makes the group a label you
 choose. Building a sandbox with `linuxAuditGroup` fails when the host process
-cannot add the group. The two options are independent: setting both applies
-both markers, including the `personality(2)` pin.
+cannot add the group. Either option turns on the Landlock and seccomp
+records; beyond that the two are independent: setting both applies both
+markers, including the `personality(2)` pin.
 
 Limits:
 
-- Syscalls refused by the seccomp filters (denied socket families, the
-  kernel-surface syscalls) never reach the audit entry hook, so these rules
-  do not record them.
 - A lookup inside a read-denied directory that has a re-allowed descendant
   returns `ENOENT` and is not caught by these rules.
 - When the host application runs as root, a read-denied file or directory
   beneath an allowed parent is hidden rather than refused: reading it
   succeeds and yields nothing, so no error is returned and nothing is
   recorded. The content does not leak.
+- The audit queue drops records under load, so counting records gives a
+  lower bound. A domain's `denials=` count is not affected.
+- A sandboxed process that adds its own Landlock domain or seccomp filter with
+  logging off can keep a denial out of the Landlock and seccomp records, but
+  only for an access its own layer also denies.
 
-Tested result: kernel 6.18.44 x86_64 with `auditctl` 3.1.2 and the
-`pers&=0x3000000` syntax shown above. With `linuxAuditGroup: 4242` and the
-`gid=4242` rule on the same host, denials from sandboxes carrying the group
-were recorded and none from sandboxes without it. A write refused under a
-read-only grant in a `linuxAuditDenials` sandbox produced this event
-(`exit=-13` is `EACCES`; the `exe` path is shortened):
+Tested result: kernel 6.18.44 x86_64 (Landlock ABI 7) with auditd and
+`auditctl` 3.1.2 and the `pers&=0x3000000` syntax shown above. With
+`linuxAuditGroup: 4242` and the `gid=4242` rule on the same host, denials from
+sandboxes carrying the group were recorded and none from sandboxes without it.
+With no audit rule loaded, `linuxAuditDenials` sandboxes produced the Landlock
+and seccomp records shown above, sandboxes with only `linuxAuditGroup`
+produced Landlock records, and sandboxes with neither option produced no
+seccomp records. With a rule loaded, a write refused under a read-only grant
+in a `linuxAuditDenials` sandbox produced this event (`exit=-13` is `EACCES`;
+the `exe` path is shortened):
 
 ```text
 type=SYSCALL msg=audit(1794788855.070:25): arch=c000003e syscall=257 per=3000000 success=no exit=-13 a0=ffffff9c a1=7ffd61f342e8 a2=80241 a3=1b6 items=1 ppid=1623 pid=1672 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="guardrail-probe" exe=".../guardrail-probe" key="guardrail"
@@ -1400,8 +1472,8 @@ marked *ignored* is an honest no-op there.
 | `env` | cleared, then set | cleared, then set | cleared, then set |
 | `linuxUnixSockets` | Landlock ABI v9+ host pathname Unix-socket grants, independent of `fs`; ignored on older ABIs | ignored | ignored |
 | `linuxUserNamespaces` | seccomp (namespace creation/joining + mount machinery); set `'allow'` only when the child runs its own sandbox (Chromium/Electron, bubblewrap, rootless containers) | ignored — no equivalent unprivileged facility | ignored — no equivalent unprivileged facility |
-| `linuxAuditDenials` | opt-in: marks the sandboxed process tree with a pinned `personality(2)` value that host syscall audit rules can match; guardrail does not read the records (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
-| `linuxAuditGroup` | adds a supplementary group to the sandboxed process tree that host audit rules can match (`-F gid=`); needs `CAP_SETGID` in the host process (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
+| `linuxAuditDenials` | opt-in: Landlock (ABI v7+) and seccomp record their own denials in the host audit log, and the sandboxed process tree carries a pinned `personality(2)` marker that host syscall audit rules can match; guardrail does not read the records (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
+| `linuxAuditGroup` | adds a supplementary group to the sandboxed process tree that host audit rules can match (`-F gid=`), and turns on the same Landlock and seccomp records; needs `CAP_SETGID` in the host process (see [Auditing Denials](#auditing-denials)) | ignored | ignored |
 | `darwinSandboxProfiles` | ignored | trusted `.sb` policy imports that can grant access absent from `fs`/`network` | ignored |
 | `windowsCacheNamespace` | ignored | ignored | AppContainer/ACL cache key |
 

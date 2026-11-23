@@ -10,7 +10,8 @@ pub struct LinuxBackend {
     fs_rules: fs::CompiledRules,
     ipc_policy: ipc::Policy,
     net_ruleset: Option<fs::PreparedRuleset>,
-    seccomp_programs: Vec<seccompiler::BpfProgram>,
+    landlock_flags: libc::c_uint,
+    seccomp_filters: Vec<seccomp::Filter>,
     audit_groups: Option<Vec<libc::gid_t>>,
 }
 
@@ -43,13 +44,15 @@ impl LinuxBackend {
             .transpose()?;
         let ipc_policy = ipc::Policy::new(&config)?;
         let net_ruleset = net::prepare(&config)?;
-        let seccomp_programs = seccomp::build(&config)?;
+        let landlock_flags = fs::restrict_self_flags(audit::enabled(&config), ipc::query_abi()?);
+        let seccomp_filters = seccomp::build(&config)?;
         Ok(Self {
             config,
             fs_rules,
             ipc_policy,
             net_ruleset,
-            seccomp_programs,
+            landlock_flags,
+            seccomp_filters,
             audit_groups,
         })
     }
@@ -75,6 +78,7 @@ impl Backend for LinuxBackend {
         // adds only its freshly mounted private IPC filesystems to Landlock.
         let limits = self.config.limits;
         let audit_denials = self.config.linux_audit_denials;
+        let landlock_flags = self.landlock_flags;
         let audit_groups = self.audit_groups.clone();
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let ipc_ruleset = self.ipc_policy.prepare()?;
@@ -83,7 +87,7 @@ impl Backend for LinuxBackend {
             .as_ref()
             .map(fs::PreparedRuleset::try_clone)
             .transpose()?;
-        let seccomp_programs = self.seccomp_programs.clone();
+        let seccomp_filters = self.seccomp_filters.clone();
         let mut namespace = ns::PreparedNamespace::new(&self.fs_rules.mount_plan);
 
         // SAFETY: the closure runs after fork() and before execvp() in the
@@ -132,13 +136,13 @@ impl Backend for LinuxBackend {
                 //     Their host counterparts are already hidden and are
                 //     never referenced by these rules.
                 landlock_ruleset.allow_private_ipc()?;
-                landlock_ruleset.restrict_self()?;
+                landlock_ruleset.restrict_self(landlock_flags)?;
 
                 // (4b) Network confinement for OutboundOnly: a second
                 //     parent-built Landlock layer denies explicit TCP bind
                 //     and, on ABI v10+, fixed UDP bind (see crate::net).
                 if let Some(net_ruleset) = &net_ruleset {
-                    net_ruleset.restrict_self()?;
+                    net_ruleset.restrict_self(landlock_flags)?;
                 }
 
                 // (4c) Create the sandbox's IPC domain. On ABI v6+ this
@@ -147,7 +151,7 @@ impl Backend for LinuxBackend {
                 //     Applying this layer last keeps every process and socket
                 //     the child creates within the same or a nested domain.
                 if let Some(ipc_ruleset) = &ipc_ruleset {
-                    ipc_ruleset.restrict_self()?;
+                    ipc_ruleset.restrict_self(landlock_flags)?;
                 }
 
                 // (5) Descriptor hygiene: mark everything above stderr
@@ -158,8 +162,8 @@ impl Backend for LinuxBackend {
 
                 // (6) Seccomp is applied LAST so its filters do not interfere
                 //     with the syscalls above. The BPF programs were built in
-                //     the parent; only prctl(2) + seccomp(2) happen here.
-                seccomp::apply(&seccomp_programs)?;
+                //     the parent; only seccomp(2) happens here.
+                seccomp::apply(&seccomp_filters)?;
 
                 Ok(())
             });

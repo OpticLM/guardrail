@@ -199,6 +199,20 @@ fn target_for(pins: &[Pin], path: &Path) -> Result<ns::Target> {
     })
 }
 
+/// `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`: also log the domain's denials
+/// after `execve`. Landlock ABI v7+; older kernels reject it with `EINVAL`.
+const LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON: libc::c_uint = 1 << 1;
+
+/// Flags for `landlock_restrict_self(2)`: the logging flag only when the
+/// policy opted in to auditing and the kernel understands it.
+pub(crate) const fn restrict_self_flags(audited: bool, abi: i32) -> libc::c_uint {
+    if audited && abi >= 7 {
+        LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
+    } else {
+        0
+    }
+}
+
 /// A Landlock ruleset built in the parent with all host-path rules. The child
 /// adds only its newly mounted private IPC filesystems before enforcement.
 #[derive(Debug)]
@@ -279,16 +293,13 @@ impl PreparedRuleset {
     /// silent `NotEnforced` downgrade the landlock crate can report cannot
     /// happen through this path: the syscall either enforces or errors, and an
     /// error aborts the spawn.
-    pub(crate) fn restrict_self(&self) -> std::io::Result<()> {
+    ///
+    /// `flags` comes from [`restrict_self_flags`].
+    pub(crate) fn restrict_self(&self, flags: libc::c_uint) -> std::io::Result<()> {
         // SAFETY: scalar args only; the fd is owned by self and stays open for
         // the duration of the call.
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_restrict_self,
-                self.fd.as_raw_fd(),
-                0 as libc::c_uint,
-            )
-        };
+        let rc =
+            unsafe { libc::syscall(libc::SYS_landlock_restrict_self, self.fd.as_raw_fd(), flags) };
         if rc != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -938,6 +949,14 @@ mod tests {
 
     fn canon(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn restrict_self_flags_follow_opt_in_and_abi() {
+        assert_eq!(restrict_self_flags(false, 12), 0);
+        assert_eq!(restrict_self_flags(true, 6), 0);
+        assert_eq!(restrict_self_flags(true, 7), 1 << 1);
+        assert_eq!(restrict_self_flags(true, 12), 1 << 1);
     }
 
     fn c(path: &Path) -> CString {

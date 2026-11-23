@@ -12,10 +12,20 @@
 //!   with `-F gid=`. It needs `CAP_SETGID` in the host process and no pin: the
 //!   sandbox's user namespace denies `setgroups(2)` for good, so the tree
 //!   cannot drop it.
+//!
+//! Either option also asks Landlock and seccomp to record their own denials
+//! (see [`enabled`]).
 
 use std::io;
 
-use guardrail_core::{Error, Result};
+use guardrail_core::{Error, Result, SandboxConfig};
+
+/// Whether `config` opted in to auditing. Either marker does, and turns on
+/// the kernel's own Landlock and seccomp denial records: those records are
+/// attributable without a marker, so neither marker is singled out.
+pub(crate) fn enabled(config: &SandboxConfig) -> bool {
+    config.linux_audit_denials || config.linux_audit_group.is_some()
+}
 
 /// `SHORT_INODE | WHOLE_SECONDS`: two `personality(2)` flags the kernel
 /// defines but never reads.
@@ -143,4 +153,22 @@ fn probe_in_child(setup: impl FnOnce() -> io::Result<()>) -> Result<Option<Strin
     } else {
         "probe child terminated abnormally".into()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn either_marker_enables_auditing() {
+        let config = |denials, group| SandboxConfig {
+            linux_audit_denials: denials,
+            linux_audit_group: group,
+            ..SandboxConfig::default()
+        };
+        assert!(!enabled(&config(false, None)));
+        assert!(enabled(&config(true, None)));
+        assert!(enabled(&config(false, Some(4242))));
+        assert!(enabled(&config(true, Some(4242))));
+    }
 }

@@ -154,20 +154,24 @@ export interface SandboxOptions {
    */
   linuxUserNamespaces?: UserNamespacePolicy
   /**
-   * Linux-only opt-in: make this sandbox's denials attributable in the
-   * host audit log; `false` if omitted. Marks the sandboxed process tree
-   * with `personality(2)` value `0x3000000` for host syscall audit rules
-   * and pins it, so `setarch`-style tools fail with `EPERM` inside the
-   * sandbox. Building the sandbox fails when the host refuses the marker.
-   * Guardrail never reads audit records. Ignored on macOS and Windows.
+   * Linux-only opt-in: record this sandbox's denials in the host audit
+   * log; `false` if omitted. Landlock (ABI v7+) and seccomp record their
+   * own denials, and the sandboxed process tree is marked with
+   * `personality(2)` value `0x3000000` for host syscall audit rules. The
+   * marker is pinned, so `setarch`-style tools fail with `EPERM` inside
+   * the sandbox. Building the sandbox fails when the host refuses the
+   * marker. Guardrail never reads audit records. Ignored on macOS and
+   * Windows.
    */
   linuxAuditDenials?: boolean
   /**
    * Linux-only: a supplementary group id to add to the sandboxed process
    * tree as an audit marker that host audit rules match with `-F gid=`.
-   * The host process must hold `CAP_SETGID` (for example, run as root);
-   * building the sandbox fails otherwise. Independent of
-   * `linuxAuditDenials`. Ignored on macOS and Windows.
+   * Like `linuxAuditDenials`, it also has Landlock (ABI v7+) and seccomp
+   * record their own denials. The host process must hold `CAP_SETGID`
+   * (for example, run as root); building the sandbox fails otherwise.
+   * Otherwise independent of `linuxAuditDenials`. Ignored on macOS and
+   * Windows.
    */
   linuxAuditGroup?: number
   /**
@@ -276,20 +280,24 @@ export interface SpawnOptions {
    */
   linuxUserNamespaces?: UserNamespacePolicy
   /**
-   * Linux-only opt-in: make this sandbox's denials attributable in the
-   * host audit log; `false` if omitted. Marks the sandboxed process tree
-   * with `personality(2)` value `0x3000000` for host syscall audit rules
-   * and pins it, so `setarch`-style tools fail with `EPERM` inside the
-   * sandbox. Building the sandbox fails when the host refuses the marker.
-   * Guardrail never reads audit records. Ignored on macOS and Windows.
+   * Linux-only opt-in: record this sandbox's denials in the host audit
+   * log; `false` if omitted. Landlock (ABI v7+) and seccomp record their
+   * own denials, and the sandboxed process tree is marked with
+   * `personality(2)` value `0x3000000` for host syscall audit rules. The
+   * marker is pinned, so `setarch`-style tools fail with `EPERM` inside
+   * the sandbox. Building the sandbox fails when the host refuses the
+   * marker. Guardrail never reads audit records. Ignored on macOS and
+   * Windows.
    */
   linuxAuditDenials?: boolean
   /**
    * Linux-only: a supplementary group id to add to the sandboxed process
    * tree as an audit marker that host audit rules match with `-F gid=`.
-   * The host process must hold `CAP_SETGID` (for example, run as root);
-   * building the sandbox fails otherwise. Independent of
-   * `linuxAuditDenials`. Ignored on macOS and Windows.
+   * Like `linuxAuditDenials`, it also has Landlock (ABI v7+) and seccomp
+   * record their own denials. The host process must hold `CAP_SETGID`
+   * (for example, run as root); building the sandbox fails otherwise.
+   * Otherwise independent of `linuxAuditDenials`. Ignored on macOS and
+   * Windows.
    */
   linuxAuditGroup?: number
   /**
