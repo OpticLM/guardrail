@@ -238,6 +238,8 @@ mod tests {
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![first.clone(), second.clone()],
             linux_user_namespaces: UserNamespacePolicy::Deny,
+            linux_audit_denials: false,
+            linux_audit_group: None,
             windows_cache_namespace: None,
             windows_manifest_dir: None,
             windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
@@ -252,7 +254,7 @@ mod tests {
                 "(version 1)\n\
                  (import \"{first_import}\")\n\
                  (import \"{second_import}\")\n\
-                 (deny default)\n\
+                 (deny default (with message \"guardrail:default\"))\n\
                  (debug deny)\n\
                  (allow file-read* (subpath \"/generated-read\"))\n",
             )
@@ -271,6 +273,8 @@ mod tests {
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![],
             linux_user_namespaces: UserNamespacePolicy::Deny,
+            linux_audit_denials: false,
+            linux_audit_group: None,
             windows_cache_namespace: None,
             windows_manifest_dir: None,
             windows_acl_verification: guardrail_core::WindowsAclVerification::default(),
@@ -304,6 +308,8 @@ mod tests {
             env: BTreeMap::new(),
             darwin_sandbox_profiles: vec![path.clone()],
             linux_user_namespaces: UserNamespacePolicy::Deny,
+            linux_audit_denials: false,
+            linux_audit_group: None,
             windows_cache_namespace: None,
             windows_manifest_dir: None,
             windows_acl_verification: guardrail_core::WindowsAclVerification::default(),

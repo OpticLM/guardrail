@@ -2,7 +2,7 @@ use std::os::unix::process::CommandExt;
 
 use guardrail_core::{Backend, Error, Result, SandboxChild, SandboxCommand, SandboxConfig};
 
-use crate::{fs, ipc, net, ns, rlimit, seccomp, support};
+use crate::{audit, fs, ipc, net, ns, rlimit, seccomp, support};
 
 /// The Linux sandbox backend.
 pub struct LinuxBackend {
@@ -10,7 +10,9 @@ pub struct LinuxBackend {
     fs_rules: fs::CompiledRules,
     ipc_policy: ipc::Policy,
     net_ruleset: Option<fs::PreparedRuleset>,
-    seccomp_programs: Vec<seccompiler::BpfProgram>,
+    landlock_flags: libc::c_uint,
+    seccomp_filters: Vec<seccomp::Filter>,
+    audit_groups: Option<Vec<libc::gid_t>>,
 }
 
 impl LinuxBackend {
@@ -23,22 +25,35 @@ impl LinuxBackend {
     /// [`Backend::probe_support`]); when `NetworkPolicy::OutboundOnly` is
     /// requested and the kernel lacks Landlock network support (ABI v4,
     /// Linux 6.7+; see the crate-level ABI table);
-    /// or when the host forbids the unprivileged IPC/user/mount namespaces
+    /// when the host forbids the unprivileged IPC/user/mount namespaces
     /// required for every sandbox's IPC isolation (see the crate-level
-    /// namespace documentation).
+    /// namespace documentation); when `linux_audit_denials` is set and the
+    /// host refuses the `personality(2)` audit marker; or when
+    /// `linux_audit_group` is set and the host process cannot add the group
+    /// (see the crate-level auditing documentation).
     pub fn new(config: SandboxConfig) -> Result<Self> {
         Self::probe_support()?;
         let fs_rules = fs::compile(&config.fs)?;
         ns::probe_namespace_support()?;
+        if config.linux_audit_denials {
+            audit::probe_marker_support()?;
+        }
+        let audit_groups = config
+            .linux_audit_group
+            .map(audit::prepare_groups)
+            .transpose()?;
         let ipc_policy = ipc::Policy::new(&config)?;
         let net_ruleset = net::prepare(&config)?;
-        let seccomp_programs = seccomp::build(&config)?;
+        let landlock_flags = fs::restrict_self_flags(audit::enabled(&config), ipc::query_abi()?);
+        let seccomp_filters = seccomp::build(&config)?;
         Ok(Self {
             config,
             fs_rules,
             ipc_policy,
             net_ruleset,
-            seccomp_programs,
+            landlock_flags,
+            seccomp_filters,
+            audit_groups,
         })
     }
 }
@@ -62,6 +77,9 @@ impl Backend for LinuxBackend {
         // plan is CStrings and fixed buffers compiled in `new`. The child
         // adds only its freshly mounted private IPC filesystems to Landlock.
         let limits = self.config.limits;
+        let audit_denials = self.config.linux_audit_denials;
+        let landlock_flags = self.landlock_flags;
+        let audit_groups = self.audit_groups.clone();
         let landlock_ruleset = fs::prepare(&self.fs_rules)?;
         let ipc_ruleset = self.ipc_policy.prepare()?;
         let net_ruleset = self
@@ -69,7 +87,7 @@ impl Backend for LinuxBackend {
             .as_ref()
             .map(fs::PreparedRuleset::try_clone)
             .transpose()?;
-        let seccomp_programs = self.seccomp_programs.clone();
+        let seccomp_filters = self.seccomp_filters.clone();
         let mut namespace = ns::PreparedNamespace::new(&self.fs_rules.mount_plan);
 
         // SAFETY: the closure runs after fork() and before execvp() in the
@@ -84,6 +102,23 @@ impl Backend for LinuxBackend {
                 //     below, and a hardening measure on its own. prctl is
                 //     async-signal-safe.
                 set_no_new_privs()?;
+
+                // (1b) Audit marker, when the policy opted in: tag this
+                //      process tree so host syscall auditing can attribute
+                //      its denials. A refusal fails the spawn, so an opted-in
+                //      sandbox never runs unmarked. The seccomp filters
+                //      applied last pin the marker.
+                if audit_denials {
+                    audit::mark()?;
+                }
+
+                // (1c) Audit group, when configured: the host's supplementary
+                //      groups plus the audit group. Must precede the user
+                //      namespace, which denies setgroups(2) from then on, so
+                //      the sandboxed tree cannot drop the group.
+                if let Some(groups) = &audit_groups {
+                    audit::set_groups(groups)?;
+                }
 
                 // (2) Enter fresh IPC/user/mount namespaces, mount private
                 //     /dev/mqueue and /dev/shm filesystems, and install any
@@ -101,13 +136,13 @@ impl Backend for LinuxBackend {
                 //     Their host counterparts are already hidden and are
                 //     never referenced by these rules.
                 landlock_ruleset.allow_private_ipc()?;
-                landlock_ruleset.restrict_self()?;
+                landlock_ruleset.restrict_self(landlock_flags)?;
 
                 // (4b) Network confinement for OutboundOnly: a second
                 //     parent-built Landlock layer denies explicit TCP bind
                 //     and, on ABI v10+, fixed UDP bind (see crate::net).
                 if let Some(net_ruleset) = &net_ruleset {
-                    net_ruleset.restrict_self()?;
+                    net_ruleset.restrict_self(landlock_flags)?;
                 }
 
                 // (4c) Create the sandbox's IPC domain. On ABI v6+ this
@@ -116,7 +151,7 @@ impl Backend for LinuxBackend {
                 //     Applying this layer last keeps every process and socket
                 //     the child creates within the same or a nested domain.
                 if let Some(ipc_ruleset) = &ipc_ruleset {
-                    ipc_ruleset.restrict_self()?;
+                    ipc_ruleset.restrict_self(landlock_flags)?;
                 }
 
                 // (5) Descriptor hygiene: mark everything above stderr
@@ -127,8 +162,8 @@ impl Backend for LinuxBackend {
 
                 // (6) Seccomp is applied LAST so its filters do not interfere
                 //     with the syscalls above. The BPF programs were built in
-                //     the parent; only prctl(2) + seccomp(2) happen here.
-                seccomp::apply(&seccomp_programs)?;
+                //     the parent; only seccomp(2) happens here.
+                seccomp::apply(&seccomp_filters)?;
 
                 Ok(())
             });

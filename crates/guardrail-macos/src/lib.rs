@@ -30,6 +30,16 @@
 //! [`guardrail_core::Error::Confinement`] on any other path, so untrusted path
 //! strings cannot change the structure of the generated SBPL.
 //!
+//! # Denial log tags
+//!
+//! Guardrail does not read or expose sandbox logs. Each denial made by the
+//! generated profile is tagged in the macOS unified log: the last line of the
+//! denial's message is `guardrail:fs[N]` when the deny rule at index `N` of
+//! [`guardrail_core::SandboxConfig::fs`] refused it, or `guardrail:default`
+//! when no allow rule matched. Filter with
+//! `log stream --style ndjson --predicate 'sender == "Sandbox" AND eventMessage CONTAINS "guardrail:"'`.
+//! Denials made by rules in imported profiles carry no tag.
+//!
 //! # Tips: common macOS runtime grants
 //!
 //! Guardrail generates only the rules you explicitly declare — no implicit

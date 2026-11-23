@@ -49,6 +49,8 @@ pub struct ResourceLimits {
 ///     env: BTreeMap::new(),
 ///     linux_unix_sockets: vec![],
 ///     linux_user_namespaces: UserNamespacePolicy::Deny,
+///     linux_audit_denials: false,
+///     linux_audit_group: None,
 ///     darwin_sandbox_profiles: vec![],
 ///     windows_cache_namespace: None,
 ///     windows_manifest_dir: None,
@@ -100,6 +102,50 @@ pub struct SandboxConfig {
     /// only when the child runs its own nested sandbox (Chromium/Electron,
     /// bubblewrap, rootless containers). See [`UserNamespacePolicy`].
     pub linux_user_namespaces: UserNamespacePolicy,
+    /// Linux-only opt-in: record this sandbox's denials in the host audit
+    /// log. Non-Linux backends ignore this field.
+    ///
+    /// When `true`, the Linux backend asks Landlock and seccomp to record
+    /// their own denials, and marks the sandboxed process tree so the host's
+    /// audit rules can select it for everything else.
+    ///
+    /// The kernel's own records need no audit rule. Each Landlock domain is
+    /// created with `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` on Landlock ABI
+    /// v7 and newer (older kernels cannot log), and the seccomp filters are
+    /// installed with `SECCOMP_FILTER_FLAG_LOG`, except the `ENOSYS` fallback
+    /// filter, which every `clone3` attempt would flood. Every denied probe a
+    /// tool makes then becomes a record. `linux_audit_group` turns these
+    /// records on as well.
+    ///
+    /// The marker is `personality(2)` value `0x3000000`, which syscall audit
+    /// records print as `per=` and an audit rule can match (`-F pers`). Such
+    /// rules also catch the denials Landlock and seccomp cannot record, such
+    /// as the mount-mask denials behind deny-under-allow rules. A seccomp rule
+    /// refuses every `personality(2)` call that would clear the marker, and
+    /// constructing the backend fails with `Error::Unsupported` when the host
+    /// refuses the marker, so an opted-in sandbox never runs unmarked.
+    ///
+    /// Off by default: the records are noisy, and the seccomp rule makes
+    /// `setarch`-style tools fail with `EPERM` inside the sandbox. Guardrail
+    /// never reads audit records and never installs audit rules; both are the
+    /// host's job.
+    pub linux_audit_denials: bool,
+    /// Linux-only: a supplementary group to add to the sandboxed process
+    /// tree as an audit marker. Non-Linux backends ignore this field.
+    ///
+    /// The group is inherited across `fork` and `execve`, the sandboxed tree
+    /// cannot drop it, and an audit rule loaded on the host matches it with
+    /// `-F gid=`. It needs no seccomp rule, so nothing inside the sandbox is
+    /// restricted further, and it works on hosts that refuse the
+    /// `personality(2)` marker of `linux_audit_denials`. Like that field, it
+    /// also turns on Landlock's and seccomp's own denial records. Otherwise
+    /// the two fields are independent; setting both applies both markers.
+    ///
+    /// The host process must be able to add the group, which takes
+    /// `CAP_SETGID` (for example, running as root); constructing the backend
+    /// fails with `Error::Unsupported` otherwise. Choose a group that owns no
+    /// files: membership also grants that group's file permissions.
+    pub linux_audit_group: Option<u32>,
     /// macOS-only Seatbelt profile paths. Non-Darwin backends ignore this field.
     ///
     /// When set, the macOS backend imports these `.sb` profiles before appending

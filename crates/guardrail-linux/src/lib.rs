@@ -177,6 +177,71 @@
 //! inspect a host process in its parent domain. This is separate from the ABI
 //! v6 signal scope in the table above.
 //!
+//! # Auditing denials
+//!
+//! Guardrail does not read or expose denial logs. It asks the kernel to
+//! write them, and marks the sandboxed process tree so the host's own audit
+//! rules can select it.
+//!
+//! Setting either `SandboxConfig::linux_audit_denials` or
+//! `SandboxConfig::linux_audit_group` has Landlock and seccomp record their
+//! own denials; no audit rule is needed. Each Landlock domain is created with
+//! `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` on ABI v7 and newer (older kernels
+//! cannot log and are left unchanged). Without the flag the kernel logs only
+//! what a domain denies before `execve` completes, such as executing the
+//! program itself; that holds with both options off too. Each spawn
+//! creates up to three domains (filesystem, the `OutboundOnly` network layer,
+//! IPC), each with its own `domain=` id, and a `LANDLOCK_ACCESS` record names
+//! the youngest one that denied. The `LANDLOCK_DOMAIN` record that introduces
+//! a domain gives the pid of the spawned child, because the domain is created
+//! in the forked child before `execve`. The seccomp filters are installed
+//! with `SECCOMP_FILTER_FLAG_LOG`, except the `ENOSYS` fallback filter, which
+//! every `clone3` attempt would flood. Their `SECCOMP` records carry
+//! `code=0x50000` for every errno filter and `code=0x30000` for a trap; the
+//! `syscall=` number tells them apart. These records are attributable
+//! without a marker: a Landlock record's domain leads to the child's pid, and
+//! only filters installed with the log flag produce errno and trap records.
+//!
+//! The kernel takes each logging decision from the youngest layer that
+//! denies. A sandboxed process that stacks its own Landlock domain or
+//! seccomp filter with logging off can therefore keep a denial out of these
+//! records, but only for an access its own layer also denies.
+//!
+//! With `SandboxConfig::linux_audit_denials`, the backend also marks the
+//! sandboxed process tree with `personality(2)` value `0x3000000`
+//! (`SHORT_INODE | WHOLE_SECONDS`, flags the kernel never reads) so the
+//! host's own syscall auditing can select it. The value is inherited across
+//! `fork` and `execve`, appears as `per=3000000` in syscall audit records,
+//! and is matchable with an audit rule (`-F pers`). The marker logs nothing
+//! by itself; the host administrator's rules decide what is recorded. With
+//! them, every denial that reaches the kernel
+//! proper is recorded with the path the process used — including the
+//! mount-mask denials (`EROFS`, `EACCES`) that Landlock's own audit records
+//! cannot show. Syscalls refused by the seccomp filters never reach the
+//! audit entry hook, so only seccomp's own records show them.
+//!
+//! The marker is part of the sandbox, not a hint. A seccomp rule refuses,
+//! with `EPERM`, every `personality(2)` call that would drop a marker bit,
+//! so the tree cannot clear it; queries and changes that keep both bits
+//! still work. Tools that overwrite the whole personality word (`setarch`,
+//! `linux32`) therefore fail inside an opted-in sandbox. A host that refuses
+//! `personality(2)` (systemd `LockPersonality=`, some container seccomp
+//! profiles) cannot carry the marker: constructing the backend fails with
+//! `Error::Unsupported`, and a spawn fails rather than run unmarked. With
+//! the option off, nothing is marked and `personality(2)` is unrestricted.
+//!
+//! `SandboxConfig::linux_audit_group` is a second, independent marker for
+//! hosts that can afford privilege. The backend adds the configured
+//! supplementary group to the child before it enters its user namespace,
+//! which takes `CAP_SETGID` in the host process; constructing the backend
+//! fails with `Error::Unsupported` without it. An audit rule loaded on the
+//! host matches the group with `-F gid=`. The group needs no seccomp rule:
+//! the sandbox's user namespace denies `setgroups(2)` permanently, so the
+//! tree cannot drop it, and nothing else inside the sandbox is restricted.
+//! Inside the namespace the group has no mapping and shows as the overflow
+//! group. Membership still grants that group's file permissions, so pick a
+//! group that owns no files.
+//!
 //! # Kernel attack surface and threat model
 //!
 //! Kernel interfaces no shell tool legitimately calls are denied regardless
@@ -221,6 +286,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod audit;
 mod backend;
 mod fs;
 mod ipc;

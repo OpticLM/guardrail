@@ -22,7 +22,9 @@
 //! * Kernel interfaces that legitimate tooling probes and must fall back from
 //!   gracefully — `bpf`, `perf_event_open`, `userfaultfd`, plus namespace
 //!   creation/joining under `UserNamespacePolicy::Deny` — fail with `EPERM`,
-//!   the same errno an unprivileged caller sees from a hardened kernel.
+//!   the same errno an unprivileged caller sees from a hardened kernel. When
+//!   the policy opts in to auditing, a `personality(2)` call that would clear
+//!   the audit marker joins this filter (see `crate::audit`).
 //!
 //! * io_uring is denied with `ENOSYS` unless the network policy is `Full`:
 //!   ring-submitted operations (`IORING_OP_SOCKET`,
@@ -38,6 +40,12 @@
 //! seccomp cannot see a socket fd's family, so under `OutboundOnly` the
 //! family-aware TCP and UDP bind restrictions live in the Landlock network
 //! layer (see `crate::net`).
+//!
+//! When the policy opts in to auditing (see `crate::audit::enabled`), every
+//! filter except the `ENOSYS` one is installed with
+//! `SECCOMP_FILTER_FLAG_LOG`, so the kernel records what it refuses. The
+//! `ENOSYS` filter stays silent: it only steers runtimes to their fallbacks,
+//! and glibc tries `clone3` on every thread and process creation.
 
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -45,8 +53,10 @@ use std::convert::TryInto;
 use guardrail_core::{Error, NetworkPolicy, Result, SandboxConfig, UserNamespacePolicy};
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-    SeccompRule,
+    SeccompRule, sock_filter,
 };
+
+use crate::audit;
 
 /// Action taken when a kernel-attack-surface syscall is attempted. Trap ->
 /// SIGSYS (observable by the parent). Change to
@@ -135,31 +145,60 @@ const IO_URING_SYSCALLS: &[i64] = &[
     libc::SYS_io_uring_register,
 ];
 
-/// Build the seccomp filters for `config`.
-pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<BpfProgram>> {
-    let mut programs = Vec::new();
+/// A compiled filter and whether the kernel should record its denials.
+#[derive(Debug, Clone)]
+pub(crate) struct Filter {
+    program: BpfProgram,
+    log: bool,
+}
 
-    programs.push(compile(violation_rules(config), VIOLATION_ACTION)?);
+// `install` hands seccompiler's instructions to the kernel through libc's
+// `sock_fprog`, so the two instruction types must share one layout.
+const _: () = assert!(
+    size_of::<sock_filter>() == size_of::<libc::sock_filter>()
+        && align_of::<sock_filter>() == align_of::<libc::sock_filter>()
+);
+
+/// Build the seccomp filters for `config`, in installation order.
+pub(crate) fn build(config: &SandboxConfig) -> Result<Vec<Filter>> {
+    let log = audit::enabled(config);
+    let mut filters = Vec::new();
+
+    filters.push(Filter {
+        program: compile(violation_rules(config), VIOLATION_ACTION)?,
+        log,
+    });
 
     let network = network_rules(config.network)?;
     if !network.is_empty() {
-        programs.push(compile(
-            network,
-            SeccompAction::Errno(libc::EAFNOSUPPORT as u32),
-        )?);
+        filters.push(Filter {
+            program: compile(network, SeccompAction::Errno(libc::EAFNOSUPPORT as u32))?,
+            log,
+        });
     }
 
-    programs.push(compile(
-        probed_kernel_rules(config)?,
-        SeccompAction::Errno(libc::EPERM as u32),
-    )?);
+    // This filter holds the audit marker's pin, so logging it also records
+    // every attempt to clear the marker.
+    filters.push(Filter {
+        program: compile(
+            probed_kernel_rules(config)?,
+            SeccompAction::Errno(libc::EPERM as u32),
+        )?,
+        log,
+    });
 
     let enosys = enosys_rules(config);
     if !enosys.is_empty() {
-        programs.push(compile(enosys, SeccompAction::Errno(libc::ENOSYS as u32))?);
+        filters.push(Filter {
+            program: compile(enosys, SeccompAction::Errno(libc::ENOSYS as u32))?,
+            // Never logged: this filter only steers runtimes to their
+            // fallbacks, and glibc tries clone3 on every thread and process
+            // creation.
+            log: false,
+        });
     }
 
-    Ok(programs)
+    Ok(filters)
 }
 
 /// Rules mapped to `VIOLATION_ACTION`: the kernel-attack-surface denylist.
@@ -181,7 +220,8 @@ fn add_kernel_surface_rules(rules: &mut RuleMap, policy: UserNamespacePolicy) {
 }
 
 /// Rules mapped to `Errno(EPERM)`: kernel interfaces that legitimate tools
-/// probe, plus namespace creation/joining under `UserNamespacePolicy::Deny`.
+/// probe, plus namespace creation/joining under `UserNamespacePolicy::Deny`
+/// and, when the policy opts in to auditing, clearing the audit marker.
 fn probed_kernel_rules(config: &SandboxConfig) -> Result<RuleMap> {
     let mut rules = RuleMap::new();
     for &sys in PROBED_KERNEL_SYSCALLS {
@@ -193,7 +233,35 @@ fn probed_kernel_rules(config: &SandboxConfig) -> Result<RuleMap> {
         add_syscall_rule(&mut rules, libc::SYS_clone, newuser);
         add_whole_syscall_rule(&mut rules, libc::SYS_setns);
     }
+    if config.linux_audit_denials {
+        for rule in marker_clearing_rules()? {
+            add_syscall_rule(&mut rules, libc::SYS_personality, rule);
+        }
+    }
     Ok(rules)
+}
+
+/// Rules matching a `personality(2)` argument that would leave the audit
+/// marker incomplete: one rule per way its two bits can be. The query value
+/// `0xffffffff` has both bits set, so it matches none of them and stays
+/// allowed, as does any change that keeps the marker. Dword: the kernel reads
+/// the argument as a 32-bit `unsigned int`.
+fn marker_clearing_rules() -> Result<Vec<SeccompRule>> {
+    const SHORT_INODE: u64 = 0x0100_0000;
+    const WHOLE_SECONDS: u64 = 0x0200_0000;
+    [0, SHORT_INODE, WHOLE_SECONDS]
+        .into_iter()
+        .map(|kept| {
+            let condition = SeccompCondition::new(
+                0, // arg0 = persona
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(u64::from(audit::MARKER)),
+                kept,
+            )
+            .map_err(|e| Error::confinement("seccomp", e))?;
+            SeccompRule::new(vec![condition]).map_err(|e| Error::confinement("seccomp", e))
+        })
+        .collect()
 }
 
 /// A rule matching a `CLONE_NEWUSER`-bearing flags argument. `flags` is arg0
@@ -247,22 +315,46 @@ fn compile(rules: RuleMap, action: SeccompAction) -> Result<BpfProgram> {
     Ok(program)
 }
 
-/// Install `programs` on the current thread. Called inside `pre_exec` in the
-/// freshly forked child: `apply_filter` only issues a `prctl(2)` and a
-/// `seccomp(2)` over the parent-built program, and errors are reduced to
-/// their raw errno so the child never allocates, formats, or takes a lock.
-/// Requires NO_NEW_PRIVS (set earlier in pre_exec).
-pub(crate) fn apply(programs: &[BpfProgram]) -> std::io::Result<()> {
-    for program in programs {
-        seccompiler::apply_filter(program).map_err(|err| match err {
-            // Errno-carrying variants pass their existing io::Error through
-            // unchanged; it already holds a raw OS code and owns no heap.
-            seccompiler::Error::Prctl(e) | seccompiler::Error::Seccomp(e) => e,
-            // The remaining variants (empty filter, TSYNC) cannot occur for
-            // the programs `build` produces and the flags `apply_filter`
-            // passes; map them to a plain errno without formatting anything.
-            _ => std::io::Error::from_raw_os_error(libc::EINVAL),
-        })?;
+/// Install `filters` on the current thread, in order. Called inside
+/// `pre_exec` in the freshly forked child: one raw `seccomp(2)` per
+/// parent-built program, so the child never allocates, formats, or takes a
+/// lock. Requires NO_NEW_PRIVS (set earlier in pre_exec).
+pub(crate) fn apply(filters: &[Filter]) -> std::io::Result<()> {
+    for filter in filters {
+        let flags = if filter.log {
+            libc::SECCOMP_FILTER_FLAG_LOG
+        } else {
+            0
+        };
+        install(&filter.program, flags)?;
+    }
+    Ok(())
+}
+
+/// `seccomp(SECCOMP_SET_MODE_FILTER, flags, program)`. Raw, because
+/// seccompiler's `apply_filter` cannot pass `SECCOMP_FILTER_FLAG_LOG`.
+/// Async-signal-safe.
+fn install(program: &[sock_filter], flags: libc::c_ulong) -> std::io::Result<()> {
+    let Ok(len) = u16::try_from(program.len()) else {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    let fprog = libc::sock_fprog {
+        len,
+        filter: program.as_ptr().cast::<libc::sock_filter>().cast_mut(),
+    };
+    // SAFETY: `fprog` points at `len` instructions of the layout the kernel
+    // expects (asserted above), valid for the duration of the call; the
+    // kernel copies the program and never writes through the pointer.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            flags,
+            &raw const fprog,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -360,6 +452,21 @@ mod tests {
             linux_user_namespaces: user_namespaces,
             ..SandboxConfig::default()
         }
+    }
+
+    #[test]
+    fn personality_is_pinned_only_when_auditing() {
+        let audited = SandboxConfig {
+            linux_audit_denials: true,
+            ..SandboxConfig::default()
+        };
+        let rules = probed_kernel_rules(&audited).expect("rules");
+        assert_eq!(rules.get(&libc::SYS_personality).map(Vec::len), Some(3));
+        #[cfg(target_arch = "x86_64")]
+        assert!(rules.contains_key(&(libc::SYS_personality | X32_SYSCALL_BIT)));
+
+        let rules = probed_kernel_rules(&SandboxConfig::default()).expect("rules");
+        assert!(!rules.contains_key(&libc::SYS_personality));
     }
 
     #[test]
@@ -484,10 +591,36 @@ mod tests {
 
     #[test]
     fn most_permissive_config_still_installs_the_unconditional_filters() {
-        let programs =
+        let filters =
             build(&config(NetworkPolicy::Full, UserNamespacePolicy::Allow)).expect("filters");
         // Trap (kernel surface) and EPERM (bpf/perf/userfaultfd) remain; the
         // EAFNOSUPPORT and ENOSYS filters have nothing to deny.
-        assert_eq!(programs.len(), 2);
+        assert_eq!(filters.len(), 2);
+    }
+
+    #[test]
+    fn only_the_enosys_filter_stays_unlogged_when_opted_in() {
+        let personality = SandboxConfig {
+            linux_audit_denials: true,
+            ..SandboxConfig::default()
+        };
+        let group = SandboxConfig {
+            linux_audit_group: Some(4242),
+            ..SandboxConfig::default()
+        };
+        for audited in [personality, group] {
+            let filters = build(&audited).expect("filters");
+            // Trap, EAFNOSUPPORT, EPERM, ENOSYS under the default policy.
+            assert_eq!(filters.len(), 4);
+            let (enosys, logged) = filters.split_last().expect("filters");
+            assert!(!enosys.log, "the ENOSYS filter must never be logged");
+            assert!(logged.iter().all(|filter| filter.log));
+        }
+    }
+
+    #[test]
+    fn no_filter_is_logged_by_default() {
+        let filters = build(&SandboxConfig::default()).expect("filters");
+        assert!(filters.iter().all(|filter| !filter.log));
     }
 }
