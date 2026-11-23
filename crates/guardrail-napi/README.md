@@ -570,8 +570,8 @@ This section is macOS-specific. It was tested on Darwin 24.6.0 arm64 with Node
 24.15.0, pnpm 11.7.0, Cargo 1.96.0, Go 1.26.4, Git 2.53.0, jj 0.43.0, and
 GitHub CLI 2.96.0.
 
-macOS uses Seatbelt profiles. Guardrail still generates a literal `(deny
-default)` profile from your `fs` and `network` options, but macOS
+macOS uses Seatbelt profiles. Guardrail still generates a `(deny default)`
+profile from your `fs` and `network` options, but macOS
 developer tools also need a few runtime operations that are not filesystem
 paths. Use `darwinSandboxProfiles` to import those explicit `.sb` grants.
 
@@ -1457,6 +1457,63 @@ the `exe` path is shortened):
 type=SYSCALL msg=audit(1794788855.070:25): arch=c000003e syscall=257 per=3000000 success=no exit=-13 a0=ffffff9c a1=7ffd61f342e8 a2=80241 a3=1b6 items=1 ppid=1623 pid=1672 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm="guardrail-probe" exe=".../guardrail-probe" key="guardrail"
 type=CWD msg=audit(1794788855.070:25): cwd="/home/user/guardrail/crates/guardrail-linux"
 type=PATH msg=audit(1794788855.070:25): item=0 name="/tmp/.tmptWc5AG/" inode=582106 dev=fe:00 mode=040755 ouid=0 ogid=0 rdev=00:00 nametype=PARENT cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0
+```
+
+### macOS
+
+Nothing needs to be turned on. macOS writes Seatbelt denials to the unified
+log, and guardrail tags each denial its generated profile makes. The tag is
+the last line of the denial's message:
+
+- `guardrail:fs[N]`: the deny rule at index `N` of your `fs` array (counting
+  from 0) refused the access. When several deny rules cover it, `N` is the
+  last of them, as the last rule decides.
+- `guardrail:default`: no allow rule matched. This covers a path `fs` does not
+  grant, a connection `network` does not allow, and everything else Seatbelt
+  denies by default, such as Mach lookups, IPC, and sysctl reads.
+
+Read the log as an admin user; `sudo` is not needed:
+
+```sh
+log stream --style ndjson --predicate 'sender == "Sandbox" AND eventMessage CONTAINS "guardrail:"'
+log show --last 5m --predicate 'sender == "Sandbox" AND eventMessage CONTAINS "guardrail:"'
+```
+
+The `sender` clause leaves out the `log` tool's own records, which quote the
+predicate. Do not filter on the subsystem `com.apple.sandbox.reporting`
+instead: `log show` prints it, but records in a live `log stream` carry no
+subsystem, so the stream matches nothing. Because the tag is a line of its
+own, a line-oriented filter
+over the default or `compact` output sees the denial and its tag on separate
+lines. With `--style ndjson` each denial is one record whose `eventMessage`
+ends in `\nguardrail:…`.
+
+- The tag names the rule, not the sandbox. Attribute a denial to a sandbox by
+  the process name and pid in the message.
+- The kernel folds repeated denials into `N duplicate reports for Sandbox: …`
+  records. These keep the tag, so counting records gives a lower bound.
+- Denials made by rules in a `darwinSandboxProfiles` import carry no tag.
+  Neither does Seatbelt's refusal to execute a setuid binary such as `sudo`
+  or `ps`, which happens in every sandbox whatever the profile says; it is
+  logged as `deny(1) forbidden-exec-sugid`.
+- Expect routine records. The dynamic loader probes paths when every process
+  starts, such as reading `/System/Volumes/Preboot/Cryptexes/OS` and writing
+  `/dev/dtracehelper`. Unless your policy grants them, each spawn logs them as
+  `guardrail:default`.
+
+Tested result: macOS 15.8.2 and 26.7.2, arm64, through the Rust backend. A
+probe ran under `fs` rules equivalent to `[{ kind: 'read-allow', path:
+'/private/tmp/guardrail-demo' }, { kind: 'read-deny', path:
+'/private/tmp/guardrail-demo/secret.txt' }, …]`, where the rest are the grants
+the probe needs, plus an imported runtime profile. One spawn read
+`secret.txt`, another a file outside every grant. `log show --style compact`
+printed:
+
+```text
+2026-11-23 15:23:39.554 E  kernel[0:2ba7] [com.apple.sandbox.reporting:violation] Sandbox: guardrail-macos-probe(2866) deny(1) file-read-data /private/tmp/guardrail-demo/secret.txt
+guardrail:fs[1]
+2026-11-23 15:23:39.569 E  kernel[0:2baa] [com.apple.sandbox.reporting:violation] Sandbox: guardrail-macos-probe(2867) deny(1) file-read-data /private/tmp/guardrail-outside.txt
+guardrail:default
 ```
 
 ## Platform Capability Matrix

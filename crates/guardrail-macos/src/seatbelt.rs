@@ -254,7 +254,7 @@ mod tests {
                 "(version 1)\n\
                  (import \"{first_import}\")\n\
                  (import \"{second_import}\")\n\
-                 (deny default)\n\
+                 (deny default (with message \"guardrail:default\"))\n\
                  (debug deny)\n\
                  (allow file-read* (subpath \"/generated-read\"))\n",
             )

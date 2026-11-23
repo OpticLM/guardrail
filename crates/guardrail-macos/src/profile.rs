@@ -2,6 +2,16 @@ use std::path::{Component, Path, PathBuf};
 
 use guardrail_core::{Error, FsAccess, NetworkPolicy, Result, SandboxConfig};
 
+/// Tag carried by denials that no allow rule matched. Every tag starts with
+/// `guardrail:` so one unified-log predicate finds them all.
+const DEFAULT_DENY_TAG: &str = "guardrail:default";
+
+/// Tag carried by denials from the deny rule at `index` of
+/// `SandboxConfig::fs`.
+fn rule_tag(index: usize) -> String {
+    format!("guardrail:fs[{index}]")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SeatbeltProfile {
     pub(crate) source: String,
@@ -27,26 +37,55 @@ pub(crate) fn build_with_imports(
 }
 
 pub(crate) fn build_policy_rules(config: &SandboxConfig) -> Result<String> {
-    let mut source = String::from("(deny default)\n(debug deny)\n");
+    let mut source =
+        format!("(deny default (with message \"{DEFAULT_DENY_TAG}\"))\n(debug deny)\n");
 
     for (index, rule) in config.fs.iter().enumerate() {
         let later_rules = &config.fs[index + 1..];
         match rule {
             FsAccess::ReadAllow(path) => {
                 let exclusions = read_deny_paths(later_rules);
-                push_path_rules(&mut source, "allow", &["file-read*"], path, &exclusions)?;
+                push_path_rules(
+                    &mut source,
+                    "allow",
+                    &["file-read*"],
+                    path,
+                    &exclusions,
+                    None,
+                )?;
             }
             FsAccess::ReadDeny(path) => {
                 let exclusions = read_allow_paths(later_rules);
-                push_path_rules(&mut source, "deny", &["file-read*"], path, &exclusions)?;
+                push_path_rules(
+                    &mut source,
+                    "deny",
+                    &["file-read*"],
+                    path,
+                    &exclusions,
+                    Some(&rule_tag(index)),
+                )?;
             }
             FsAccess::WriteAllow(path) => {
                 let exclusions = write_deny_paths(later_rules);
-                push_path_rules(&mut source, "allow", &["file-write*"], path, &exclusions)?;
+                push_path_rules(
+                    &mut source,
+                    "allow",
+                    &["file-write*"],
+                    path,
+                    &exclusions,
+                    None,
+                )?;
             }
             FsAccess::WriteDeny(path) => {
                 let exclusions = write_allow_paths(later_rules);
-                push_path_rules(&mut source, "deny", &["file-write*"], path, &exclusions)?;
+                push_path_rules(
+                    &mut source,
+                    "deny",
+                    &["file-write*"],
+                    path,
+                    &exclusions,
+                    Some(&rule_tag(index)),
+                )?;
             }
             FsAccess::ExecuteAllow(path) => {
                 let exclusions = execute_deny_paths(later_rules);
@@ -56,6 +95,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> Result<String> {
                     &["file-map-executable", "process-exec*"],
                     path,
                     &exclusions,
+                    None,
                 )?;
             }
             FsAccess::ExecuteDeny(path) => {
@@ -66,6 +106,7 @@ pub(crate) fn build_policy_rules(config: &SandboxConfig) -> Result<String> {
                     &["file-map-executable", "process-exec*"],
                     path,
                     &exclusions,
+                    Some(&rule_tag(index)),
                 )?;
             }
         }
@@ -95,9 +136,10 @@ fn push_path_rules(
     operations: &[&str],
     path: &Path,
     exclusions: &[PathBuf],
+    message: Option<&str>,
 ) -> Result<()> {
     for path in path_variants(path) {
-        push_path_rule(source, action, operations, &path, exclusions)?;
+        push_path_rule(source, action, operations, &path, exclusions, message)?;
     }
     Ok(())
 }
@@ -108,10 +150,14 @@ fn push_path_rule(
     operations: &[&str],
     path: &Path,
     exclusions: &[PathBuf],
+    message: Option<&str>,
 ) -> Result<()> {
     for operation in operations {
         source.push_str(&format!("({action} {operation} "));
         push_subpath_filter(source, path, exclusions)?;
+        if let Some(message) = message {
+            source.push_str(&format!(" (with message \"{message}\")"));
+        }
         source.push_str(")\n");
     }
     Ok(())
@@ -300,7 +346,7 @@ mod tests {
 
         assert_eq!(
             profile.source,
-            "(version 1)\n(deny default)\n(debug deny)\n"
+            "(version 1)\n(deny default (with message \"guardrail:default\"))\n(debug deny)\n"
         );
     }
 
@@ -335,7 +381,7 @@ mod tests {
                 "(version 1)\n",
                 "(import \"/tmp/base-one.sb\")\n",
                 "(import \"/tmp/base-two.sb\")\n",
-                "(deny default)\n",
+                "(deny default (with message \"guardrail:default\"))\n",
                 "(debug deny)\n",
                 "(allow file-read* (subpath \"/tmp/in\"))\n",
             ],
@@ -490,11 +536,9 @@ mod tests {
         };
         let profile = build(&config).unwrap();
 
-        assert!(
-            profile
-                .source
-                .contains("(deny file-read* (subpath \"/tmp/secret\"))\n")
-        );
+        assert!(profile.source.contains(
+            "(deny file-read* (subpath \"/tmp/secret\") (with message \"guardrail:fs[0]\"))\n"
+        ));
     }
 
     #[test]
@@ -542,11 +586,9 @@ mod tests {
         let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(deny file-read*"));
-        assert!(
-            profile
-                .source
-                .contains("(deny file-write* (subpath \"/tmp/work\"))\n")
-        );
+        assert!(profile.source.contains(
+            "(deny file-write* (subpath \"/tmp/work\") (with message \"guardrail:fs[0]\"))\n"
+        ));
     }
 
     #[test]
@@ -599,16 +641,12 @@ mod tests {
         let profile = build(&config).unwrap();
 
         assert!(!profile.source.contains("(deny file-read*"));
-        assert!(
-            profile
-                .source
-                .contains("(deny file-map-executable (subpath \"/tmp/bin\"))\n")
-        );
-        assert!(
-            profile
-                .source
-                .contains("(deny process-exec* (subpath \"/tmp/bin\"))\n")
-        );
+        assert!(profile.source.contains(
+            "(deny file-map-executable (subpath \"/tmp/bin\") (with message \"guardrail:fs[0]\"))\n"
+        ));
+        assert!(profile.source.contains(
+            "(deny process-exec* (subpath \"/tmp/bin\") (with message \"guardrail:fs[0]\"))\n"
+        ));
     }
 
     #[test]
@@ -638,7 +676,7 @@ mod tests {
             &profile.source,
             &[
                 "(version 1)\n",
-                "(deny default)\n",
+                "(deny default (with message \"guardrail:default\"))\n",
                 "(debug deny)\n",
                 "(allow file-read* (require-all (subpath \"/tmp\")",
                 "(require-not (subpath \"/tmp/secret\"))",
@@ -648,6 +686,75 @@ mod tests {
                 "(allow file-write* (subpath \"/tmp/out\"))\n",
             ],
         );
+    }
+
+    #[test]
+    fn deny_rules_carry_their_rule_index() {
+        let config = SandboxConfig {
+            fs: vec![
+                FsAccess::ReadAllow("/tmp".into()),
+                FsAccess::ReadDeny("/tmp/secret".into()),
+                FsAccess::WriteDeny("/tmp/locked".into()),
+                FsAccess::ExecuteDeny("/tmp/bin".into()),
+                FsAccess::ReadAllow("/tmp/secret/public".into()),
+            ],
+            ..empty_config()
+        };
+        let profile = build(&config).unwrap();
+
+        // The later allow gives the read deny an exclusion filter, so the tag
+        // is checked after `(require-all ...)` as well as after `(subpath ...)`.
+        assert!(
+            profile
+                .source
+                .contains("(deny file-read* (require-all (subpath \"/tmp/secret\")")
+        );
+        for (prefix, tag) in [
+            ("(deny file-read* ", "guardrail:fs[1]"),
+            ("(deny file-write* ", "guardrail:fs[2]"),
+            ("(deny file-map-executable ", "guardrail:fs[3]"),
+            ("(deny process-exec* ", "guardrail:fs[3]"),
+        ] {
+            let suffix = format!(" (with message \"{tag}\"))");
+            let lines = profile
+                .source
+                .lines()
+                .filter(|line| line.starts_with(prefix))
+                .collect::<Vec<_>>();
+            assert!(
+                !lines.is_empty(),
+                "no {prefix:?} line in:\n{}",
+                profile.source
+            );
+            for line in lines {
+                assert!(line.ends_with(&suffix), "{line:?} lacks {suffix:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn allow_rules_are_untagged() {
+        let config = SandboxConfig {
+            fs: vec![
+                FsAccess::ReadAllow("/tmp".into()),
+                FsAccess::ReadDeny("/tmp/secret".into()),
+                FsAccess::WriteAllow("/tmp/out".into()),
+                FsAccess::ExecuteAllow("/tmp/bin".into()),
+            ],
+            network: NetworkPolicy::Full,
+            ..empty_config()
+        };
+        let profile = build(&config).unwrap();
+
+        let allow_lines = profile
+            .source
+            .lines()
+            .filter(|line| line.starts_with("(allow "))
+            .collect::<Vec<_>>();
+        assert!(!allow_lines.is_empty());
+        for line in allow_lines {
+            assert!(!line.contains("with message"), "{line:?} is tagged");
+        }
     }
 
     #[test]
