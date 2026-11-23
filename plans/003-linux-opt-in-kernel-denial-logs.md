@@ -30,6 +30,38 @@
 - **Depends on**: plans/002-linux-audit-marker.md (a code dependency: 002 adds the `linux_audit_denials` field this plan reads; both plans also edit `seccomp.rs`, the `pre_exec` closure, and the README's `## Auditing Denials` section)
 - **Category**: direction
 - **Planned at**: commit `a5c8219`, 2026-11-14; revised 2026-11-15
+- **Outcome**: implemented 2026-11-23 on top of `97b95b4`. It was verified
+  with a live audit daemon (kernel 6.18.44 x86_64, Landlock ABI 7, auditd
+  3.1.2). The implementation deviates from the steps below:
+  - **Either marker turns the logging on.** The logging follows
+    `audit::enabled(config)`, which is `linux_audit_denials ||
+    linux_audit_group.is_some()`. The plan tied it to
+    `linux_audit_denials` alone. See "Decisions recorded" in
+    `plans/README.md`.
+  - **One install path.** Every seccomp filter is now installed through a
+    single raw `seccomp(2)` wrapper (`seccomp::install`) with flags `0` or
+    `SECCOMP_FILTER_FLAG_LOG`; the plan kept `seccompiler::apply_filter` for
+    unlogged filters. With the option off, the only change at the syscall
+    level is that seccompiler's redundant per-filter
+    `prctl(PR_SET_NO_NEW_PRIVS)` is gone, since `pre_exec` sets it first. In
+    exchange, the whole suite exercises the path the logged filters use. The
+    done criterion "`seccompiler::apply_filter` ≥ 1" therefore no longer
+    holds, by design.
+  - **The plan's `code=` values were wrong.** The kernel prints only the
+    action bits: `code=0x50000` for every errno filter (not `0x50061` or
+    `0x50001`) and `code=0x30000 sig=0` for a trap. The `syscall=` number
+    tells the filters apart. This was checked in `__seccomp_filter` and on
+    the live host.
+  - **Six integration tests instead of four.** The extra two are a Landlock
+    write denial with logging on, and a fork that still falls back past the
+    unlogged `ENOSYS` filter.
+  - **Facts found on the live host,** documented in the README:
+    - `SECCOMP` records reach the kernel log even while auditing is off.
+      Landlock records need auditing enabled.
+    - With the option off, the kernel still logs a Landlock denial made
+      before `execve` completes, such as executing the program.
+    - `status=deallocated denials=N` counts every denial, including ones
+      that were not logged.
 
 ## Why this matters
 

@@ -22,7 +22,7 @@ audit — **denial observability** — with a deliberately minimal shape:
 |---|---|---|
 | macOS | `(with message "guardrail:fs[N]")` / `"guardrail:default"` on every generated Seatbelt deny rule | yes |
 | Linux | `personality(2)` value `0x3000000` on the sandboxed process tree, shown as `per=` in syscall audit records and matchable by an audit rule. A seccomp rule pins it, so the tree cannot clear it | opt-in (`linux_audit_denials`); silent until the host installs audit rules |
-| Linux | Landlock and seccomp record their own denials | opt-in (the same `linux_audit_denials`) |
+| Linux | Landlock and seccomp record their own denials | opt-in (either `linux_audit_denials` or `linux_audit_group`) |
 | Linux | A supplementary group on the sandboxed process tree, matchable by an audit rule (`-F gid=`). Needs `CAP_SETGID` in the host process | opt-in (`linux_audit_group`) |
 | Windows | — | deferred |
 
@@ -32,7 +32,7 @@ audit — **denial observability** — with a deliberately minimal shape:
 |------|-------|----------|--------|------------|--------|
 | 001  | macOS denials name the rule that caused them in the unified log | P1 | S | — | TODO |
 | 002  | Opted-in Linux sandboxes carry a pinned marker the kernel audit trail can filter on | P1 | M | — | DONE |
-| 003  | Opted-in Linux sandboxes have Landlock and seccomp record their own denials | P2 | S | 002 | TODO |
+| 003  | Opted-in Linux sandboxes have Landlock and seccomp record their own denials | P2 | S | 002 | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
@@ -45,7 +45,9 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   the directory until `mkdir /dev/mqueue` is run as root — see plan 002's
   "Host requirement").
 - Plan 002 was implemented on 2026-11-16, including its live audit-daemon
-  step. Plan 003's code blocks have not been built or run.
+  step. Plan 003 was implemented on 2026-11-23 and checked against a live
+  audit daemon; its deviations from the written plan are listed in its
+  "Outcome" section.
 - Two host traps found while running the Linux suite. The tests that call
   `common::landlock_enforced()` read `/sys/kernel/security/lsm` and skip
   silently when securityfs is not mounted
@@ -102,6 +104,17 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   and a live audit daemon: an audit rule's `gid=` matches supplementary
   groups by kernel gid, the rule selected only sandboxes carrying the group,
   and the group survived the namespace setup and `execve`.
+- **Landlock and seccomp self-logging follows either marker** (plan 003).
+  Decided 2026-11-23; the maintainer delegated the choice with "best DX,
+  simplest, from first principles". Setting `linux_audit_denials` or
+  `linux_audit_group` turns the self-logging on. This answers the open
+  question plan 003 left. The self-logged records do not depend on a
+  marker: a `LANDLOCK_DOMAIN` record gives the spawned child's pid, and a
+  `SECCOMP` record carries neither `per=` nor the group. Tying the logging to
+  the personality marker would have blocked it on hosts that refuse
+  `personality(2)` even when they can set a group. Either option now works
+  on its own, the two cost the same, and no field was added. The
+  personality pin stays with `linux_audit_denials` alone.
 
 ## Known gaps after all three plans
 
@@ -128,12 +141,13 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   but no errno is returned, so no errno-keyed audit rule records the attempt.
   This predates these plans (checked on `a5c8219`, 2026-11-16) and is not
   addressed by them.
-- Linux: Landlock and seccomp self-logging (plan 003) sits under
-  `linux_audit_denials`, which also requires the `personality(2)` marker. A
-  host that refuses personality therefore cannot get the self-logging, even
-  when it uses `linux_audit_group` as its marker. Open question for the
-  maintainer: whether a configured group should stand in for the personality
-  marker there.
+- Linux: Landlock and seccomp self-logging (plan 003) needs one of the two
+  markers. A host that refuses `personality(2)` and also cannot grant
+  `CAP_SETGID` gets no records at all.
+- Linux: seccomp's records do not carry `per=` and come with no `SYSCALL`
+  record. They are attributed by `pid`/`exe`, and only filters installed
+  with the log flag produce errno and trap records. They reach the kernel log
+  even while host auditing is off.
 - Linux: the audit queue drops records under load, so counts are a lower
   bound, and a process can provoke that deliberately. Queue size and
   overflow behavior are host audit settings.
