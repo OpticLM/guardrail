@@ -20,6 +20,45 @@
 - **Depends on**: none
 - **Category**: direction
 - **Planned at**: commit `a5c8219`, 2026-11-14
+- **Outcome**: implemented 2026-11-23 on top of `f92cb91`. No Mac was at
+  hand, so every step ran on GitHub-hosted macOS 15.8.2 and 26.7.2 arm64
+  runners through a temporary workflow, removed afterwards. In
+  `crates/guardrail-macos` the drift check found only the `linux_audit_*`
+  fields added to the test config literals, which shifted the line numbers
+  below; the README had gained `## Auditing Denials` from plans 002 and 003. Baseline: 41 tests passed; after:
+  43. The implementation deviates from the steps below:
+  - **Two new tests instead of three.** The plan's
+    `execute_deny_tags_both_operations` would have repeated the updated
+    assertion in `execute_deny_emits_only_executable_deny_rules`. Instead,
+    `deny_rules_carry_their_rule_index` adds an `ExecuteDeny` at index 3, so
+    it checks all three deny kinds, both execute operations, every path
+    variant of each rule, and a deny that carries an exclusion filter.
+  - **The documented predicate is scoped to the Sandbox sender:**
+    `sender == "Sandbox" AND eventMessage CONTAINS "guardrail:"`. The plan's
+    bare `eventMessage CONTAINS "guardrail:"` also matches the `log` tool's
+    own "log run noninteractively" records, which quote the predicate. A
+    `subsystem == "com.apple.sandbox.reporting"` clause was tried first: it
+    works in `log show`, but kernel records in a live `log stream` have an
+    empty subsystem, so the stream matched nothing.
+  - **The tag is the message's last line, not the end of its first line.**
+    Line-oriented filters see the denial and the tag on separate lines, so
+    the README recommends `--style ndjson`.
+  - **`## Auditing Denials` already existed** (plans 002 and 003). The
+    `### macOS` subsection was added after the Linux one.
+  - **Facts found on the runners,** documented in the README where they
+    concern users:
+    - `sandbox-exec` rejects an unknown modifier (`unbound variable`), so
+      the integration tests are a real syntax gate. The modifier is accepted
+      before or after the filter.
+    - A tagged deny rule's message wins over the default's when both apply.
+      When two deny rules of the same kind cover a path, the later rule's
+      tag is reported, in either declaration order. Network, IPC, and dyld
+      startup probes carry `guardrail:default`.
+    - `N duplicate reports for Sandbox: …` records keep the tag.
+    - Seatbelt refuses to execute setuid binaries (`sudo`, `ps`) even under
+      `(allow default)`. The refusal is logged as `deny(1)
+      forbidden-exec-sugid` and carries no tag.
+    - `log show` and `log stream` need no `sudo` for an admin user.
 
 ## Why this matters
 

@@ -30,7 +30,7 @@ audit — **denial observability** — with a deliberately minimal shape:
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001  | macOS denials name the rule that caused them in the unified log | P1 | S | — | TODO |
+| 001  | macOS denials name the rule that caused them in the unified log | P1 | S | — | DONE |
 | 002  | Opted-in Linux sandboxes carry a pinned marker the kernel audit trail can filter on | P1 | M | — | DONE |
 | 003  | Opted-in Linux sandboxes have Landlock and seccomp record their own denials | P2 | S | 002 | DONE |
 
@@ -44,6 +44,10 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   `/dev/mqueue` directory; the container these plans were written in lacks
   the directory until `mkdir /dev/mqueue` is run as root — see plan 002's
   "Host requirement").
+- Plan 001 was implemented on 2026-11-23 and verified on GitHub-hosted
+  macOS 15.8.2 and 26.7.2 arm64 runners through a temporary workflow, since
+  no Mac was at hand; the workflow was removed afterwards. Its deviations
+  from the written plan are listed in its "Outcome" section.
 - Plan 002 was implemented on 2026-11-16, including its live audit-daemon
   step. Plan 003 was implemented on 2026-11-23 and checked against a live
   audit daemon; its deviations from the written plan are listed in its
@@ -151,6 +155,14 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 - Linux: the audit queue drops records under load, so counts are a lower
   bound, and a process can provoke that deliberately. Queue size and
   overflow behavior are host audit settings.
+- macOS: the tag names the rule, not the sandbox. Concurrent sandboxes are
+  told apart by the process name and pid in the message, until a
+  host-supplied label is added.
+- macOS: denials made by rules in imported profiles carry no tag, and
+  neither does Seatbelt's refusal to execute setuid binaries, which no
+  profile rule decides.
+- macOS: the kernel folds repeated denials into `N duplicate reports`
+  records. They keep the tag, so counting records gives a lower bound.
 - Windows: nothing. See below.
 
 ## What was not audited
